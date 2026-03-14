@@ -90,11 +90,11 @@ impl Executor {
         self.attempted.insert(attempt_key, std::time::Instant::now());
 
         // Fetch current market price from orderbook.
-        // If the price moved more than 2% against us, skip (was 10% — too much slippage).
+        // Skip if price moved >25% against us since the wallet bought.
         let exec_price = if !signal.token_id.is_empty() {
             match self.client.get_best_ask(&signal.token_id).await {
                 Ok(ask) if ask > 0.0 && ask < 1.0 => {
-                    if ask > signal.price * 1.10 {
+                    if ask > signal.price * 1.25 {
                         info!(
                             "SKIP: price moved too much for {} (was {:.0}ct, now {:.0}ct)",
                             signal.market_title,
