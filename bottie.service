@@ -1,0 +1,33 @@
+[Unit]
+Description=Bottie — Polymarket copy trading bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bottie
+Group=bottie
+WorkingDirectory=/opt/bottie
+
+# Load secrets from .env file (not visible in process list)
+EnvironmentFile=/opt/bottie/.env
+
+ExecStart=/opt/bottie/bottie --config /opt/bottie/config.yaml
+
+# Auto-restart on crash, wait 5s between attempts
+Restart=on-failure
+RestartSec=5s
+
+# Logging goes to journald — use: journalctl -u bottie -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bottie
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/bottie/data
+
+[Install]
+WantedBy=multi-user.target

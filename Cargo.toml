@@ -1,0 +1,52 @@
+[package]
+name = "bottie"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bottie"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "fs"] }
+futures-util = "0.3"
+
+# HTTP
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Ethereum / EIP-712 / signing
+alloy-primitives = "0.8"
+alloy-sol-types = "0.8"
+alloy-signer = "0.8"
+alloy-signer-local = "0.8"
+
+# Crypto
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+hex = "0.4"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Config
+dotenvy = "0.15"
+notify = { version = "6", features = ["macos_fsevent"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }

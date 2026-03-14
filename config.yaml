@@ -1,0 +1,171 @@
+polymarket:
+  host: "https://clob.polymarket.com"
+  chain_id: 137
+  signature_type: 2
+
+copy_trading:
+  enabled: true
+  poll_interval_seconds: 15
+  watchlist:
+    # === TIER 1: LEADERBOARD TOP — bewezen edge, hoge ROI ===
+
+    # moisturizer: $72K portfolio | 2,361 trades | largest win $62K | joined nov 2025
+    - address: "0x17559efac103ac7f361be37ec0b93888d4c55aac"
+      name: "moisturizer"
+      weight: 1.0
+      sports: ["all"]
+
+
+    # SecondWindCapital: +$1.65M all-time | 51 trades | Tennis/UFC/Politiek
+    - address: "0x8c80d213c0cbad777d06ee3f58f6ca4bc03102c3"
+      name: "SecondWindCapital"
+      weight: 1.0
+      sports: ["all"]
+
+    # UAEVALORANTFAN: 792 predictions | NBA/Valorant/Bundesliga | $148K posities | scout 2026-03-14
+    - address: "0xc65ca4755436f82d8eb461e65781584b8cadea39"
+      name: "UAEVALORANTFAN"
+      weight: 0.85
+      sports: ["all"]
+
+    # HorizonSplendidView: #1 leaderboard | UCL mega-bets
+    - address: "0x02227b8f5a9636e895607edd3185ed6ee5598ff7"
+      name: "HorizonSplendidView"
+      weight: 0.85
+      sports: ["all"]
+
+    # FTWUTB: +$464K | 75 trades | MLS/Liga MX/UFC/Politiek — meeste diversiteit
+    - address: "0xdb2223cc5202a4718c3069f577ec971f71c96478"
+      name: "FTWUTB"
+      weight: 0.8
+      sports: ["all"]
+
+    # GamblingIsAllYouNeed: 100% WR | sharpe 1.84 | $551K PnL | 500 closed | 96% sport
+    - address: "0x507e52ef684ca2dd91f90a9d26d149dd3288beae"
+      name: "GamblingIsAllYouNeed"
+      weight: 1.0
+      sports: ["all"]
+
+    # sovereign2013: 100% WR | sharpe 1.81 | $361K PnL | 500 closed | 95% sport
+    - address: "0xee613b3fc183ee44f9da9c05f53e2da107e3debf"
+      name: "sovereign2013"
+      weight: 1.0
+      sports: ["all"]
+
+    # RN1: 100% WR | sharpe 1.45 | $290K PnL | 500 closed | 91% sport
+    - address: "0x2005d16a84ceefa912d4e380cd32e7ff827875ea"
+      name: "RN1"
+      weight: 1.0
+      sports: ["all"]
+
+    # === TIER 2: CONSISTENT PROFIT — breed actief ===
+
+    # Avonmore: +$1.46M | 393 trades | EU football (algo-stijl accumulatie)
+    - address: "0xb90494d9a5d8f71f1930b2aa4b599f95c344c255"
+      name: "Avonmore"
+      weight: 0.6
+      sports: ["all"]
+
+    # Countryside: +$1.25M | 434 trades | NBA spreads
+    - address: "0xbddf61af533ff524d27154e589d2d7a81510c684"
+      name: "Countryside"
+      weight: 0.55
+      sports: ["all"]
+
+    # HedgeMaster88: +$823K | 170 trades | Niche soccer (A-League, Serie B, Liga MX)
+    - address: "0x036c159d5a348058a81066a76b89f35926d4178d"
+      name: "HedgeMaster88"
+      weight: 0.45
+      sports: ["all"]
+
+    # === TIER 3: HOOG VOLUME, WINSTGEVEND ===
+
+    # wokerjoesleeper: +$687K | 42K trades | Breed gespreide politiek/sports
+    - address: "0x63d43bbb87f85af03b8f2f9e2fad7b54334fa2f1"
+      name: "wokerjoesleeper"
+      weight: 0.35
+      sports: ["all"]
+
+    # influenz.eth: +$592K | 35K trades | OG account Jan 2025, sterk track record
+    - address: "0xe8dd7741ccb12350957ec71e9ee332e0d1e6ec86"
+      name: "influenz.eth"
+      weight: 0.35
+      sports: ["all"]
+
+    # Cannae: +$282K | 11.6K trades | nu $402K open posities
+    - address: "0x7ea571c40408f340c1c8fc8eaacebab53c1bde7b"
+      name: "Cannae"
+      weight: 0.3
+      sports: ["all"]
+
+    # ewelmealt: 100% WR | sharpe 1.16 | $814K PnL | 13 closed trades | observe only
+    - address: "0x07921379f7b31ef93da634b688b2fe36897db778"
+      name: "ewelmealt"
+      weight: 0.05  # was 0.5 — only 13 closed trades, small sample (observation mode)
+      sports: ["all"]
+
+    # === TIER 4: MONITOR ===
+    - address: "0x39aaed185b92e99a78249610cc14a589b764583c"
+      name: "0x39AaEd"
+      weight: 0.1
+      sports: ["all"]
+
+    # Verwijderd:
+    # bcda         0xb45a.. → -$1.68M verlies (marktmaker die verliest)
+    # ZXWP         0x30ce.. → +$30K op 25.707 trades = belachelijk slechte ROI
+    # Novus0rdoSec 0xcd91.. → +$49K op 10.785 trades = slechte ROI
+    # 5f5a         0xa42f.. → +$129K op $54M volume = 0.24% ROI
+    # + alle crypto directional 5m verliezers
+    # WoofMaster   0x916f.. → inactief >11 dagen (scout 2026-03-14)
+    # beachboy4    0xc2e7.. → inactief >7 dagen (scout 2026-03-14)
+    # majorexploiter 0x019.. → inactief >12 dagen (scout 2026-03-14)
+    # ChinesePro   0x37e0.. → earthquake markets, niet sport (scout data klopte niet)
+    # delboytrotter 0x2e35.. → 1 prediction, leeg account (scout data klopte niet)
+    # CemeterySun  0x37c1.. → 68% WR, sharpe 0.14, verliest 1 op 3 trades
+    # Comebackbot  0x87da.. → 64% WR, sharpe 0.34, 4% sport, laag rendement
+
+  consensus:
+    min_traders: 1
+    multiplier_2: 1.5
+    multiplier_3plus: 2.0
+  max_delay_seconds: 120
+  max_resolution_days: 7  # skip markets resolving >7 days out — capital efficiency
+
+odds_arb:
+  enabled: false  # odds API quota op (500/maand gratis plan)
+  poll_interval_seconds: 300
+  base_url: "https://api.the-odds-api.com/v4"
+  sports:
+    - basketball_nba
+    - icehockey_nhl
+    - soccer_epl
+    - soccer_uefa_champs_league
+    - soccer_uefa_europa_league
+    - tennis_atp_indian_wells
+    - tennis_wta_indian_wells
+    - mma_mixed_martial_arts
+  min_edge_pct: 3.0
+
+sizing:
+  kelly_fraction: 0.25
+  max_bet_pct: 5.0
+  copy_base_size_pct: 3.0
+  min_price: 0.05  # skip penny markets (<5¢) — Kelly explodes at low prices
+
+risk:
+  max_daily_loss_pct: 15.0
+  min_bankroll: 50.0
+  max_open_bets: 100
+
+autoresearch:
+  interval_hours: 2
+  min_backtest_trades: 50
+  min_improvement_pct: 5.0
+  claude_model: "claude-sonnet-4-20250514"
+
+# Autoresearch-managed section (DO NOT EDIT MANUALLY)
+autoresearch_params:
+  wallet_weights_override: {}
+  sport_multipliers: {}
+  timing_rules: []
+  active_strategies: []

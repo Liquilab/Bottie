@@ -1,0 +1,22 @@
+[Unit]
+Description=Bottie — Autoresearch agent (analyze → hypothesize → backtest → deploy)
+After=network-online.target bottie.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/bottie
+EnvironmentFile=/opt/bottie/.env
+
+ExecStart=/opt/bottie/research/venv/bin/python3 /opt/bottie/research/autoresearch.py
+
+Restart=on-failure
+RestartSec=60s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=autoresearch
+
+[Install]
+WantedBy=multi-user.target

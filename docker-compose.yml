@@ -1,0 +1,24 @@
+services:
+  bottie:
+    build: .
+    image: bottie:latest
+    container_name: bottie
+    restart: unless-stopped
+
+    # Mount config and data outside the container so they survive rebuilds
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./data:/app/data
+
+    # All secrets via environment — never bake into image
+    env_file:
+      - .env
+
+    # Pass CLI flags here; add --dry-run to test safely
+    command: ["--config", "/app/config.yaml"]
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"

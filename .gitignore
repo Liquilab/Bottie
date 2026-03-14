@@ -1,0 +1,16 @@
+/target
+.env
+*.txt
+!requirements.txt
+data/trades.jsonl
+data/wallet_trades/
+data/leaderboard/
+research/hypotheses/*.json
+*.log
+.DS_Store
+__pycache__/
+*.pyc
+research/.venv/
+private/
+data/sessions/
+tmp/

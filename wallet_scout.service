@@ -1,0 +1,22 @@
+[Unit]
+Description=Bottie — Wallet Scout (discover top traders hourly)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/bottie
+EnvironmentFile=/opt/bottie/.env
+
+ExecStart=/opt/bottie/research/venv/bin/python3 /opt/bottie/research/wallet_scout.py
+
+Restart=on-failure
+RestartSec=60s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wallet_scout
+
+[Install]
+WantedBy=multi-user.target
