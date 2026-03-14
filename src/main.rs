@@ -299,6 +299,7 @@ async fn copy_trading_loop(
 ) {
     let mut copy_trader = CopyTrader::new(client.clone(), tracker.clone(), config.clone());
     let mut executor = Executor::new(client.clone(), config.clone());
+    let mut polls_since_sync: u32 = 0;
 
     loop {
         let poll_interval = {
@@ -309,6 +310,18 @@ async fn copy_trading_loop(
             }
             c.copy_trading.poll_interval_seconds
         };
+
+        // Re-sync bankroll with on-chain USDC every 20 polls (~5 min)
+        polls_since_sync += 1;
+        if polls_since_sync >= 20 {
+            polls_since_sync = 0;
+            if let Ok(balance) = sync::sync_bankroll(&client).await {
+                if balance > 0.0 {
+                    let mut r = risk.write().await;
+                    r.update_bankroll(balance);
+                }
+            }
+        }
 
         // Poll for new copy signals
         let copy_signals = copy_trader.poll().await;

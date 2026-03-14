@@ -170,6 +170,8 @@ impl RiskManager {
 
     pub fn update_bankroll(&mut self, new_bankroll: f64) {
         self.bankroll = new_bankroll;
+        self.initial_bankroll = new_bankroll;
+        self.daily_pnl = 0.0; // reset — on-chain balance is truth
     }
 
     pub fn add_daily_pnl(&mut self, pnl: f64) {
