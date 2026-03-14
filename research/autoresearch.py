@@ -40,6 +40,11 @@ log = logging.getLogger("autoresearch")
 CONFIG_PATH = "config.yaml"
 SCOUT_REPORT_PATH = "data/scout_report.json"
 
+# Pinned wallets — autoresearch must NEVER remove these
+PINNED_WALLETS = {
+    "0x17559efac103ac7f361be37ec0b93888d4c55aac",  # moisturizer — stocks, inactive on weekends
+}
+
 cycle_count = 0
 
 
@@ -177,6 +182,23 @@ async def evolution_cycle():
         log.info(f"  #{i+1} {m.mutation_type:10s} fitness={m.fitness:5.1f} wallets={len(m.wallets)}")
 
     # 8. Select best — must beat current by 2+ points
+    best = mutations[0]
+    improvement = best.fitness - current.fitness
+
+    # Ensure pinned wallets are in every mutation
+    for m in mutations:
+        m_addrs = {w.address for w in m.wallets}
+        for pinned_addr in PINNED_WALLETS:
+            if pinned_addr not in m_addrs:
+                # Find pinned wallet in current portfolio and add it
+                for w in current.wallets:
+                    if w.address == pinned_addr:
+                        import copy as _copy
+                        m.wallets.append(_copy.deepcopy(w))
+                        break
+        m.fitness = composite_fitness(m, dag)
+
+    mutations.sort(key=lambda m: m.fitness, reverse=True)
     best = mutations[0]
     improvement = best.fitness - current.fitness
 
