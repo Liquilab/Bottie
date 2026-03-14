@@ -250,23 +250,51 @@ impl Executor {
             return Ok(true);
         }
 
-        // Place FOK order
+        // Place FOK order (immediate fill or reject — no hanging orders)
         info!(
             "EXECUTE: {} {} {:.0} shares @ {:.3} = ${:.2} | edge={:.1}% | {}",
             side, signal.market_title, size, exec_price, size_usdc, signal.edge_pct, signal_source
         );
 
-        let resp = self
+        let mut actual_fee = fee_bps;
+        let resp = match self
             .client
-            .create_and_post_order(
-                &signal.token_id,
-                exec_price,
-                size,
-                side,
-                OrderType::FOK,
-                fee_bps,
-            )
-            .await?;
+            .create_and_post_order(&signal.token_id, exec_price, size, side, OrderType::FOK, fee_bps)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let err_str = e.to_string();
+                // Retry with correct fee if market rejects our fee rate
+                if let Some(idx) = err_str.find("current market's taker fee: ") {
+                    let fee_str = &err_str[idx + 28..];
+                    if let Some(end) = fee_str.find(|c: char| !c.is_ascii_digit()) {
+                        if let Ok(correct_fee) = fee_str[..end].parse::<u32>() {
+                            info!("retrying with fee={} (was {})", correct_fee, fee_bps);
+                            actual_fee = correct_fee;
+                            self.fee_cache.insert(signal.token_id.clone(), correct_fee);
+                            self.client
+                                .create_and_post_order(&signal.token_id, exec_price, size, side, OrderType::FOK, correct_fee)
+                                .await?
+                        } else {
+                            return Err(e);
+                        }
+                    } else if let Ok(correct_fee) = fee_str.trim_end_matches(|c: char| !c.is_ascii_digit()).parse::<u32>() {
+                        info!("retrying with fee={} (was {})", correct_fee, fee_bps);
+                        actual_fee = correct_fee;
+                        self.fee_cache.insert(signal.token_id.clone(), correct_fee);
+                        self.client
+                            .create_and_post_order(&signal.token_id, exec_price, size, side, OrderType::FOK, correct_fee)
+                            .await?
+                    } else {
+                        return Err(e);
+                    }
+                } else {
+                    return Err(e);
+                }
+            }
+        };
+        let _ = actual_fee; // used for cache update above
 
         let order_id = resp.effective_id().map(|s| s.to_string());
         let filled = !resp.is_rejected();
