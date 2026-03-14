@@ -26,6 +26,9 @@ pub struct TradeLog {
     pub confidence: f64,
     pub signal_delay_ms: u64,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_slug: Option<String>,
+
     pub order_id: Option<String>,
     pub filled: bool,
     pub dry_run: bool,
@@ -43,8 +46,9 @@ pub struct TradeLogger {
     path: PathBuf,
     file: Mutex<std::fs::File>,
     /// In-memory set of "condition_id:outcome" for open (unresolved, filled) positions.
-    /// Avoids re-reading the entire file on every signal check.
     open_positions: Mutex<HashSet<String>>,
+    /// In-memory set of event slugs with open positions — prevents conflicting bets on same event.
+    open_slugs: Mutex<HashSet<String>>,
 }
 
 impl TradeLogger {
@@ -59,27 +63,36 @@ impl TradeLogger {
             .open(&path)
             .expect("failed to open trade log file");
 
-        // Bootstrap the open positions cache from existing data
-        let open_positions = Self::load_open_positions_from_file(&path);
+        // Bootstrap caches from existing data
+        let (open_positions, open_slugs) = Self::load_open_caches_from_file(&path);
 
         Self {
             path,
             file: Mutex::new(file),
             open_positions: Mutex::new(open_positions),
+            open_slugs: Mutex::new(open_slugs),
         }
     }
 
-    fn load_open_positions_from_file(path: &PathBuf) -> HashSet<String> {
+    fn load_open_caches_from_file(path: &PathBuf) -> (HashSet<String>, HashSet<String>) {
         let contents = match std::fs::read_to_string(path) {
             Ok(c) => c,
-            Err(_) => return HashSet::new(),
+            Err(_) => return (HashSet::new(), HashSet::new()),
         };
-        contents
+        let open: Vec<TradeLog> = contents
             .lines()
             .filter_map(|line| serde_json::from_str::<TradeLog>(line).ok())
             .filter(|t| t.result.is_none() && t.filled)
+            .collect();
+        let positions = open.iter()
             .map(|t| format!("{}:{}", t.condition_id, t.outcome.to_lowercase()))
-            .collect()
+            .collect();
+        let slugs = open.iter()
+            .filter_map(|t| t.event_slug.as_ref())
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .collect();
+        (positions, slugs)
     }
 
     fn position_key(condition_id: &str, outcome: &str) -> String {
@@ -91,6 +104,11 @@ impl TradeLogger {
         if trade.filled && trade.result.is_none() && !trade.outcome.is_empty() {
             let key = Self::position_key(&trade.condition_id, &trade.outcome);
             self.open_positions.lock().unwrap().insert(key);
+            if let Some(slug) = &trade.event_slug {
+                if !slug.is_empty() {
+                    self.open_slugs.lock().unwrap().insert(slug.clone());
+                }
+            }
         }
 
         let json = match serde_json::to_string(&trade) {
@@ -120,23 +138,39 @@ impl TradeLogger {
     }
 
     /// Check if there is already an open (unresolved, filled) position for a market+outcome.
-    /// Uses the in-memory cache instead of re-reading the entire file.
     pub fn has_open_position(&self, condition_id: &str, outcome: &str) -> bool {
         let key = Self::position_key(condition_id, outcome);
         self.open_positions.lock().unwrap().contains(&key)
+    }
+
+    /// Check if there is already an open position on any condition in this event.
+    /// Prevents conflicting bets (e.g. HSV No + KOE Yes on the same match).
+    pub fn has_open_event(&self, event_slug: &str) -> bool {
+        if event_slug.is_empty() {
+            return false;
+        }
+        self.open_slugs.lock().unwrap().contains(event_slug)
     }
 
     /// Rewrite the entire log with updated records (used by the resolver).
     /// Thread-safe: truncates the file under the mutex then rewrites all records.
     /// Also rebuilds the open positions cache from the new data.
     pub fn rewrite_all(&self, trades: Vec<TradeLog>) {
-        // Rebuild open positions cache
-        let new_open: HashSet<String> = trades
-            .iter()
-            .filter(|t| t.result.is_none() && t.filled && !t.outcome.is_empty())
+        // Rebuild caches
+        let open: Vec<&TradeLog> = trades.iter()
+            .filter(|t| t.result.is_none() && t.filled)
+            .collect();
+        let new_positions: HashSet<String> = open.iter()
+            .filter(|t| !t.outcome.is_empty())
             .map(|t| Self::position_key(&t.condition_id, &t.outcome))
             .collect();
-        *self.open_positions.lock().unwrap() = new_open;
+        let new_slugs: HashSet<String> = open.iter()
+            .filter_map(|t| t.event_slug.as_ref())
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .collect();
+        *self.open_positions.lock().unwrap() = new_positions;
+        *self.open_slugs.lock().unwrap() = new_slugs;
 
         let mut file = self.file.lock().unwrap();
         if let Err(e) = file.set_len(0) {

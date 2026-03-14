@@ -59,14 +59,23 @@ impl Executor {
             Side::Sell
         };
 
-        // --- Fix #6: Position deduplication ---
-        // Skip if we already have an open position on this market+outcome
+        // Position deduplication: skip if we already have this exact position
         if !signal.outcome.is_empty()
             && logger.has_open_position(&signal.condition_id, &signal.outcome)
         {
             info!(
                 "SKIP: already open position on {} {}",
                 signal.market_title, signal.outcome
+            );
+            return Ok(false);
+        }
+
+        // Event deduplication: skip if we already have ANY position on this event
+        // Prevents conflicting bets (e.g. HSV No + KOE Yes on same match)
+        if !signal.event_slug.is_empty() && logger.has_open_event(&signal.event_slug) {
+            info!(
+                "SKIP: already have position on event {} ({})",
+                signal.event_slug, signal.market_title
             );
             return Ok(false);
         }
@@ -211,6 +220,7 @@ impl Executor {
                 sport: signal.sport.clone(),
                 side: signal.side.clone(),
                 outcome: signal.outcome.clone(),
+                event_slug: Some(signal.event_slug.clone()).filter(|s| !s.is_empty()),
                 price: exec_price,
                 size_usdc,
                 size_shares: size,
@@ -277,6 +287,7 @@ impl Executor {
             sport: signal.sport.clone(),
             side: signal.side.clone(),
             outcome: signal.outcome.clone(),
+            event_slug: Some(signal.event_slug.clone()).filter(|s| !s.is_empty()),
             price: exec_price,
             size_usdc,
             size_shares: size,

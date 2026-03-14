@@ -96,6 +96,7 @@ pub async fn sync_own_trades(
             sport,
             side: "BUY".to_string(),
             outcome,
+            event_slug: None,
             price,
             size_usdc: usdc_size,
             size_shares,

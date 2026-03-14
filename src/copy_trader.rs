@@ -241,6 +241,8 @@ impl CopyTrader {
                     base_win_rate * 100.0
                 );
 
+                let event_slug = pos.slug.clone().unwrap_or_default();
+
                 signals.push(CopySignal {
                     source_wallet: address.clone(),
                     source_name: name.clone(),
@@ -252,6 +254,7 @@ impl CopyTrader {
                     market_title: title,
                     sport,
                     outcome,
+                    event_slug,
                     confidence,
                     consensus_count: consensus_wallets,
                     timestamp: Utc::now(),
