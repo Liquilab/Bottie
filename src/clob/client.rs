@@ -161,11 +161,12 @@ impl ClobClient {
         let bps = match resp.fee_rate_bps {
             Some(serde_json::Value::Number(n)) => n.as_u64().unwrap_or(200) as u32,
             Some(serde_json::Value::String(s)) => s.parse().unwrap_or(200),
-            Some(serde_json::Value::Null) | None => 0,
             _ => 200,
         };
 
-        Ok(bps)
+        // Never send 0 — markets reject it. Some markets charge up to 1000 bps (10%).
+        // Default to 1000 to avoid rejections — we overpay fee but the order goes through.
+        Ok(if bps == 0 { 1000 } else { bps })
     }
 
     // --- Order Placement ---
