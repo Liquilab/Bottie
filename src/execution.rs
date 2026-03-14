@@ -59,6 +59,14 @@ impl Executor {
             Side::Sell
         };
 
+        // Block crypto 5m/15m markets — pure noise, not tradeable at our size
+        {
+            let title = signal.market_title.to_lowercase();
+            if title.contains("up or down") {
+                return Ok(false);
+            }
+        }
+
         // Position deduplication: skip if we already have this exact position
         if !signal.outcome.is_empty()
             && logger.has_open_position(&signal.condition_id, &signal.outcome)
