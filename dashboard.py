@@ -10,7 +10,7 @@ BASE_DIR       = Path(__file__).parent
 TRADES_FILE    = BASE_DIR / "data" / "trades.jsonl"
 HYPOTHESES_DIR = BASE_DIR / "research" / "hypotheses"
 CONFIG_FILE    = BASE_DIR / "config.yaml"
-INITIAL_BANKROLL = 200.0
+INITIAL_BANKROLL = 250.0  # $200 start + $50 deposit
 
 
 # ── Data Loading ────────────────────────────────────────────────────────────
@@ -32,20 +32,20 @@ def load_trades():
 def parse_config_wallets():
     if not CONFIG_FILE.exists():
         return {}
-    raw = CONFIG_FILE.read_text()
-    wallets = {}
-    # Match wallet blocks in the watchlist
-    pattern = re.compile(
-        r'-\s+address:\s+"(0x[0-9a-fA-F]+)".*?'
-        r'name:\s+"([^"]+)".*?'
-        r'weight:\s+([0-9.]+)',
-        re.DOTALL
-    )
-    for m in pattern.finditer(raw):
-        addr, name, weight = m.group(1).lower(), m.group(2), float(m.group(3))
-        tier = "T1" if weight >= 0.85 else "T2" if weight >= 0.65 else "T3"
-        wallets[addr] = {"name": name, "weight": weight, "tier": tier}
-    return wallets
+    try:
+        import yaml
+        with open(CONFIG_FILE) as f:
+            config = yaml.safe_load(f)
+        wallets = {}
+        for w in config.get("copy_trading", {}).get("watchlist", []):
+            addr = w.get("address", "").lower()
+            name = w.get("name", addr[:10])
+            weight = w.get("weight", 0.5)
+            tier = "T1" if weight >= 0.85 else "T2" if weight >= 0.65 else "T3"
+            wallets[addr] = {"name": name, "weight": weight, "tier": tier}
+        return wallets
+    except Exception:
+        return {}
 
 def load_hypotheses():
     if not HYPOTHESES_DIR.exists():
@@ -74,26 +74,25 @@ def compute_kpis(trades):
     win_rate  = len(wins) / len(resolved) * 100 if resolved else 0
 
     today = datetime.now(timezone.utc).date()
-    daily_pnl = sum(
-        (t.get("pnl") or 0) for t in resolved
-        if t.get("resolved_at") and t["resolved_at"][:10] == str(today)
-    )
+    daily_resolved = [t for t in resolved if t.get("resolved_at") and t["resolved_at"][:10] == str(today)]
+    daily_pnl = sum((t.get("pnl") or 0) for t in daily_resolved)
+    daily_wins = sum(1 for t in daily_resolved if t.get("result") == "win")
+    daily_losses = sum(1 for t in daily_resolved if t.get("result") == "loss")
 
-    # Best wallet by PnL
-    wallet_pnl = {}
-    for t in resolved:
-        w = t.get("copy_wallet") or ""
-        wallet_pnl[w] = wallet_pnl.get(w, 0) + (t.get("pnl") or 0)
-    best_wallet = max(wallet_pnl, key=wallet_pnl.get) if wallet_pnl else ""
+    # Open bet value (total $ in open positions)
+    open_value = sum(t.get("size_usdc") or 0 for t in open_)
 
     return {
-        "bankroll": INITIAL_BANKROLL + total_pnl,
         "total_pnl": total_pnl,
         "win_rate": win_rate,
         "open_count": len(open_),
+        "open_value": open_value,
         "resolved_count": len(resolved),
+        "wins_count": len(wins),
+        "losses_count": len(resolved) - len(wins),
         "daily_pnl": daily_pnl,
-        "best_wallet_addr": best_wallet,
+        "daily_wins": daily_wins,
+        "daily_losses": daily_losses,
         "total_trades": len(filled),
         "dry_run": not filled and any(t.get("dry_run") for t in trades),
     }
@@ -259,39 +258,40 @@ def render_kpi_row(kpis, wallet_map):
     wr_color = "#3fb950" if wr >= 55 else "#f85149" if wr < 45 else "#d29922"
     dpnl = kpis["daily_pnl"]
     dpnl_color = "#3fb950" if dpnl >= 0 else "#f85149"
-    bw_info = wallet_map.get((kpis["best_wallet_addr"] or "").lower(), {})
-    bw_name = bw_info.get("name", kpis["best_wallet_addr"][:8] + "…" if kpis["best_wallet_addr"] else "—")
-    mode_html = '<span class="badge" style="background:#f85149;color:#fff">LIVE</span>' if not kpis["dry_run"] else '<span class="badge" style="background:#8b949e;color:#000">DRY RUN</span>'
 
-    # Goal progress
-    goal = 1000.0
-    current = kpis["bankroll"]
-    progress = min(100, max(0, (current - INITIAL_BANKROLL) / (goal - INITIAL_BANKROLL) * 100))
+    goal = 10000.0
+    # Rough portfolio estimate: invested + PnL + open value
+    estimated_portfolio = INITIAL_BANKROLL + pnl + kpis["open_value"]
+    progress = min(100, max(0, estimated_portfolio / goal * 100))
+
+    daily_detail = f'{kpis["daily_wins"]}W {kpis["daily_losses"]}L' if kpis["daily_wins"] + kpis["daily_losses"] > 0 else ""
 
     tiles = [
-        ("Bankroll", f"${current:.2f}", "#388bfd"),
-        ("Total P&L", f'{"+" if pnl >= 0 else ""}${pnl:.2f}', pnl_color),
-        ("Win Rate", f"{wr:.1f}%" if kpis["resolved_count"] else "—", wr_color),
-        ("Open Bets", str(kpis["open_count"]), "#d29922"),
-        ("Resolved", str(kpis["resolved_count"]), "#8b949e"),
-        ("Daily P&L", f'{"+" if dpnl >= 0 else ""}${dpnl:.2f}', dpnl_color),
-        ("Mode", mode_html, "#8b949e"),
+        ("Open Posities", f'${kpis["open_value"]:.0f}', "#388bfd",
+         f'{kpis["open_count"]} bets'),
+        ("Resolved P&L", f'{"+" if pnl >= 0 else ""}${pnl:.2f}', pnl_color,
+         f'{kpis["wins_count"]}W / {kpis["losses_count"]}L'),
+        ("Win Rate", f"{wr:.1f}%" if kpis["resolved_count"] else "—", wr_color,
+         f'{kpis["resolved_count"]} resolved'),
+        ("Vandaag", f'{"+" if dpnl >= 0 else ""}${dpnl:.2f}', dpnl_color,
+         daily_detail),
     ]
 
     tiles_html = ""
-    for label, value, color in tiles:
+    for label, value, color, subtitle in tiles:
         tiles_html += f"""
         <div class="kpi-tile" style="border-top:3px solid {color}">
           <div class="kpi-label">{label}</div>
           <div class="kpi-value">{value}</div>
+          <div class="kpi-sub">{subtitle}</div>
         </div>"""
 
     return f"""
     <div class="kpi-row">{tiles_html}</div>
     <div class="goal-bar-wrap">
       <div class="goal-label">
-        Doel: ${INITIAL_BANKROLL:.0f} → ${goal:.0f} &nbsp;
-        <span class="muted">${current:.2f} ({progress:.1f}%)</span>
+        DOEL: ${INITIAL_BANKROLL:.0f} → ${goal:.0f}
+        <span class="muted" style="float:right">{progress:.1f}% &nbsp; ~${estimated_portfolio:.0f}</span>
       </div>
       <div class="goal-bar"><div class="goal-fill" style="width:{progress:.1f}%"></div></div>
     </div>"""
@@ -459,6 +459,49 @@ def render_hypotheses(hypotheses):
         </div>"""
     return items
 
+def render_resolved_trades(trades, wallet_map):
+    """Recently resolved trades — shows outcomes and PnL."""
+    resolved = [t for t in trades if t.get("filled") and not t.get("dry_run") and t.get("result") in ("win", "loss")]
+    if not resolved:
+        return '<div class="empty">Nog geen resolved trades.</div>'
+    resolved.sort(key=lambda t: t.get("resolved_at") or t.get("timestamp") or "", reverse=True)
+
+    rows = ""
+    for t in resolved[:50]:
+        result = t.get("result", "")
+        pnl = t.get("pnl") or 0
+        result_html = f'<span class="green">WIN</span>' if result == "win" else f'<span class="red">LOSS</span>'
+        pnl_html = fmt_pnl(pnl)
+        addr = (t.get("copy_wallet") or "").lower()
+        info = wallet_map.get(addr, {})
+        wallet_name = info.get("name", addr[:10] + "..." if addr else "?")
+        resolved_at = t.get("resolved_at") or ""
+        age = fmt_age(resolved_at) if resolved_at else fmt_age(t.get("timestamp"))
+        price = t.get("price") or 0
+        rows += f"""
+        <tr>
+          <td class="muted">{age}</td>
+          <td>{result_html}</td>
+          <td class="market-title">{t.get('market_title','?')}</td>
+          <td>{t.get('outcome','')}</td>
+          <td>{price:.0%}</td>
+          <td>${t.get('size_usdc',0):.2f}</td>
+          <td><strong>{wallet_name}</strong></td>
+          <td>{pnl_html}</td>
+        </tr>"""
+
+    return f"""
+    <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>Wanneer</th><th>Uitkomst</th><th>Market</th><th>Side</th>
+        <th>Entry</th><th>Inzet</th><th>Wallet</th><th>P&L</th>
+      </tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+    </div>"""
+
+
 def render_all_trades(trades, wallet_map):
     filled = [t for t in trades if t.get("filled")]
     if not filled:
@@ -525,8 +568,9 @@ a { color: var(--blue); text-decoration: none; }
 @media(max-width:900px) { .two-col { grid-template-columns: 1fr; } }
 
 /* KPI */
-.kpi-row { display: grid; grid-template-columns: repeat(7, 1fr); gap: 12px; margin-bottom: 16px; }
-@media(max-width:900px) { .kpi-row { grid-template-columns: repeat(3,1fr); } }
+.kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+@media(max-width:900px) { .kpi-row { grid-template-columns: repeat(2,1fr); } }
+.kpi-sub { font-size: 0.75rem; color: var(--muted); margin-top: 4px; }
 .kpi-tile { background: var(--surface); border-radius: 8px; padding: 16px; }
 .kpi-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 8px; }
 .kpi-value { font-size: 1.4rem; font-weight: 700; font-family: 'Courier New', monospace; }
@@ -589,11 +633,10 @@ tbody td { padding: 9px 12px; vertical-align: middle; }
 """
 
 
-def render_page(trades, wallet_map, hypotheses):
+def render_page(trades, wallet_map):
     kpis       = compute_kpis(trades)
     wallet_stats = compute_wallet_stats(trades, wallet_map)
     sport_stats  = compute_sport_stats(trades)
-    src_stats    = compute_source_stats(trades)
     daily_pnl    = compute_daily_pnl(trades)
     now_str      = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -620,46 +663,40 @@ def render_page(trades, wallet_map, hypotheses):
   <!-- KPIs + Goal -->
   {render_kpi_row(kpis, wallet_map)}
 
+  <!-- Resolved trades -->
+  <div class="section">
+    <div class="section-title">Resolved Trades (laatste 50)</div>
+    {render_resolved_trades(trades, wallet_map)}
+  </div>
+
   <!-- Open bets -->
   <div class="section">
-    <div class="section-title">⏳ Open bets ({kpis['open_count']})</div>
+    <div class="section-title">Open Bets ({kpis['open_count']})</div>
     {render_open_bets(trades, wallet_map)}
   </div>
 
   <!-- Two-column: Wallets + Sports -->
   <div class="two-col">
     <div class="section">
-      <div class="section-title">👛 Wallet Leaderboard</div>
+      <div class="section-title">Wallet Leaderboard</div>
       {render_wallet_table(wallet_stats, wallet_map)}
     </div>
     <div class="section">
-      <div class="section-title">⚽ Per Sport</div>
+      <div class="section-title">Per Sport</div>
       {render_sport_grid(sport_stats)}
     </div>
   </div>
 
-  <!-- Signal source comparison + PnL chart -->
-  <div class="two-col">
-    <div class="section">
-      <div class="section-title">📊 Copy vs Arb</div>
-      {render_source_comparison(src_stats)}
-    </div>
-    <div class="section">
-      <div class="section-title">📈 Dagelijkse P&L (14d)</div>
-      {render_pnl_chart(daily_pnl)}
-    </div>
+  <!-- PnL chart -->
+  <div class="section">
+    <div class="section-title">Dagelijkse P&L (14d)</div>
+    {render_pnl_chart(daily_pnl)}
   </div>
 
   <!-- All trades -->
   <div class="section">
-    <div class="section-title">📋 Alle trades (laatste 200)</div>
+    <div class="section-title">Alle Trades (laatste 200)</div>
     {render_all_trades(trades, wallet_map)}
-  </div>
-
-  <!-- Auto-research -->
-  <div class="section">
-    <div class="section-title">🔬 Autoresearch resultaten</div>
-    {render_hypotheses(hypotheses)}
   </div>
 
 </div>
@@ -681,8 +718,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             try:
                 trades     = load_trades()
                 wallet_map = parse_config_wallets()
-                hypotheses = load_hypotheses()
-                html = render_page(trades, wallet_map, hypotheses)
+                html = render_page(trades, wallet_map)
                 body = html.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
