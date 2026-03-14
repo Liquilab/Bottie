@@ -64,24 +64,22 @@ pub fn copy_trade_size(
     signal: &AggregatedSignal,
     config: &SizingConfig,
 ) -> f64 {
-    // Skip penny markets
+    // Skip penny markets and invalid prices
     if signal.price < config.min_price || signal.price >= 1.0 || signal.price <= 0.0 {
         return 0.0;
     }
 
-    // Base size: percentage of bankroll
-    let base_usdc = bankroll * config.copy_base_size_pct / 100.0;
+    // Must have at least $1 to trade
+    if bankroll < 1.0 {
+        return 0.0;
+    }
 
-    // Scale by wallet weight (encoded in consensus score)
-    let size_usdc = base_usdc;
+    // Base size: percentage of bankroll, but always at least $1
+    let base_usdc = (bankroll * config.copy_base_size_pct / 100.0).max(1.0);
 
     // Cap at max bet
     let max_bet = bankroll * config.max_bet_pct / 100.0;
-    let final_usdc = size_usdc.min(max_bet);
-
-    if final_usdc < 1.0 {
-        return 0.0;
-    }
+    let final_usdc = base_usdc.min(max_bet).min(bankroll);
 
     // Convert to shares
     final_usdc / signal.price

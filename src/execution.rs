@@ -155,8 +155,8 @@ impl Executor {
 
         if size <= 0.0 {
             info!(
-                "SKIP: no edge for {} (conf={:.2}, price={:.2})",
-                signal.market_title, signal.combined_confidence, exec_price
+                "SKIP: size=0 for {} (bankroll=${:.2}, price={:.2})",
+                signal.market_title, risk.bankroll(), exec_price
             );
             return Ok(false);
         }
