@@ -159,7 +159,7 @@ risk:
 
 autoresearch:
   interval_hours: 2
-  min_backtest_trades: 50
+  min_backtest_trades: 20
   min_improvement_pct: 5.0
   claude_model: "claude-sonnet-4-20250514"
 
