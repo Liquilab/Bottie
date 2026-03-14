@@ -20,9 +20,8 @@ pub enum RiskDecision {
     Rejected(String),
 }
 
-// Per-wallet and per-sport limits
-const MAX_OPEN_PER_WALLET: u32 = 5;
-const MAX_OPEN_PER_SPORT: u32 = 15;
+// Per-wallet concentration limit — prevent blindly following one wallet
+const MAX_OPEN_PER_WALLET: u32 = 30;
 
 impl RiskManager {
     pub fn new(config: RiskConfig, bankroll: f64) -> Self {
@@ -100,15 +99,6 @@ impl RiskManager {
                     MAX_OPEN_PER_WALLET
                 ));
             }
-        }
-
-        // Check per-sport limit
-        let sport_count = self.open_per_sport.get(sport).copied().unwrap_or(0);
-        if sport_count >= MAX_OPEN_PER_SPORT {
-            return RiskDecision::Rejected(format!(
-                "sport '{}' has {} open bets (limit {})",
-                sport, sport_count, MAX_OPEN_PER_SPORT
-            ));
         }
 
         RiskDecision::Allowed

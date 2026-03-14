@@ -371,7 +371,7 @@ impl ClobClient {
 
     pub async fn get_wallet_positions(&self, address: &str, limit: u32) -> Result<Vec<WalletPosition>> {
         let url = format!(
-            "{DATA_API}/positions?user={address}&limit={limit}&sortBy=currentValue&sortOrder=desc"
+            "{DATA_API}/positions?user={address}&limit={limit}&sortBy=CURRENT&sortOrder=desc"
         );
         let resp = self.http.get(&url).send().await?.error_for_status()?.json().await?;
         Ok(resp)
