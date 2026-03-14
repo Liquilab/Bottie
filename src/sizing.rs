@@ -58,47 +58,31 @@ pub fn kelly_size(
     shares
 }
 
-/// Size specifically for copy trades with base sizing
+/// Size specifically for copy trades — we trust the wallet, not Kelly
 pub fn copy_trade_size(
     bankroll: f64,
     signal: &AggregatedSignal,
     config: &SizingConfig,
 ) -> f64 {
-    // No edge: confidence must exceed price
-    if signal.combined_confidence <= signal.price {
-        return 0.0;
-    }
-
     // Skip penny markets
-    if signal.price < config.min_price {
+    if signal.price < config.min_price || signal.price >= 1.0 || signal.price <= 0.0 {
         return 0.0;
     }
 
-    // Start with base copy size
+    // Base size: percentage of bankroll
     let base_usdc = bankroll * config.copy_base_size_pct / 100.0;
 
-    // Adjust by confidence
-    let adjusted = base_usdc * (signal.combined_confidence / 0.55); // 55% is our baseline
-
-    // Also compute Kelly for comparison — if Kelly says no edge, don't trade
-    let kelly = kelly_size(bankroll, signal, config);
-
-    if kelly <= 0.0 {
-        return 0.0;
-    }
-
-    let size_usdc = adjusted.min(kelly * signal.price);
+    // Scale by wallet weight (encoded in consensus score)
+    let size_usdc = base_usdc;
 
     // Cap at max bet
     let max_bet = bankroll * config.max_bet_pct / 100.0;
     let final_usdc = size_usdc.min(max_bet);
 
-    // Convert to shares
-    let shares = final_usdc / signal.price;
-
     if final_usdc < 1.0 {
         return 0.0;
     }
 
-    shares
+    // Convert to shares
+    final_usdc / signal.price
 }

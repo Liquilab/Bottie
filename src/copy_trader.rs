@@ -146,6 +146,15 @@ impl CopyTrader {
                 if price <= 0.0 || price >= 1.0 {
                     continue;
                 }
+
+                // Only trade if price hasn't moved much since entry — edge still exists
+                let cur_price = pos.cur_price_f64();
+                if cur_price > 0.0 && cur_price < 1.0 {
+                    let drift = (cur_price - price).abs() / price;
+                    if drift > 0.15 {
+                        continue; // price moved >15% since entry, edge is gone
+                    }
+                }
                 let usdc_size = pos.initial_value_f64();
                 let condition_id = pos.condition_id.clone().unwrap_or_default();
                 let asset = pos.asset.clone().unwrap_or_default();

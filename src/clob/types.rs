@@ -342,6 +342,14 @@ impl WalletPosition {
         }
     }
 
+    pub fn cur_price_f64(&self) -> f64 {
+        match &self.cur_price {
+            Some(serde_json::Value::Number(n)) => n.as_f64().unwrap_or(0.0),
+            Some(serde_json::Value::String(s)) => s.parse().unwrap_or(0.0),
+            _ => 0.0,
+        }
+    }
+
     pub fn initial_value_f64(&self) -> f64 {
         match &self.initial_value {
             Some(serde_json::Value::Number(n)) => n.as_f64().unwrap_or(0.0),
