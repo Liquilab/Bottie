@@ -194,7 +194,7 @@ impl Executor {
                     .client
                     .get_fee_rate_bps(&signal.token_id)
                     .await
-                    .unwrap_or(200);
+                    .unwrap_or(0);
                 self.fee_cache.insert(signal.token_id.clone(), bps);
                 bps
             }
