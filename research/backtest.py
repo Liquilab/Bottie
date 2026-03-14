@@ -133,29 +133,20 @@ def backtest(trades: pd.DataFrame, config_changes: dict) -> dict:
                     continue
 
         # --- Simulate sizing (mirrors Rust copy_trade_size logic) ---
-        adj_confidence = min(0.95, confidence * s_mult)
-
-        # Skip if no edge
-        if adj_confidence <= price or price <= 0 or price >= 1.0:
+        # Skip invalid prices
+        if price <= 0 or price >= 1.0:
             continue
 
         # Skip penny markets
         if price < 0.05:
             continue
 
-        # Copy trade base sizing
-        base_usdc = sim_bankroll * (copy_base_pct / 100.0)
-        adjusted = base_usdc * (adj_confidence / 0.55) * w_weight
+        # Copy trade base sizing — we trust the wallet, no Kelly edge required
+        base_usdc = sim_bankroll * (copy_base_pct / 100.0) * w_weight
 
-        # Kelly sizing
-        full_kelly = (adj_confidence - price) / (1.0 - price)
-        kelly_usdc = sim_bankroll * full_kelly * kelly_fraction
-
-        if kelly_usdc <= 0:
-            continue
-
-        # Final size: min of adjusted, kelly, and 10% hard cap
-        sim_size = min(adjusted, kelly_usdc, sim_bankroll * 0.10)
+        # Cap at max bet (5% of bankroll)
+        max_bet_pct = config_changes.get("max_bet_pct", 5.0)
+        sim_size = min(base_usdc, sim_bankroll * max_bet_pct / 100.0)
         if sim_size < 1.0:
             continue
 
