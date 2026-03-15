@@ -41,6 +41,12 @@ pub async fn resolver_loop(
             take_profit_check(&client, &logger, &risk).await;
         }
 
+        // Sync phantom positions every 5 minutes:
+        // mark trades as "phantom" if we no longer hold them on PM
+        if tp_counter % 5 == 0 {
+            sync_phantoms(&client, &logger, &risk).await;
+        }
+
         // Base tick: every 60 seconds. Individual markets are skipped if not due.
         tokio::time::sleep(Duration::from_secs(60)).await;
     }
@@ -83,10 +89,10 @@ async fn check_resolutions(
 ) {
     let mut trades = logger.load_all();
 
-    // Collect unique condition_ids of open, filled positions
+    // Collect unique condition_ids of open, filled, LIVE (non-dry-run) positions
     let mut open_markets: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, trade) in trades.iter().enumerate() {
-        if trade.result.is_none() && trade.filled && !trade.outcome.is_empty() {
+        if trade.result.is_none() && trade.filled && !trade.dry_run && !trade.outcome.is_empty() {
             open_markets
                 .entry(trade.condition_id.clone())
                 .or_default()
@@ -371,6 +377,53 @@ async fn take_profit_check(
             );
         }
         info!("take-profit: sold {} positions, total profit ${:.2}", sold_count, total_profit);
+    }
+}
+
+/// Sync trade log with on-chain positions. Mark trades as "phantom" if
+/// we no longer hold them on Polymarket (manually sold or never filled).
+async fn sync_phantoms(
+    client: &ClobClient,
+    logger: &TradeLogger,
+    risk: &Arc<RwLock<RiskManager>>,
+) {
+    let funder = client.funder_address();
+
+    let our_positions = match client.get_wallet_positions(&funder, 500).await {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    let mut held = std::collections::HashSet::new();
+    for pos in &our_positions {
+        if pos.size_f64() > 0.01 {
+            held.insert(pos.position_key());
+        }
+    }
+
+    let mut trades = logger.load_all();
+    let mut phantom_count = 0u32;
+
+    for trade in trades.iter_mut() {
+        if trade.result.is_some() || !trade.filled || trade.dry_run {
+            continue;
+        }
+        let key = format!("{}:{}", trade.condition_id, trade.outcome);
+        if !held.contains(&key) {
+            trade.result = Some("phantom".to_string());
+            trade.pnl = Some(0.0);
+            trade.resolved_at = Some(Utc::now());
+            phantom_count += 1;
+        }
+    }
+
+    if phantom_count > 0 {
+        logger.rewrite_all(trades);
+        let mut r = risk.write().await;
+        for _ in 0..phantom_count {
+            r.record_trade_closed_with_context(0.0, None, "");
+        }
+        info!("phantom-sync: marked {} positions as phantom (not held on PM)", phantom_count);
     }
 }
 
