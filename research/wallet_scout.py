@@ -148,7 +148,7 @@ async def evaluate_wallet(client: httpx.AsyncClient, address: str) -> dict:
     }
 
 
-def score_wallet(eval_data: dict, leaderboard_pnl: float, leaderboard_volume: float) -> float:
+def score_wallet(eval_data: dict, leaderboard_pnl: float, leaderboard_volume: float, is_current: bool = False) -> float:
     """Score a wallet based on metrics that predict future profitability.
 
     Goal: find wallets that will help grow $200 → $10,000.
@@ -166,6 +166,8 @@ def score_wallet(eval_data: dict, leaderboard_pnl: float, leaderboard_volume: fl
         return 0  # Not currently trading
     if win_rate < 0.60:
         return 0  # Too many losses for our bankroll
+    if win_rate >= 0.95 and closed >= 50 and not is_current:
+        return 0  # Suspiciously perfect — likely data artifact (skip for current wallets, API is unreliable for them)
 
     # Scoring (0-100 scale)
     # Win rate: most important — every loss hurts at $200 bankroll
@@ -240,7 +242,7 @@ async def scout_cycle():
             is_current = addr in current_addresses
 
             eval_data = await evaluate_wallet(client, addr)
-            eval_data["score"] = score_wallet(eval_data, pnl, volume)
+            eval_data["score"] = score_wallet(eval_data, pnl, volume, is_current=is_current)
 
             evaluations.append({
                 "address": addr,

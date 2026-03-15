@@ -6,19 +6,14 @@ copy_trading:
   enabled: true
   poll_interval_seconds: 15
   watchlist:
+  - address: '0x2d8b401d2f0e6937afebf18e19e11ca568a5260a'
+    name: vidarx
+    weight: 0.91
+    sports:
+    - all
   - address: '0x17559efac103ac7f361be37ec0b93888d4c55aac'
     name: moisturizer
     weight: 1.0
-    sports:
-    - all
-  - address: '0x8c80d213c0cbad777d06ee3f58f6ca4bc03102c3'
-    name: SecondWindCapital
-    weight: 0.4
-    sports:
-    - all
-  - address: '0xc65ca4755436f82d8eb461e65781584b8cadea39'
-    name: UAEVALORANTFAN
-    weight: 0.7
     sports:
     - all
   - address: '0x02227b8f5a9636e895607edd3185ed6ee5598ff7'
@@ -26,9 +21,44 @@ copy_trading:
     weight: 0.6
     sports:
     - all
+  - address: '0xb90494d9a5d8f71f1930b2aa4b599f95c344c255'
+    name: Avonmore
+    weight: 0.6
+    sports:
+    - all
+  - address: '0x07921379f7b31ef93da634b688b2fe36897db778'
+    name: ewelmealt
+    weight: 0.6
+    sports:
+    - all
+  - address: '0x036c159d5a348058a81066a76b89f35926d4178d'
+    name: HedgeMaster88
+    weight: 0.7
+    sports:
+    - all
   - address: '0xdb2223cc5202a4718c3069f577ec971f71c96478'
     name: FTWUTB
     weight: 0.7
+    sports:
+    - all
+  - address: '0xbddf61af533ff524d27154e589d2d7a81510c684'
+    name: Countryside
+    weight: 0.7
+    sports:
+    - all
+  - address: '0x7ea571c40408f340c1c8fc8eaacebab53c1bde7b'
+    name: Cannae
+    weight: 0.3
+    sports:
+    - all
+  - address: '0x63ce342161250d705dc0b16df89036c8e5f9ba9a'
+    name: 0x8dxd
+    weight: 0.6
+    sports:
+    - all
+  - address: '0x2005d16a84ceefa912d4e380cd32e7ff827875ea'
+    name: RN1
+    weight: 1.0
     sports:
     - all
   - address: '0x507e52ef684ca2dd91f90a9d26d149dd3288beae'
@@ -41,51 +71,6 @@ copy_trading:
     weight: 1.0
     sports:
     - all
-  - address: '0x2005d16a84ceefa912d4e380cd32e7ff827875ea'
-    name: RN1
-    weight: 1.0
-    sports:
-    - all
-  - address: '0xb90494d9a5d8f71f1930b2aa4b599f95c344c255'
-    name: Avonmore
-    weight: 0.6
-    sports:
-    - all
-  - address: '0xbddf61af533ff524d27154e589d2d7a81510c684'
-    name: Countryside
-    weight: 0.7
-    sports:
-    - all
-  - address: '0x036c159d5a348058a81066a76b89f35926d4178d'
-    name: HedgeMaster88
-    weight: 0.7
-    sports:
-    - all
-  - address: '0x63d43bbb87f85af03b8f2f9e2fad7b54334fa2f1'
-    name: wokerjoesleeper
-    weight: 0.35
-    sports:
-    - all
-  - address: '0xe8dd7741ccb12350957ec71e9ee332e0d1e6ec86'
-    name: influenz.eth
-    weight: 0.35
-    sports:
-    - all
-  - address: '0x7ea571c40408f340c1c8fc8eaacebab53c1bde7b'
-    name: Cannae
-    weight: 0.3
-    sports:
-    - all
-  - address: '0x07921379f7b31ef93da634b688b2fe36897db778'
-    name: ewelmealt
-    weight: 0.6
-    sports:
-    - all
-  - address: '0x39aaed185b92e99a78249610cc14a589b764583c'
-    name: '0x39AaEd'
-    weight: 0.1
-    sports:
-    - all
   - address: '0xd0d6053c3c37e727402d84c14069780d360993aa'
     name: k9Q2mX4L8A7ZP3R
     weight: 0.6
@@ -96,16 +81,11 @@ copy_trading:
     weight: 0.6
     sports:
     - all
-  - address: '0x63ce342161250d705dc0b16df89036c8e5f9ba9a'
-    name: 0x8dxd
-    weight: 0.6
-    sports:
-    - all
   consensus:
     min_traders: 1
     multiplier_2: 1.5
     multiplier_3plus: 2.0
-  max_delay_seconds: 120
+  max_delay_seconds: 60
   max_resolution_days: 7
 odds_arb:
   enabled: false
@@ -125,7 +105,7 @@ sizing:
   kelly_fraction: 0.25
   max_bet_pct: 5.0
   copy_base_size_pct: 3.0
-  min_price: 0.05
+  min_price: 0.20
 risk:
   max_daily_loss_pct: 15.0
   min_bankroll: 5.0
