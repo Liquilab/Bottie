@@ -129,11 +129,21 @@ impl Executor {
                         if let Ok(end_date) = chrono::DateTime::parse_from_rfc3339(end_date_str)
                             .or_else(|_| chrono::DateTime::parse_from_str(end_date_str, "%Y-%m-%dT%H:%M:%S%.fZ"))
                         {
-                            let days_until = (end_date.signed_duration_since(chrono::Utc::now())).num_days();
+                            let until_end = end_date.signed_duration_since(chrono::Utc::now());
+                            let days_until = until_end.num_days();
                             if days_until > max_resolution_days as i64 {
                                 info!(
                                     "SKIP: {} resolves in {} days (max {})",
                                     signal.market_title, days_until, max_resolution_days
+                                );
+                                return Ok(false);
+                            }
+                            // Don't enter markets ending within 30 minutes — edge is gone,
+                            // risk of last-minute reversal is highest
+                            if until_end.num_minutes() < 30 {
+                                info!(
+                                    "SKIP: {} ends in {}min — too close to resolution",
+                                    signal.market_title, until_end.num_minutes()
                                 );
                                 return Ok(false);
                             }
