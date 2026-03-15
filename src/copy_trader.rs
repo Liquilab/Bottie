@@ -1,12 +1,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
+use futures_util::future::join_all;
+
 use crate::clob::client::ClobClient;
+use crate::clob::types::WalletPosition;
 use crate::config::SharedConfig;
 use crate::signal::CopySignal;
 use crate::wallet_tracker::WalletTracker;
@@ -73,33 +76,48 @@ impl CopyTrader {
         let mut signals = Vec::new();
         let mut total_new = 0u32;
 
-        // Rate-limit to stay under API limits
-        let delay_per_wallet = if !watchlist.is_empty() {
-            let ms = (60_000 / watchlist.len().max(1) as u64).min(2000).max(200);
-            Duration::from_millis(ms)
-        } else {
-            Duration::from_millis(200)
-        };
+        // Phase 1: Fetch all wallet positions in parallel (batches of 4)
+        let fetch_start = Instant::now();
+        let active_wallets: Vec<_> = watchlist.iter().filter(|(_, _, w)| *w > 0.0).collect();
+        let mut fetched: Vec<(String, String, f64, Vec<WalletPosition>)> = Vec::new();
 
-        for (address, name, weight) in &watchlist {
-            if *weight <= 0.0 {
-                continue;
-            }
+        for chunk in active_wallets.chunks(4) {
+            let futures: Vec<_> = chunk
+                .iter()
+                .map(|(addr, name, weight)| {
+                    let client = self.client.clone();
+                    let addr = addr.clone();
+                    let name = name.clone();
+                    let weight = *weight;
+                    async move {
+                        let result = client.get_wallet_positions(&addr, 100).await;
+                        (addr, name, weight, result)
+                    }
+                })
+                .collect();
 
-            tokio::time::sleep(delay_per_wallet).await;
-
-            // Fetch current positions via /positions (reliable endpoint)
-            let positions = match self.client.get_wallet_positions(address, 100).await {
-                Ok(p) => p,
-                Err(e) => {
-                    warn!("positions fetch failed for {name}: {e}");
-                    continue;
+            let results = join_all(futures).await;
+            for (addr, name, weight, result) in results {
+                match result {
+                    Ok(positions) => fetched.push((addr, name, weight, positions)),
+                    Err(e) => warn!("positions fetch failed for {name}: {e}"),
                 }
-            };
+            }
+            // Brief pause between batches to respect rate limits
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
 
+        let fetch_ms = fetch_start.elapsed().as_millis();
+        if fetched.len() > 1 {
+            info!("POLL FETCH: {} wallets in {}ms (parallel batches of 4)", fetched.len(), fetch_ms);
+        }
+
+        // Phase 2: Process results sequentially (diff, consensus, signals)
+        for (address, name, weight, positions) in &fetched {
+            let weight = *weight;
             // Build current snapshot: position_key → size
             let mut current_snapshot: HashMap<String, f64> = HashMap::new();
-            for pos in &positions {
+            for pos in positions {
                 let key = pos.position_key();
                 if key == ":" {
                     continue; // skip invalid positions
@@ -108,9 +126,9 @@ impl CopyTrader {
             }
 
             // Compare with previous snapshot to find NEW positions
-            let prev = self.prev_positions.get(address);
+            let prev = self.prev_positions.get(address.as_str());
 
-            for pos in &positions {
+            for pos in positions {
                 let key = pos.position_key();
                 if key == ":" {
                     continue;
@@ -201,7 +219,7 @@ impl CopyTrader {
                     .push(RecentBet {
                         wallet: address.clone(),
                         outcome: outcome.clone(),
-                        weight: *weight,
+                        weight,
                         usdc_size,
                         timestamp: Utc::now(),
                     });
@@ -226,7 +244,7 @@ impl CopyTrader {
                         }
                         (score, wallets.len() as u32)
                     })
-                    .unwrap_or((*weight, 1));
+                    .unwrap_or((weight, 1));
 
                 // Confidence: anchor to market price with conservative edge assumption
                 let wallet_info = tracker.get_wallet(address);
