@@ -1,0 +1,18 @@
+[Unit]
+Description=Bottie Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/bottie
+ExecStart=/usr/bin/python3 /opt/bottie/dashboard.py
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bottie-dashboard
+
+[Install]
+WantedBy=multi-user.target

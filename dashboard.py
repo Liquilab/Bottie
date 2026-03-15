@@ -762,11 +762,15 @@ a { color: var(--blue); text-decoration: none; }
 .green { color: var(--green); } .red { color: var(--red); }
 .yellow { color: var(--yellow); } .muted { color: var(--muted); }
 
-/* Header */
+/* Header + Nav */
 .header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
 .header h1 { font-size: 1.1rem; font-weight: 700; letter-spacing: 1px; }
 .header-right { display: flex; gap: 16px; align-items: center; color: var(--muted); font-size: 0.8rem; }
 #countdown { color: var(--yellow); font-family: monospace; }
+.nav { display: flex; gap: 0; background: var(--surface); border-bottom: 1px solid var(--border); }
+.nav a { padding: 10px 20px; color: var(--muted); font-size: 0.85rem; font-weight: 600; border-bottom: 2px solid transparent; }
+.nav a:hover { color: var(--text); background: rgba(255,255,255,0.03); }
+.nav a.active { color: var(--blue); border-bottom-color: var(--blue); }
 
 /* Layout */
 .main { max-width: 1600px; margin: 0 auto; padding: 20px 24px; }
@@ -841,15 +845,18 @@ tbody td { padding: 9px 12px; vertical-align: middle; }
 """
 
 
-def render_page(trades, wallet_map):
-    kpis       = compute_kpis(trades)
-    wallet_stats = compute_wallet_stats(trades, wallet_map)
-    sport_stats  = compute_sport_stats(trades)
-    daily_pnl    = compute_daily_pnl(trades)
-    dag_entries  = load_dag()
-    scout        = load_scout_report()
-    playbook     = load_playbook()
-    now_str      = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+def page_wrap(active_page, body_html):
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    pages = [
+        ("Overview", "/"),
+        ("Trades", "/trades"),
+        ("Wallets", "/wallets"),
+        ("Research", "/research"),
+    ]
+    nav = ""
+    for label, href in pages:
+        cls = ' class="active"' if href == active_page else ""
+        nav += f'<a href="{href}"{cls}>{label}</a>'
 
     return f"""<!DOCTYPE html>
 <html lang="nl">
@@ -857,97 +864,122 @@ def render_page(trades, wallet_map):
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta http-equiv="refresh" content="30">
-  <title>Bottie Dashboard</title>
+  <title>Bottie — {active_page}</title>
   <style>{CSS}</style>
 </head>
 <body>
 <div class="header">
-  <h1>🤖 BOTTIE DASHBOARD</h1>
+  <h1>BOTTIE</h1>
   <div class="header-right">
-    <span>Bijgewerkt: {now_str}</span>
-    <span>Refresh in <span id="countdown">30</span>s</span>
+    <span>{now_str}</span>
+    <span id="countdown">30</span>s
   </div>
 </div>
+<div class="nav">{nav}</div>
+<div class="main">{body_html}</div>
+<script>
+let t = 30;
+const el = document.getElementById('countdown');
+if (el) setInterval(() => {{ el.textContent = --t; if(t<=0) location.reload(); }}, 1000);
+</script>
+</body>
+</html>"""
 
-<div class="main">
 
-  <!-- KPIs + Goal -->
-  {render_kpi_row(kpis, wallet_map)}
+def render_overview(trades, wallet_map):
+    kpis = compute_kpis(trades)
+    wallet_stats = compute_wallet_stats(trades, wallet_map)
+    sport_stats = compute_sport_stats(trades)
+    daily_pnl = compute_daily_pnl(trades)
 
-  <!-- Resolved trades -->
-  <div class="section">
-    <div class="section-title">Resolved Trades (laatste 50)</div>
-    {render_resolved_trades(trades, wallet_map)}
-  </div>
+    body = render_kpi_row(kpis, wallet_map)
+    body += f"""
+    <div class="section">
+      <div class="section-title">Dagelijkse P&L (14d)</div>
+      {render_pnl_chart(daily_pnl)}
+    </div>
+    <div class="section">
+      <div class="section-title">Resolved Trades (laatste 20)</div>
+      {render_resolved_trades(trades, wallet_map)}
+    </div>
+    <div class="two-col">
+      <div class="section">
+        <div class="section-title">Wallet Leaderboard</div>
+        {render_wallet_table(wallet_stats, wallet_map)}
+      </div>
+      <div class="section">
+        <div class="section-title">Per Sport</div>
+        {render_sport_grid(sport_stats)}
+      </div>
+    </div>"""
+    return page_wrap("/", body)
 
-  <!-- Open bets -->
-  <div class="section">
-    <div class="section-title">Open Bets ({kpis['open_count']})</div>
-    {render_open_bets(trades, wallet_map)}
-  </div>
 
-  <!-- Two-column: Wallets + Sports -->
-  <div class="two-col">
+def render_trades_page(trades, wallet_map):
+    kpis = compute_kpis(trades)
+    body = f"""
+    <div class="section">
+      <div class="section-title">Open Bets ({kpis['open_count']})</div>
+      {render_open_bets(trades, wallet_map)}
+    </div>
+    <div class="section">
+      <div class="section-title">Resolved Trades (laatste 50)</div>
+      {render_resolved_trades(trades, wallet_map)}
+    </div>
+    <div class="section">
+      <div class="section-title">Alle Trades (laatste 200)</div>
+      {render_all_trades(trades, wallet_map)}
+    </div>"""
+    return page_wrap("/trades", body)
+
+
+def render_wallets_page(trades, wallet_map):
+    wallet_stats = compute_wallet_stats(trades, wallet_map)
+    scout = load_scout_report()
+    body = f"""
     <div class="section">
       <div class="section-title">Wallet Leaderboard</div>
       {render_wallet_table(wallet_stats, wallet_map)}
     </div>
     <div class="section">
-      <div class="section-title">Per Sport</div>
-      {render_sport_grid(sport_stats)}
-    </div>
-  </div>
+      <div class="section-title">Wallet Scout Rapport</div>
+      {render_scout_report(scout)}
+    </div>"""
+    return page_wrap("/wallets", body)
 
-  <!-- PnL chart -->
-  <div class="section">
-    <div class="section-title">Dagelijkse P&L (14d)</div>
-    {render_pnl_chart(daily_pnl)}
-  </div>
 
-  <!-- Evolution + Scout -->
-  <div class="two-col">
+def render_research_page():
+    dag_entries = load_dag()
+    playbook = load_playbook()
+    scout = load_scout_report()
+    body = f"""
     <div class="section">
       <div class="section-title">Evolutie Log (autoresearch)</div>
       {render_evolution_log(dag_entries)}
     </div>
     <div class="section">
-      <div class="section-title">Wallet Scout</div>
-      {render_scout_report(scout)}
-    </div>
-  </div>
-
-  <!-- Playbook -->
-  <div class="section">
-    <div class="section-title">Playbook (LLM Curator)</div>
-    {render_playbook(playbook)}
-  </div>
-
-  <!-- All trades -->
-  <div class="section">
-    <div class="section-title">Alle Trades (laatste 200)</div>
-    {render_all_trades(trades, wallet_map)}
-  </div>
-
-</div>
-
-<script>
-let t = 30;
-const el = document.getElementById('countdown');
-if (el) setInterval(() => {{ el.textContent = --t + 's'; if(t<=0) location.reload(); }}, 1000);
-</script>
-</body>
-</html>"""
+      <div class="section-title">Playbook (LLM Curator)</div>
+      {render_playbook(playbook)}
+    </div>"""
+    return page_wrap("/research", body)
 
 
 # ── HTTP Server ───────────────────────────────────────────────────────────────
 
 class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
+        if self.path in ("/", "/index.html", "/trades", "/wallets", "/research"):
             try:
                 trades     = load_trades()
                 wallet_map = parse_config_wallets()
-                html = render_page(trades, wallet_map)
+                if self.path == "/trades":
+                    html = render_trades_page(trades, wallet_map)
+                elif self.path == "/wallets":
+                    html = render_wallets_page(trades, wallet_map)
+                elif self.path == "/research":
+                    html = render_research_page()
+                else:
+                    html = render_overview(trades, wallet_map)
                 body = html.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
