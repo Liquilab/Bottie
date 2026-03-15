@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::config::RiskConfig;
-use tracing::warn;
+use tracing::{info, warn};
 
 pub struct RiskManager {
     config: RiskConfig,
@@ -184,5 +184,17 @@ impl RiskManager {
 
     pub fn open_bets(&self) -> u32 {
         self.open_bets
+    }
+
+    /// Sync open_bets with actual count from trade log.
+    /// Fixes drift when positions are manually sold via UI.
+    pub fn sync_open_bets(&mut self, actual_count: u32) {
+        if self.open_bets != actual_count {
+            info!(
+                "risk: open_bets drift corrected {} → {}",
+                self.open_bets, actual_count
+            );
+            self.open_bets = actual_count;
+        }
     }
 }

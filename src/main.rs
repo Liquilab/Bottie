@@ -321,6 +321,14 @@ async fn copy_trading_loop(
                     r.update_bankroll(balance);
                 }
             }
+            // Recount actual open bets from trade log (fixes drift from manual UI sells)
+            let actual_open = logger.load_all().iter()
+                .filter(|t| t.filled && t.result.is_none() && !t.dry_run)
+                .count() as u32;
+            {
+                let mut r = risk.write().await;
+                r.sync_open_bets(actual_open);
+            }
         }
 
         // Poll for new copy signals

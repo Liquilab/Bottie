@@ -78,6 +78,10 @@ impl ClobClient {
         format!("{}", self.signer.address())
     }
 
+    pub fn funder_address(&self) -> String {
+        format!("{}", self.config.funder)
+    }
+
     fn timestamp() -> String {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
