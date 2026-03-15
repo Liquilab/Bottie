@@ -78,11 +78,13 @@ impl Executor {
             return Ok(false);
         }
 
-        // Event deduplication: skip if we already have ANY position on this event
-        // Prevents conflicting bets (e.g. HSV No + KOE Yes on same match)
-        if !signal.event_slug.is_empty() && logger.has_open_event(&signal.event_slug) {
+        // Event deduplication: skip conflicting moneyline bets on same event.
+        // Spread and O/U are allowed alongside moneyline on same event.
+        if !signal.event_slug.is_empty()
+            && logger.has_conflicting_event(&signal.event_slug, &signal.market_title)
+        {
             info!(
-                "SKIP: already have position on event {} ({})",
+                "SKIP: conflicting moneyline on event {} ({})",
                 signal.event_slug, signal.market_title
             );
             return Ok(false);

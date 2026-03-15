@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -47,8 +47,10 @@ pub struct TradeLogger {
     file: Mutex<std::fs::File>,
     /// In-memory set of "condition_id:outcome" for open (unresolved, filled) positions.
     open_positions: Mutex<HashSet<String>>,
-    /// In-memory set of event slugs with open positions — prevents conflicting bets on same event.
-    open_slugs: Mutex<HashSet<String>>,
+    /// event_slug → market_type for open positions.
+    /// Prevents conflicting moneyline/draw bets on same event.
+    /// Spread and O/U don't conflict with moneyline.
+    open_event_types: Mutex<HashMap<String, String>>,
 }
 
 impl TradeLogger {
@@ -64,20 +66,20 @@ impl TradeLogger {
             .expect("failed to open trade log file");
 
         // Bootstrap caches from existing data
-        let (open_positions, open_slugs) = Self::load_open_caches_from_file(&path);
+        let (open_positions, open_event_types) = Self::load_open_caches_from_file(&path);
 
         Self {
             path,
             file: Mutex::new(file),
             open_positions: Mutex::new(open_positions),
-            open_slugs: Mutex::new(open_slugs),
+            open_event_types: Mutex::new(open_event_types),
         }
     }
 
-    fn load_open_caches_from_file(path: &PathBuf) -> (HashSet<String>, HashSet<String>) {
+    fn load_open_caches_from_file(path: &PathBuf) -> (HashSet<String>, HashMap<String, String>) {
         let contents = match std::fs::read_to_string(path) {
             Ok(c) => c,
-            Err(_) => return (HashSet::new(), HashSet::new()),
+            Err(_) => return (HashSet::new(), HashMap::new()),
         };
         let open: Vec<TradeLog> = contents
             .lines()
@@ -87,12 +89,31 @@ impl TradeLogger {
         let positions = open.iter()
             .map(|t| format!("{}:{}", t.condition_id, t.outcome.to_lowercase()))
             .collect();
-        let slugs = open.iter()
-            .filter_map(|t| t.event_slug.as_ref())
-            .filter(|s| !s.is_empty())
-            .cloned()
-            .collect();
-        (positions, slugs)
+        let mut event_types = HashMap::new();
+        for t in &open {
+            if let Some(slug) = &t.event_slug {
+                if !slug.is_empty() {
+                    let mtype = Self::market_type(&t.market_title);
+                    event_types.insert(slug.clone(), mtype);
+                }
+            }
+        }
+        (positions, event_types)
+    }
+
+    /// Classify market type from title.
+    /// "moneyline" and "draw" conflict with each other.
+    /// "spread" and "total" don't conflict with anything.
+    fn market_type(title: &str) -> String {
+        let t = title.to_lowercase();
+        if t.contains("spread") || t.contains("(-") || t.contains("(+") {
+            "spread".to_string()
+        } else if t.contains("o/u") || t.contains("over/under") || t.contains("total") {
+            "total".to_string()
+        } else {
+            // "win on", "draw", "vs." all are moneyline-type (mutually exclusive outcomes)
+            "moneyline".to_string()
+        }
     }
 
     fn position_key(condition_id: &str, outcome: &str) -> String {
@@ -106,7 +127,8 @@ impl TradeLogger {
             self.open_positions.lock().unwrap().insert(key);
             if let Some(slug) = &trade.event_slug {
                 if !slug.is_empty() {
-                    self.open_slugs.lock().unwrap().insert(slug.clone());
+                    let mtype = Self::market_type(&trade.market_title);
+                    self.open_event_types.lock().unwrap().insert(slug.clone(), mtype);
                 }
             }
         }
@@ -143,13 +165,23 @@ impl TradeLogger {
         self.open_positions.lock().unwrap().contains(&key)
     }
 
-    /// Check if there is already an open position on any condition in this event.
-    /// Prevents conflicting bets (e.g. HSV No + KOE Yes on the same match).
-    pub fn has_open_event(&self, event_slug: &str) -> bool {
+    /// Check if there is a CONFLICTING open position on this event.
+    /// Moneyline/draw bets conflict with each other (only one outcome wins).
+    /// Spread and O/U don't conflict with moneyline or each other.
+    pub fn has_conflicting_event(&self, event_slug: &str, market_title: &str) -> bool {
         if event_slug.is_empty() {
             return false;
         }
-        self.open_slugs.lock().unwrap().contains(event_slug)
+        let new_type = Self::market_type(market_title);
+        let event_types = self.open_event_types.lock().unwrap();
+        match event_types.get(event_slug) {
+            Some(existing_type) => {
+                // Moneyline conflicts with moneyline (e.g. Stuttgart Yes vs Draw Yes)
+                // Spread and total don't conflict with anything
+                existing_type == "moneyline" && new_type == "moneyline"
+            }
+            None => false, // no existing position on this event
+        }
     }
 
     /// Rewrite the entire log with updated records (used by the resolver).
@@ -164,13 +196,17 @@ impl TradeLogger {
             .filter(|t| !t.outcome.is_empty())
             .map(|t| Self::position_key(&t.condition_id, &t.outcome))
             .collect();
-        let new_slugs: HashSet<String> = open.iter()
-            .filter_map(|t| t.event_slug.as_ref())
-            .filter(|s| !s.is_empty())
-            .cloned()
-            .collect();
+        let mut new_event_types = HashMap::new();
+        for t in &open {
+            if let Some(slug) = &t.event_slug {
+                if !slug.is_empty() {
+                    let mtype = Self::market_type(&t.market_title);
+                    new_event_types.insert(slug.clone(), mtype);
+                }
+            }
+        }
         *self.open_positions.lock().unwrap() = new_positions;
-        *self.open_slugs.lock().unwrap() = new_slugs;
+        *self.open_event_types.lock().unwrap() = new_event_types;
 
         let mut file = self.file.lock().unwrap();
         if let Err(e) = file.set_len(0) {
