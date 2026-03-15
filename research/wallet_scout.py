@@ -166,6 +166,19 @@ async def evaluate_wallet(client: httpx.AsyncClient, address: str) -> dict:
     # Copyability check
     both_sides_ratio = await check_copyability(positions)
 
+    # Last activity: check most recent closed position timestamp
+    last_activity_days = 999
+    for p in closed:
+        ts = p.get("resolvedAt") or p.get("endDate") or ""
+        if ts:
+            try:
+                from datetime import datetime, timezone
+                resolved = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                days_ago = (datetime.now(timezone.utc) - resolved).days
+                last_activity_days = min(last_activity_days, days_ago)
+            except Exception:
+                pass
+
     return {
         "total_positions": len(positions),
         "active_positions": len(active),
@@ -177,6 +190,7 @@ async def evaluate_wallet(client: httpx.AsyncClient, address: str) -> dict:
         "sharpe": round(sharpe, 3),
         "worst_trade": round(worst_trade, 2),
         "both_sides_ratio": round(both_sides_ratio, 3),
+        "last_activity_days": last_activity_days,
     }
 
 
@@ -196,6 +210,9 @@ def score_wallet(eval_data: dict, leaderboard_pnl: float, leaderboard_volume: fl
         return 0  # Not enough track record
     if active == 0:
         return 0  # Not currently trading
+    last_activity = eval_data.get("last_activity_days", 999)
+    if last_activity > 4:
+        return 0  # Inactive for >4 days — can't copy stale wallets
     if win_rate < 0.60:
         return 0  # Too many losses for our bankroll
     if win_rate >= 0.95 and closed >= 50 and not is_current:
