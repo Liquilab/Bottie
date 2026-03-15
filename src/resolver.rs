@@ -258,15 +258,7 @@ async fn check_resolutions(
             resolved_count, live_resolved_count, resolved_count - live_resolved_count
         );
 
-        // Redeem winning positions
-        to_redeem.sort();
-        to_redeem.dedup();
-        for condition_id in &to_redeem {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            match client.redeem_position(condition_id).await {
-                Ok(()) => info!("REDEEMED: {}", &condition_id[..12.min(condition_id.len())]),
-                Err(e) => warn!("redeem failed for {}: {e}", &condition_id[..12.min(condition_id.len())]),
-            }
-        }
+        // Note: Polymarket auto-redeems winning positions after resolution.
+        // No manual /redeem API call needed (endpoint doesn't exist in CLOB API).
     }
 }
