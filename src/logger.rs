@@ -176,11 +176,13 @@ impl TradeLogger {
         let event_types = self.open_event_types.lock().unwrap();
         match event_types.get(event_slug) {
             Some(existing_type) => {
-                // Moneyline conflicts with moneyline (e.g. Stuttgart Yes vs Draw Yes)
-                // Spread and total don't conflict with anything
-                existing_type == "moneyline" && new_type == "moneyline"
+                // Same market type on same event = conflict
+                // Moneyline vs moneyline: Stuttgart Yes vs Draw Yes
+                // Spread vs spread: PHI +6.5 vs POR -7.5
+                // Total vs total: O 225.5 vs U 224.5
+                existing_type == &new_type
             }
-            None => false, // no existing position on this event
+            None => false,
         }
     }
 
