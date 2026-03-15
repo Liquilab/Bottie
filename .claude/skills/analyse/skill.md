@@ -171,3 +171,38 @@ Overlap: [welke filters zijn redundant?]
 | Live en dry apart rapporteren | Door elkaar mengen |
 | Bij n < 30: "indicatief" | Sterke conclusies op kleine n |
 | Filter overlap checken | Effecten als additief presenteren |
+
+---
+
+## Known Failures
+
+### F1: Lokale data i.p.v. VPS (2026-03-15)
+- **Niveau:** Instructie (stap 1)
+- **Wat:** Analyse draaide op verouderd lokaal bestand (`tmp/aireview/trades.jsonl`), 85% data ontbrak
+- **Impact:** Alle conclusies fout — Cannae "33% WR" was eigenlijk 57.5%, O/U "19% WR" was 54%, match winners "75% WR" was 59%
+- **Root cause:** Stap 1 zei niet expliciet genoeg "NOOIT lokaal". Skill had geen guard check.
+- **Fix:** Stap 1 herschreven met expliciete `scp` command + verificatie tegen dashboard
+- **Gerelateerd:** `/save` doet geen VPS sync → lokale data is altijd stale
+
+### F2: Price bucket grenzen (2026-03-15)
+- **Niveau:** Instructie (stap 3)
+- **Wat:** Originele buckets (<0.20, 0.20-0.35, 0.35-0.50, >0.50) suggereerden dat 0.35-0.50 een "sweet spot" was
+- **Impact:** In werkelijkheid was >0.50 het winstgevende bucket. De bucket-indeling maskeerde dit.
+- **Status:** Buckets aangepast naar (<0.30, 0.30-0.50, >0.50) in analyse van 15 maart. Skill nog niet geüpdatet.
+
+### F3: STATUS log vs analyse discrepantie (2026-03-15)
+- **Niveau:** Tool (bot STATUS output)
+- **Wat:** Bot STATUS: 523 trades / 50.7% WR / -$175. Analyse: 197 live resolved / 59% WR / -$27.49
+- **Impact:** Onduidelijk welke cijfers de werkelijkheid zijn. Mogelijk telt STATUS crypto/dry runs/open positions mee.
+- **Status:** Open — niet gereconcilieerd
+
+---
+
+## Changelog
+
+| Datum | Type | Wijziging | Reden |
+|-------|------|-----------|-------|
+| 2026-03-15 | Add condition | "NOOIT lokale bestanden" + scp command in stap 1 | F1: 85% data ontbrak bij lokale analyse |
+| 2026-03-15 | Add condition | Verificatie tegen dashboard verplicht | F1: foute conclusies niet opgemerkt |
+| 2026-03-15 | Add condition | Kruistabellen verplicht | Confounding niet gecheckt → effecten dubbel geteld |
+| 2026-03-15 | Reorder | Wilson CI's bij elke tabel, niet optioneel | Conclusies op kleine n zonder CI's |

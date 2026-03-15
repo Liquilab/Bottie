@@ -135,3 +135,39 @@ ssh root@45.76.38.183 'journalctl -u bottie --since "10 min ago" --no-pager 2>/d
 - **Binary:** `/opt/bottie/bottie-bin`
 - **Deploy:** `cargo build --release && cp target/release/bottie bottie-bin`
 - **Na deploy:** `systemctl restart bottie` (+ autoresearch + wallet_scout bij Python changes)
+
+---
+
+## Known Failures
+
+### F1: is-active zonder FILLED check (meerdere sessies)
+- **Niveau:** Instructie (stap volgorde)
+- **Wat:** `systemctl is-active` toonde "active" maar bot plaatste geen trades
+- **Impact:** Dacht dat deploy werkte, maar bot was stuck of had config fout
+- **Root cause:** Stap 1 (services) kwam vóór stap 2 (FILLED). Neiging om na "active" te stoppen.
+- **Fix:** Skill expliciet: "is-active = noodzakelijk maar NIET voldoende"
+- **Mogelijke verbetering:** FILLED check als stap 1, service status als stap 2
+
+### F2: SSH hostname niet gevonden (2026-03-15)
+- **Niveau:** Tool call
+- **Wat:** `ssh bottie` faalde — geen SSH alias geconfigureerd
+- **Impact:** Productie-check in /morning mislukte, moest IP opzoeken in deploy.sh
+- **Fix:** IP hardcoded in skill: `root@45.76.38.183`
+- **Gerelateerd:** /morning had ook geen SSH details → faalde op dezelfde stap
+
+### F3: Nieuwe filters niet verifieerbaar (2026-03-15)
+- **Niveau:** Instructie (stap 3 — ontbrekend)
+- **Wat:** Na deploy van max_delay=60s en min_price=0.20 kon /verify niet bewijzen dat de filters werkten — geen "REJECT: delay too high" of "REJECT: price too low" in logs
+- **Impact:** Onbekend of filters actief zijn of dat de code ze anders logt
+- **Status:** Open — moeten de exacte log messages vinden die bewijzen dat trades worden gefilterd
+- **Mogelijke verbetering:** Stap 3 moet per config parameter de verwachte log output definiëren
+
+---
+
+## Changelog
+
+| Datum | Type | Wijziging | Reden |
+|-------|------|-----------|-------|
+| 2026-03-15 | Add condition | SSH IP hardcoded in "Bekende VPS Details" | F2: ssh alias bestond niet |
+| 2026-03-15 | Add condition | "is-active = noodzakelijk maar NIET voldoende" | F1: false confidence na service check |
+| 2026-03-15 | Tighten trigger | grep FILLED, niet EXECUTE | EXECUTE ≠ FILLED (memory) |

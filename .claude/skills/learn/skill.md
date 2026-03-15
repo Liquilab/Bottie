@@ -1,6 +1,11 @@
-# /learn — Sessie Lessen Extraheren
+# /learn — Sessie Lessen Extraheren + Skill Improvement
 
-Analyseert de huidige sessie en slaat herbruikbare patronen op in memory files.
+Analyseert de huidige sessie, slaat herbruikbare patronen op in memory files, en **amendeert skills die faalden**.
+
+Dit is de inspect+amend stap van de self-improving loop:
+```
+observe (tijdens sessie) → inspect (patronen vinden) → amend (skills updaten) → evaluate (PnL/correcties meten)
+```
 
 ---
 
@@ -9,6 +14,7 @@ Analyseert de huidige sessie en slaat herbruikbare patronen op in memory files.
 ```
 /learn              # Analyseer huidige sessie
 /learn [onderwerp]  # Extraheer lessen over specifiek onderwerp
+/learn skills       # Focus op skill failures en amendments
 ```
 
 ---
@@ -20,7 +26,7 @@ Analyseert de huidige sessie en slaat herbruikbare patronen op in memory files.
 - Correcties door de user ("nee, het moet zo...")
 - Workarounds voor tools/API's/libraries
 - Project-specifieke conventies die nergens gedocumenteerd staan
-- Debugging inzichten die tijd hebben bespaard
+- **Skill failures: welke skill, welke stap, welk niveau (routing/instructie/tool)**
 
 **NIET vastleggen:**
 - Eenmalige typo's of simpele fixes
@@ -40,42 +46,75 @@ Scan de conversatie voor:
 - Fouten die >2 pogingen kostten
 - Ongedocumenteerde gedragingen van tools/API's
 - Patronen die in meerdere sessies terugkomen
+- **Skills die faalden of suboptimaal presteerden**
 
-### Stap 2: Categoriseer
+### Stap 2: Diagnose per Failure (3 niveaus)
+
+Bij elke skill failure, bepaal het niveau:
+
+| Niveau | Vraag | Voorbeeld | Fix locatie |
+|--------|-------|-----------|-------------|
+| **Routing** | Werd de juiste skill aangeroepen? | /analyse i.p.v. /verify | Skill descriptions/triggers |
+| **Instructie** | Welke stap in de skill klopte niet? | Stap 1 zei niet "altijd VPS data" | SKILL.md stap X |
+| **Tool call** | Werkt de onderliggende API/command nog? | SSH alias bestaat niet, API changed | Tool/infra fix |
+
+### Stap 3: Categoriseer
 
 Per gevonden patroon, vraag de user:
 
 ```
 Gevonden: [korte beschrijving]
-Type: ERROR (fout om te vermijden) / LEARNING (bewezen patroon) / SKIP
+Type: ERROR / LEARNING / SKILL_AMENDMENT / SKIP
+Niveau: Routing / Instructie / Tool call (alleen bij SKILL_AMENDMENT)
+Skill: [welke skill] (alleen bij SKILL_AMENDMENT)
 ```
 
-### Stap 3: Schrijf naar Memory
+### Stap 4: Schrijf naar Memory
 
-**Voor ERRORS** — schrijf naar MEMORY.md of een topic file:
+**Voor ERRORS** — schrijf naar memory file:
 
 ```markdown
-### ERROR: [korte titel] — YYYY-MM-DD
-**Context:** [wanneer doet dit zich voor]
-**Fout:** [wat ging er mis en waarom]
-**Oplossing:** [hoe te voorkomen]
-**Confidence:** High/Medium
+---
+name: [titel]
+description: [one-liner]
+type: feedback/error
+---
+[beschrijving]
+**Why:** [context]
+**How to apply:** [concrete actie]
 ```
 
-**Voor LEARNINGS:**
+**Voor LEARNINGS** — schrijf naar memory file (zelfde format, type: learning)
 
-```markdown
-### LEARNING: [korte titel] — YYYY-MM-DD
-**Context:** [wanneer is dit relevant]
-**Patroon:** [wat werkt en waarom]
-**Oplossing:** [concrete actie of code]
-**Confidence:** High/Medium
-```
+### Stap 5: Amendeer Skills (NIEUW)
 
-### Stap 4: Organiseer
+**Voor SKILL_AMENDMENTS** — update de SKILL.md direct:
+
+1. **Known Failures** sectie: voeg failure toe met:
+   - Niveau (routing/instructie/tool)
+   - Wat ging mis
+   - Impact (PnL of operationeel)
+   - Root cause
+   - Fix of status
+
+2. **Changelog** sectie: voeg entry toe met:
+   - Datum
+   - Amendment type (tighten trigger / add condition / reorder steps / change format)
+   - Wijziging
+   - Reden (link naar failure)
+
+3. **Skill instructies zelf**: pas de stap aan die faalde
+
+Amendment types:
+- **Tighten trigger** → skill activeert te breed of te vaak
+- **Add condition** → ontbrekende guard/check
+- **Reorder steps** → verkeerde volgorde veroorzaakt cascade failure
+- **Change format** → output is misleidend of onvolledig
+
+### Stap 6: Organiseer
 
 - Als MEMORY.md te lang wordt (>150 regels): verplaats details naar topic files
-- Link vanuit MEMORY.md naar topic files: `| Onderwerp | pad/naar/file.md |`
+- Link vanuit MEMORY.md naar topic files
 - Verwijder of update learnings die verouderd blijken
 
 ---
@@ -86,9 +125,12 @@ Type: ERROR (fout om te vermijden) / LEARNING (bewezen patroon) / SKIP
 |----|-------|
 | Alleen bewezen patronen vastleggen | Speculatie opslaan |
 | Concrete, actionable beschrijvingen | Vage "let op X" notities |
-| User laten kiezen ERROR/LEARNING/SKIP | Automatisch alles opslaan |
+| User laten kiezen ERROR/LEARNING/SKILL_AMENDMENT/SKIP | Automatisch alles opslaan |
 | Bestaande entries updaten als ze verouderen | Duplicaten aanmaken |
 | Compact houden (MEMORY.md < 200 regels) | Eindeloos laten groeien |
+| Bij skill amendment: update Known Failures + Changelog + instructie | Alleen memory schrijven |
+| Diagnose op 3 niveaus (routing/instructie/tool) | Skill als geheel pass/fail markeren |
+| Link failures aan PnL impact waar mogelijk | Abstracte "dit ging fout" notities |
 
 ---
 
@@ -99,12 +141,37 @@ Type: ERROR (fout om te vermijden) / LEARNING (bewezen patroon) / SKIP
   projects/<project>/
     memory/
       MEMORY.md          ← Altijd geladen (compact, <200 regels)
-      debugging.md       ← Topic file: debugging patronen
-      api-quirks.md      ← Topic file: API eigenaardigheden
-      patterns.md        ← Topic file: code patronen
+      [topic files]      ← Detail per onderwerp
+
+skills/
+  [skill]/
+    skill.md             ← Bevat ## Known Failures en ## Changelog
 ```
 
 MEMORY.md bevat:
-- Huidige project state (kort)
-- Index naar topic files
-- Belangrijkste 5-10 regels die niet in CLAUDE.md staan
+- Index naar memory files
+- Belangrijkste regels die niet in CLAUDE.md staan
+
+SKILL.md bevat (nieuw):
+- Known Failures: failure history met niveau, impact, root cause
+- Changelog: alle amendments met type en reden
+
+---
+
+## Known Failures
+
+### F1: Alleen memories, geen skill amendments (2026-03-15)
+- **Niveau:** Instructie
+- **Wat:** /learn schreef lessen naar memory files maar updatte de skills zelf niet. Resultaat: dezelfde fouten bleven in de skill instructies staan.
+- **Impact:** /analyse bleef falen op dezelfde stap (lokale data) tot de user het handmatig fixte
+- **Fix:** Stap 5 (Amendeer Skills) toegevoegd. /learn update nu SKILL.md direct.
+
+---
+
+## Changelog
+
+| Datum | Type | Wijziging | Reden |
+|-------|------|-----------|-------|
+| 2026-03-15 | Add condition | Stap 2: diagnose op 3 niveaus (routing/instructie/tool) | Skill failures werden niet gediagnosticeerd |
+| 2026-03-15 | Add condition | Stap 5: skill amendments (Known Failures + Changelog + instructie fix) | Skills werden niet geüpdatet na failures |
+| 2026-03-15 | Add condition | SKILL_AMENDMENT als nieuw type naast ERROR/LEARNING | Onderscheid tussen memory en skill fix |
