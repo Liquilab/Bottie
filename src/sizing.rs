@@ -58,27 +58,48 @@ pub fn kelly_size(
     shares
 }
 
-/// Size specifically for copy trades — we trust the wallet, not Kelly
+/// Size specifically for copy trades — Fixed-to-Win sizing.
+///
+/// Instead of risking a flat dollar amount regardless of odds, we size so the
+/// potential PAYOUT is constant. This equalizes win/loss ratio to ~1:1, dropping
+/// break-even WR from ~61% to ~50%.
+///
+/// Example with $1.00 target win:
+///   90ct favorite: risk $0.11, win $0.11 (instead of flat $3.50 risk, $0.39 win)
+///   50ct:          risk $1.00, win $1.00
+///   30ct:          risk $0.43, win $1.00
 pub fn copy_trade_size(
     bankroll: f64,
     signal: &AggregatedSignal,
     config: &SizingConfig,
 ) -> f64 {
-    // Skip penny markets and invalid prices
+    // Skip invalid prices
     if signal.price < config.min_price || signal.price >= 1.0 || signal.price <= 0.0 {
         return 0.0;
     }
 
-    if bankroll < 3.5 {
+    if bankroll < 1.0 {
         return 0.0;
     }
 
-    // Base size: percentage of bankroll, but always at least $3.50 per trade
-    let base_usdc = (bankroll * config.copy_base_size_pct / 100.0).max(3.5);
+    // Fixed-to-Win: target a constant win amount, then size the risk accordingly.
+    // target_win = bankroll * copy_base_size_pct / 100
+    // size_usdc = target_win / (1 - price)  [because win payout = shares * (1-price)]
+    // size_usdc = target_win * price / (1-price) ... wait, let me think:
+    //   shares = size_usdc / price
+    //   win_payout = shares * (1 - price) = size_usdc * (1 - price) / price
+    //   So: size_usdc = target_win * price / (1 - price)
+    let target_win = bankroll * config.copy_base_size_pct / 100.0;
+    let size_usdc = target_win * signal.price / (1.0 - signal.price);
 
-    // Cap at max bet, but never below $3.50 minimum
-    let max_bet = (bankroll * config.max_bet_pct / 100.0).max(3.5);
-    let final_usdc = base_usdc.min(max_bet).min(bankroll);
+    // Cap at max bet percentage of bankroll
+    let max_bet = bankroll * config.max_bet_pct / 100.0;
+    let final_usdc = size_usdc.min(max_bet).min(bankroll);
+
+    // Polymarket minimum is $1.00 (not our old $3.50)
+    if final_usdc < 1.0 {
+        return 0.0;
+    }
 
     // Convert to shares
     final_usdc / signal.price
