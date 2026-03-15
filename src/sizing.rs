@@ -69,15 +69,15 @@ pub fn copy_trade_size(
         return 0.0;
     }
 
-    if bankroll < 2.5 {
+    if bankroll < 3.5 {
         return 0.0;
     }
 
-    // Base size: percentage of bankroll, but always at least $2.50 per trade
-    let base_usdc = (bankroll * config.copy_base_size_pct / 100.0).max(2.5);
+    // Base size: percentage of bankroll, but always at least $3.50 per trade
+    let base_usdc = (bankroll * config.copy_base_size_pct / 100.0).max(3.5);
 
-    // Cap at max bet, but never below $2.50 minimum
-    let max_bet = (bankroll * config.max_bet_pct / 100.0).max(2.5);
+    // Cap at max bet, but never below $3.50 minimum
+    let max_bet = (bankroll * config.max_bet_pct / 100.0).max(3.5);
     let final_usdc = base_usdc.min(max_bet).min(bankroll);
 
     // Convert to shares
