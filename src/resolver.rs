@@ -30,9 +30,16 @@ pub async fn resolver_loop(
     tracker: Arc<RwLock<WalletTracker>>,
 ) {
     let mut check_state: HashMap<String, MarketCheckState> = HashMap::new();
+    let mut tp_counter: u32 = 0;
 
     loop {
         check_resolutions(&client, &logger, &risk, &tracker, &mut check_state).await;
+
+        // Take-profit check every 2 minutes: sell positions above 95ct
+        tp_counter += 1;
+        if tp_counter % 2 == 0 {
+            take_profit_check(&client, &logger, &risk).await;
+        }
 
         // Base tick: every 60 seconds. Individual markets are skipped if not due.
         tokio::time::sleep(Duration::from_secs(60)).await;
@@ -260,6 +267,98 @@ async fn check_resolutions(
 
         // Note: Polymarket auto-redeems winning positions after resolution.
         // No manual /redeem API call needed (endpoint doesn't exist in CLOB API).
+    }
+}
+
+/// Take-profit: sell open positions where best bid > 95ct.
+/// At 95ct+ the risk/reward of holding is terrible: risk full investment for 5ct extra.
+const TAKE_PROFIT_THRESHOLD: f64 = 0.95;
+
+async fn take_profit_check(
+    client: &ClobClient,
+    logger: &TradeLogger,
+    risk: &Arc<RwLock<RiskManager>>,
+) {
+    let mut trades = logger.load_all();
+
+    // Find open live positions
+    let open_indices: Vec<usize> = trades.iter().enumerate()
+        .filter(|(_, t)| t.filled && t.result.is_none() && !t.dry_run && !t.token_id.is_empty())
+        .map(|(i, _)| i)
+        .collect();
+
+    if open_indices.is_empty() {
+        return;
+    }
+
+    let mut sold_count = 0u32;
+    let mut total_profit = 0.0f64;
+
+    for &idx in &open_indices {
+        let token_id = trades[idx].token_id.clone();
+        let entry_price = trades[idx].price;
+        let shares = trades[idx].size_shares;
+        let title = trades[idx].market_title.clone();
+
+        // Check best bid
+        let best_bid = match client.get_best_bid(&token_id).await {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+
+        if best_bid < TAKE_PROFIT_THRESHOLD {
+            continue;
+        }
+
+        // Sell at best bid via FOK
+        info!(
+            "TAKE PROFIT: {} | bid={:.0}ct (entry {:.0}ct) | selling {:.1} shares",
+            &title[..title.len().min(50)], best_bid * 100.0, entry_price * 100.0, shares
+        );
+
+        let fee_bps = 0; // most markets have no fee
+        match client.create_and_post_order(
+            &token_id,
+            best_bid,
+            shares,
+            crate::clob::client::Side::Sell,
+            crate::clob::client::OrderType::FOK,
+            fee_bps,
+        ).await {
+            Ok(resp) => {
+                if resp.is_filled() {
+                    let sell_usdc = shares * best_bid;
+                    let profit = sell_usdc - trades[idx].size_usdc;
+                    trades[idx].result = Some("take_profit".to_string());
+                    trades[idx].pnl = Some(profit);
+                    trades[idx].resolved_at = Some(Utc::now());
+                    sold_count += 1;
+                    total_profit += profit;
+
+                    info!(
+                        "TAKE PROFIT FILLED: {} | profit=${:.2} | bid={:.0}ct",
+                        &title[..title.len().min(40)], profit, best_bid * 100.0
+                    );
+                } else {
+                    warn!("TAKE PROFIT NOT FILLED: {} (bid may have moved)", &title[..title.len().min(40)]);
+                }
+            }
+            Err(e) => {
+                warn!("TAKE PROFIT ERROR: {} | {}", &title[..title.len().min(40)], e);
+            }
+        }
+
+        // Rate limit between sells
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    if sold_count > 0 {
+        logger.rewrite_all(trades);
+        let mut r = risk.write().await;
+        for _ in 0..sold_count {
+            r.record_trade_closed_with_context(0.0, None, "");
+        }
+        info!("take-profit: sold {} positions, total profit ${:.2}", sold_count, total_profit);
     }
 }
 

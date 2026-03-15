@@ -236,6 +236,15 @@ impl OrderBook {
             .reduce(f64::min)?;
         Some(ask)
     }
+
+    pub fn best_bid(&self) -> Option<f64> {
+        let bid = self.bids.as_ref()?
+            .iter()
+            .map(|l| l.price_f64())
+            .filter(|&p| p > 0.0 && p < 1.0)
+            .reduce(f64::max)?;
+        Some(bid)
+    }
 }
 
 /// Gamma API market status for resolution checking
