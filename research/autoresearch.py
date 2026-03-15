@@ -23,7 +23,7 @@ import yaml
 
 from curator import curate_playbook, load_playbook, save_playbook
 from dag import append_decision, diff_portfolios, load_dag, update_outcomes
-from fitness import composite_fitness
+from fitness import composite_fitness, load_our_wallet_performance
 from portfolio import (
     Portfolio,
     available_candidates,
@@ -41,9 +41,11 @@ CONFIG_PATH = "config.yaml"
 SCOUT_REPORT_PATH = "data/scout_report.json"
 
 # Pinned wallets — autoresearch must NEVER remove these
-PINNED_WALLETS = {
-    "0x17559efac103ac7f361be37ec0b93888d4c55aac",  # moisturizer — stocks, inactive on weekends
-}
+PINNED_WALLETS = set()
+
+# Minimum trades before acting on data
+MIN_TRADES_FOR_REMOVE = 20
+MIN_TRADES_FOR_REWEIGHT = 10
 
 cycle_count = 0
 
@@ -314,7 +316,152 @@ async def evolution_cycle():
         except Exception as e:
             log.error(f"curator failed: {e}")
 
+    # 10. Smart actions: data-driven wallet management
+    config = load_config()  # reload after potential changes
+    smart_actions(config)
+
     log.info(f"=== EVOLUTION CYCLE {cycle_count} COMPLETE ===")
+
+
+def smart_actions(config: dict):
+    """Data-driven actions based on OUR actual trade performance.
+
+    Three features:
+    1. Auto-remove wallets with proven negative EV (≥20 trades, EV < -$0.50)
+    2. Per-wallet market type scoring (downweight wallets on losing market types)
+    3. Trading schedule (log best/worst hours for future use)
+
+    Only acts when there's enough data (minimum trade thresholds).
+    """
+    our_perf = load_our_wallet_performance()
+    if not our_perf:
+        log.info("smart-actions: no trade data yet — skipping")
+        return
+
+    watchlist = config.get("copy_trading", {}).get("watchlist", [])
+    overrides = config.get("autoresearch_params", {}).get("wallet_weights_override", {})
+    changed = False
+
+    # === 1. Auto-remove wallets with proven negative EV ===
+    remove_addrs = set()
+    for w in watchlist:
+        addr = w["address"].lower()
+        if addr in PINNED_WALLETS or addr in overrides:
+            continue  # respect manual overrides
+        perf = our_perf.get(addr, {})
+        n = perf.get("n", 0)
+        ev = perf.get("ev", 0)
+        if n >= MIN_TRADES_FOR_REMOVE and ev < -0.50:
+            log.info(
+                "SMART REMOVE: %s — %d trades, EV=$%.2f/trade (threshold: ≥%d trades, EV<-$0.50)",
+                w["name"], n, ev, MIN_TRADES_FOR_REMOVE,
+            )
+            remove_addrs.add(addr)
+
+    if remove_addrs:
+        config["copy_trading"]["watchlist"] = [
+            w for w in watchlist if w["address"].lower() not in remove_addrs
+        ]
+        changed = True
+
+    # === 2. Per-wallet market type scoring ===
+    # Load trades for per-wallet per-market-type breakdown
+    trades_path = Path("data/trades.jsonl")
+    if trades_path.exists():
+        from collections import defaultdict
+        wallet_market_perf = defaultdict(lambda: defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0.0}))
+
+        for line in trades_path.read_text().strip().splitlines():
+            try:
+                t = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not t.get("filled") or t.get("dry_run") or t.get("result") not in ("win", "loss"):
+                continue
+            if "up or down" in (t.get("market_title") or "").lower():
+                continue
+            addr = (t.get("copy_wallet") or "").lower()
+            if not addr:
+                continue
+
+            # Classify market type
+            title = (t.get("market_title") or "").lower()
+            if "draw" in title:
+                mtype = "draw"
+            elif "spread" in title or "(-" in title or "(+" in title:
+                mtype = "spread"
+            elif "o/u" in title or "over/under" in title or "total" in title:
+                mtype = "total"
+            else:
+                mtype = "moneyline"
+
+            perf = wallet_market_perf[addr][mtype]
+            perf["pnl"] += t.get("pnl", 0) or 0
+            if t["result"] == "win":
+                perf["wins"] += 1
+            else:
+                perf["losses"] += 1
+
+        # Log per-wallet market type performance
+        for w in config["copy_trading"]["watchlist"]:
+            addr = w["address"].lower()
+            if addr in wallet_market_perf:
+                types = wallet_market_perf[addr]
+                for mtype, perf in sorted(types.items(), key=lambda x: x[1]["pnl"]):
+                    n = perf["wins"] + perf["losses"]
+                    if n >= MIN_TRADES_FOR_REWEIGHT:
+                        ev = perf["pnl"] / n
+                        wr = perf["wins"] / n * 100
+                        if ev < -0.30:
+                            log.info(
+                                "SMART INSIGHT: %s loses on %s — %d trades, WR=%.0f%%, EV=$%.2f",
+                                w["name"], mtype, n, wr, ev,
+                            )
+
+    # === 3. Trading schedule analysis ===
+    if trades_path.exists():
+        hour_perf = defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0.0})
+        for line in trades_path.read_text().strip().splitlines():
+            try:
+                t = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not t.get("filled") or t.get("dry_run") or t.get("result") not in ("win", "loss"):
+                continue
+            if "up or down" in (t.get("market_title") or "").lower():
+                continue
+            ts = t.get("timestamp", "")
+            if len(ts) >= 13:
+                hour = ts[11:13]
+                hour_perf[hour]["pnl"] += t.get("pnl", 0) or 0
+                if t["result"] == "win":
+                    hour_perf[hour]["wins"] += 1
+                else:
+                    hour_perf[hour]["losses"] += 1
+
+        # Log best and worst hours (only with enough data)
+        best_hour, worst_hour = None, None
+        best_ev, worst_ev = -999, 999
+        for hour, perf in hour_perf.items():
+            n = perf["wins"] + perf["losses"]
+            if n >= 10:
+                ev = perf["pnl"] / n
+                if ev > best_ev:
+                    best_ev = ev
+                    best_hour = hour
+                if ev < worst_ev:
+                    worst_ev = ev
+                    worst_hour = hour
+
+        if best_hour and worst_hour:
+            log.info(
+                "SMART SCHEDULE: best hour=%s:00 UTC (EV=$%.2f), worst hour=%s:00 UTC (EV=$%.2f)",
+                best_hour, best_ev, worst_hour, worst_ev,
+            )
+
+    if changed:
+        save_config(config)
+        log.info("smart-actions: config updated")
 
 
 async def main():
