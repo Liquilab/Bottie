@@ -50,8 +50,7 @@ impl CopyTrader {
     /// This replaces the unreliable /activity endpoint.
     pub async fn poll(&mut self) -> Vec<CopySignal> {
         let config = self.config.read().await;
-        let max_delay = Duration::from_secs(config.copy_trading.max_delay_seconds);
-        let _ = max_delay; // delay check is implicit: new positions detected = fresh enough
+        let max_delay_secs = config.copy_trading.max_delay_seconds;
 
         // Read autoresearch_params for wallet weight overrides and sport multipliers
         let wallet_overrides = config.autoresearch_params.wallet_weights_override.clone();
@@ -147,6 +146,38 @@ impl CopyTrader {
                     continue;
                 }
 
+                let condition_id = pos.condition_id.clone().unwrap_or_default();
+                let outcome = pos.outcome.clone().unwrap_or_default();
+
+                // Measure real delay: fetch wallet's recent trades to find when they entered
+                let mut signal_delay_ms: u64 = 0;
+                if let Ok(trades) = self.client.get_trades_for_wallet(address, 20).await {
+                    let now_secs = Utc::now().timestamp();
+                    for t in &trades {
+                        let t_cid = t.condition_id.as_deref().unwrap_or("");
+                        let t_outcome = t.outcome.as_deref().unwrap_or("");
+                        let t_side = t.side.as_deref().unwrap_or("");
+                        if t_cid == condition_id && t_outcome == outcome && t_side == "BUY" {
+                            if let Some(ts) = t.timestamp_secs() {
+                                let delay = (now_secs - ts).max(0) as u64;
+                                signal_delay_ms = delay * 1000;
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                // Enforce max_delay: skip if trade is too old
+                if signal_delay_ms > 0 && signal_delay_ms > (max_delay_secs as u64) * 1000 {
+                    info!(
+                        "SKIP: delay {:.0}s > max {max_delay_secs}s for {} (wallet {})",
+                        signal_delay_ms as f64 / 1000.0,
+                        pos.title.as_deref().unwrap_or("?"),
+                        name
+                    );
+                    continue;
+                }
+
                 // Only trade if price hasn't moved much since entry — edge still exists
                 let cur_price = pos.cur_price_f64();
                 if cur_price > 0.0 && cur_price < 1.0 {
@@ -156,9 +187,7 @@ impl CopyTrader {
                     }
                 }
                 let usdc_size = pos.initial_value_f64();
-                let condition_id = pos.condition_id.clone().unwrap_or_default();
                 let asset = pos.asset.clone().unwrap_or_default();
-                let outcome = pos.outcome.clone().unwrap_or_default();
                 let title = pos.title.clone().unwrap_or_else(|| {
                     condition_id[..12.min(condition_id.len())].to_string()
                 });
@@ -230,7 +259,7 @@ impl CopyTrader {
                 let confidence = (base_win_rate * consensus_multiplier * sport_mult).min(0.95);
 
                 info!(
-                    "SIGNAL: {} ({:.0}ct) | {} | {:.0}$ | {} wallets (score:{:.1}) | conf={:.0}% base_wr={:.0}%",
+                    "SIGNAL: {} ({:.0}ct) | {} | {:.0}$ | {} wallets (score:{:.1}) | conf={:.0}% base_wr={:.0}% | delay={:.0}s",
                     name,
                     price * 100.0,
                     title.chars().take(50).collect::<String>(),
@@ -238,7 +267,8 @@ impl CopyTrader {
                     consensus_wallets,
                     outcome_score,
                     confidence * 100.0,
-                    base_win_rate * 100.0
+                    base_win_rate * 100.0,
+                    signal_delay_ms as f64 / 1000.0
                 );
 
                 let event_slug = pos.slug.clone().unwrap_or_default();
@@ -258,7 +288,7 @@ impl CopyTrader {
                     confidence,
                     consensus_count: consensus_wallets,
                     timestamp: Utc::now(),
-                    signal_delay_ms: 0, // positions-based: no delay concept
+                    signal_delay_ms,
                 });
             }
 
