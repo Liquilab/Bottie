@@ -24,6 +24,25 @@ Haalt actuele data op van de VPS, analyseert per dimensie met betrouwbaarheidsin
 
 ---
 
+## Stap 0: VRAAG de User voor Echte Cijfers (VERPLICHT)
+
+**VOORDAT je iets analyseert, vraag:**
+```
+Voordat ik analyseer, heb ik de echte cijfers nodig:
+1. Portfolio waarde op PM? (rechtsboven op polymarket.com)
+2. Cash (available to trade)?
+3. Deposits/withdrawals sinds de start?
+4. Totaal geïnvesteerd?
+```
+
+**PM is de ENIGE source of truth voor PnL.**
+- Rendement = (portfolio nu - totaal gestort) / totaal gestort
+- trades.jsonl bevat phantom trades, dubbele logs, en verkeerde PnL — NOOIT als totaalcijfer gebruiken
+- trades.jsonl WEL gebruiken voor: relatieve vergelijkingen (wallet A vs B), WR per categorie, patronen
+- NOOIT aannames maken over bedragen — als je het niet weet, VRAAG het
+
+---
+
 ## Stap 1: Data Ophalen (ALTIJD VPS!)
 
 ```bash
@@ -129,11 +148,16 @@ Per combinatie: n, W/L, WR, 95% CI, PnL, EV/trade.
 ```markdown
 # Trade Analyse — [datum]
 
+## Echte Stand (PM = source of truth)
+Portfolio: $XXX (user) | Gestort: $XXX | Rendement: +/-XX%
+Cash: $XXX | Open posities: XX
+
 ## Databron
 VPS trades.jsonl: [N] trades totaal, [N] live resolved
-Verificatie tegen dashboard: [OK / MISMATCH — details]
+⚠️ trades.jsonl PnL is NIET betrouwbaar als totaalcijfer (phantom trades, dubbele logs)
+Alleen gebruiken voor relatieve vergelijkingen (wallet A vs B, markttype X vs Y)
 
-## Overall
+## Overall (relatief, niet absoluut)
 [tabel met live, dry, totaal]
 Break-even WR bij huidige win/loss ratio: X%
 
@@ -164,13 +188,15 @@ Overlap: [welke filters zijn redundant?]
 
 | DO | DON'T |
 |----|-------|
+| VRAAG user voor PM portfolio + deposits | Aannames maken over bedragen |
+| PM portfolio waarde = source of truth | trades.jsonl PnL als totaalcijfer gebruiken |
+| trades.jsonl voor RELATIEVE vergelijking | trades.jsonl voor ABSOLUTE PnL |
 | ALTIJD scp van VPS | Lokale/tmp bestanden gebruiken |
 | ALTIJD Wilson CI's tonen | Win rates zonder CI rapporteren |
 | ALTIJD kruistabellen voor confounding | Dimensies als onafhankelijk behandelen |
-| ALTIJD vergelijken met dashboard | Alleen eigen cijfers vertrouwen |
-| Live en dry apart rapporteren | Door elkaar mengen |
 | Bij n < 30: "indicatief" | Sterke conclusies op kleine n |
 | Filter overlap checken | Effecten als additief presenteren |
+| REKENEN met echte cijfers | Aannames of schattingen presenteren als feit |
 
 ---
 
@@ -191,10 +217,14 @@ Overlap: [welke filters zijn redundant?]
 - **Status:** Buckets aangepast naar (<0.30, 0.30-0.50, >0.50) in analyse van 15 maart. Skill nog niet geüpdatet.
 
 ### F3: STATUS log vs analyse discrepantie (2026-03-15)
-- **Niveau:** Tool (bot STATUS output)
-- **Wat:** Bot STATUS: 523 trades / 50.7% WR / -$175. Analyse: 197 live resolved / 59% WR / -$27.49
-- **Impact:** Onduidelijk welke cijfers de werkelijkheid zijn. Mogelijk telt STATUS crypto/dry runs/open positions mee.
-- **Status:** Open — niet gereconcilieerd
+- **Status:** Gesloten — STATUS telt live+dry resolved samen
+
+### F4: trades.jsonl PnL als absoluut cijfer (2026-03-15)
+- **Niveau:** Instructie (rapport)
+- **Wat:** Analyse presenteerde trades.jsonl PnL (-$86) als waarheid. PM toonde +$30 winst na bijstorting.
+- **Impact:** Compleet verkeerd beeld — bot leek verliesgevend terwijl hij winst maakte
+- **Root cause:** trades.jsonl bevat phantom trades, dubbele logs, fees niet meegeteld. Geen verificatie tegen PM.
+- **Fix:** Stap 0 toegevoegd: VRAAG user voor PM portfolio + deposits. PM = source of truth.
 
 ---
 
@@ -206,3 +236,6 @@ Overlap: [welke filters zijn redundant?]
 | 2026-03-15 | Add condition | Verificatie tegen dashboard verplicht | F1: foute conclusies niet opgemerkt |
 | 2026-03-15 | Add condition | Kruistabellen verplicht | Confounding niet gecheckt → effecten dubbel geteld |
 | 2026-03-15 | Reorder | Wilson CI's bij elke tabel, niet optioneel | Conclusies op kleine n zonder CI's |
+| 2026-03-16 | Add condition | Stap 0: VRAAG user voor PM portfolio + deposits VOORDAT je analyseert | F4: trades.jsonl PnL was verkeerd, PM is truth |
+| 2026-03-16 | Add condition | trades.jsonl alleen voor RELATIEVE vergelijkingen, NOOIT absoluut PnL | F4: phantom trades en dubbele logs vervuilen data |
+| 2026-03-16 | Add condition | NOOIT aannames maken — als je een getal niet hebt, VRAAG het | F4: presenteerde -$86 terwijl bot +$30 maakte |
