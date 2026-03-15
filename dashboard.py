@@ -8,7 +8,9 @@ from pathlib import Path
 
 BASE_DIR       = Path(__file__).parent
 TRADES_FILE    = BASE_DIR / "data" / "trades.jsonl"
-HYPOTHESES_DIR = BASE_DIR / "research" / "hypotheses"
+DAG_FILE       = BASE_DIR / "data" / "research_dag.jsonl"
+SCOUT_FILE     = BASE_DIR / "data" / "scout_report.json"
+PLAYBOOK_FILE  = BASE_DIR / "data" / "playbook.md"
 CONFIG_FILE    = BASE_DIR / "config.yaml"
 INITIAL_BANKROLL = 250.0  # $200 start + $50 deposit
 
@@ -28,6 +30,35 @@ def load_trades():
                 except Exception:
                     pass
     return trades
+
+def load_dag():
+    if not DAG_FILE.exists():
+        return []
+    entries = []
+    for line in DAG_FILE.read_text().splitlines():
+        if line.strip():
+            try:
+                entries.append(json.loads(line))
+            except Exception:
+                pass
+    entries.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
+    return entries
+
+
+def load_scout_report():
+    if not SCOUT_FILE.exists():
+        return {}
+    try:
+        return json.loads(SCOUT_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def load_playbook():
+    if not PLAYBOOK_FILE.exists():
+        return ""
+    return PLAYBOOK_FILE.read_text()
+
 
 def parse_config_wallets():
     if not CONFIG_FILE.exists():
@@ -502,6 +533,174 @@ def render_resolved_trades(trades, wallet_map):
     </div>"""
 
 
+def render_evolution_log(dag_entries):
+    """Show autoresearch evolution decisions."""
+    if not dag_entries:
+        return '<div class="empty">Nog geen evolutie beslissingen. Autoresearch draait elke 2 uur.</div>'
+
+    rows = ""
+    for e in dag_entries[:30]:
+        action = e.get("action", "?")
+        name = e.get("wallet_name", "?")
+        ts = e.get("timestamp", "")[:16]
+        mutation = e.get("mutation_type", "")
+        fitness = e.get("portfolio_fitness")
+        score = e.get("wallet_score")
+        old_w = e.get("old_weight")
+        new_w = e.get("new_weight")
+        outcome_pnl = e.get("outcome_pnl")
+
+        if action == "add":
+            action_html = '<span class="badge green">ADD</span>'
+            detail = f'weight={new_w:.2f}' if new_w else ""
+        elif action == "remove":
+            action_html = '<span class="badge red">REMOVE</span>'
+            detail = f'was {old_w:.2f}' if old_w else ""
+        elif action == "reweight":
+            action_html = '<span class="badge yellow">REWEIGHT</span>'
+            detail = f'{old_w:.2f} → {new_w:.2f}' if old_w and new_w else ""
+        else:
+            action_html = f'<span class="badge">{action}</span>'
+            detail = ""
+
+        outcome_html = ""
+        if outcome_pnl is not None:
+            outcome_html = fmt_pnl(outcome_pnl)
+        else:
+            outcome_html = '<span class="muted">pending</span>'
+
+        rows += f"""
+        <tr>
+          <td class="muted">{ts}</td>
+          <td>{action_html}</td>
+          <td><strong>{name}</strong></td>
+          <td>{detail}</td>
+          <td class="muted">{mutation}</td>
+          <td>{f"{score:.0f}" if score else "—"}</td>
+          <td>{f"{fitness:.1f}" if fitness else "—"}</td>
+          <td>{outcome_html}</td>
+        </tr>"""
+
+    return f"""
+    <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>Wanneer</th><th>Actie</th><th>Wallet</th><th>Detail</th>
+        <th>Mutatie</th><th>Score</th><th>Fitness</th><th>Resultaat</th>
+      </tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+    </div>"""
+
+
+def render_scout_report(scout):
+    """Show wallet scout findings."""
+    if not scout:
+        return '<div class="empty">Geen scout rapport gevonden. Wallet scout draait elk uur.</div>'
+
+    ts = scout.get("timestamp", "")[:16]
+    evaluated = scout.get("candidates_evaluated", 0)
+
+    # Top candidates
+    adds = scout.get("recommended_additions", [])
+    removals = scout.get("recommended_removals", [])
+    current = scout.get("current_wallet_scores", [])
+
+    sections = f'<div class="muted" style="margin-bottom:12px">Laatste scan: {ts} | {evaluated} wallets geëvalueerd</div>'
+
+    # Current wallet performance
+    if current:
+        rows = ""
+        for w in current[:15]:
+            name = w.get("name", "?")
+            score = w.get("score", 0)
+            wr = w.get("win_rate", 0)
+            sharpe = w.get("sharpe", 0)
+            closed = w.get("closed_positions", 0)
+            sport = w.get("sport_pct", 0)
+            score_color = "#3fb950" if score >= 70 else "#d29922" if score >= 40 else "#f85149"
+            rows += f"""
+            <tr>
+              <td><strong>{name}</strong></td>
+              <td style="color:{score_color}">{score:.0f}</td>
+              <td>{wr:.0%}</td>
+              <td>{sharpe:.2f}</td>
+              <td>{sport:.0%}</td>
+              <td>{closed}</td>
+            </tr>"""
+        sections += f"""
+        <div style="margin-bottom:16px">
+          <div style="font-weight:700;margin-bottom:8px">Huidige Wallets</div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Wallet</th><th>Score</th><th>WR</th><th>Sharpe</th><th>Sport%</th><th>Closed</th></tr></thead>
+            <tbody>{rows}</tbody>
+          </table></div>
+        </div>"""
+
+    # Recommended additions
+    if adds:
+        rows = ""
+        for a in adds:
+            rows += f"""
+            <tr>
+              <td><strong>{a.get("name","?")}</strong></td>
+              <td class="green">{a.get("score",0):.0f}</td>
+              <td>{a.get("win_rate",0):.0%}</td>
+              <td>{a.get("sharpe",0):.2f}</td>
+              <td>{a.get("sport_pct",0):.0%}</td>
+              <td>{a.get("closed_positions",0)}</td>
+            </tr>"""
+        sections += f"""
+        <div style="margin-bottom:16px">
+          <div style="font-weight:700;margin-bottom:8px;color:var(--green)">Aanbevolen Toevoegingen</div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Wallet</th><th>Score</th><th>WR</th><th>Sharpe</th><th>Sport%</th><th>Closed</th></tr></thead>
+            <tbody>{rows}</tbody>
+          </table></div>
+        </div>"""
+
+    # Recommended removals
+    if removals:
+        rows = ""
+        for r in removals:
+            rows += f"""
+            <tr>
+              <td><strong>{r.get("name","?")}</strong></td>
+              <td class="red">{r.get("score",0):.0f}</td>
+              <td>{r.get("win_rate",0):.0%}</td>
+              <td>{r.get("reason","")}</td>
+            </tr>"""
+        sections += f"""
+        <div>
+          <div style="font-weight:700;margin-bottom:8px;color:var(--red)">Aanbevolen Verwijderingen</div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Wallet</th><th>Score</th><th>WR</th><th>Reden</th></tr></thead>
+            <tbody>{rows}</tbody>
+          </table></div>
+        </div>"""
+
+    return sections
+
+
+def render_playbook(playbook_text):
+    """Show the LLM-curated playbook."""
+    if not playbook_text:
+        return '<div class="empty">Nog geen playbook. Curator draait elke 6 uur.</div>'
+    # Simple markdown-to-html: lines starting with - become list items
+    lines = playbook_text.strip().split("\n")
+    html = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;font-size:0.85rem;line-height:1.6">'
+    for line in lines:
+        line = line.strip()
+        if line.startswith("# "):
+            html += f'<div style="font-weight:700;margin:8px 0 4px">{line[2:]}</div>'
+        elif line.startswith("- "):
+            html += f'<div style="padding-left:12px">• {line[2:]}</div>'
+        elif line:
+            html += f'<div>{line}</div>'
+    html += '</div>'
+    return html
+
+
 def render_all_trades(trades, wallet_map):
     filled = [t for t in trades if t.get("filled")]
     if not filled:
@@ -638,6 +837,9 @@ def render_page(trades, wallet_map):
     wallet_stats = compute_wallet_stats(trades, wallet_map)
     sport_stats  = compute_sport_stats(trades)
     daily_pnl    = compute_daily_pnl(trades)
+    dag_entries  = load_dag()
+    scout        = load_scout_report()
+    playbook     = load_playbook()
     now_str      = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     return f"""<!DOCTYPE html>
@@ -691,6 +893,24 @@ def render_page(trades, wallet_map):
   <div class="section">
     <div class="section-title">Dagelijkse P&L (14d)</div>
     {render_pnl_chart(daily_pnl)}
+  </div>
+
+  <!-- Evolution + Scout -->
+  <div class="two-col">
+    <div class="section">
+      <div class="section-title">Evolutie Log (autoresearch)</div>
+      {render_evolution_log(dag_entries)}
+    </div>
+    <div class="section">
+      <div class="section-title">Wallet Scout</div>
+      {render_scout_report(scout)}
+    </div>
+  </div>
+
+  <!-- Playbook -->
+  <div class="section">
+    <div class="section-title">Playbook (LLM Curator)</div>
+    {render_playbook(playbook)}
   </div>
 
   <!-- All trades -->
