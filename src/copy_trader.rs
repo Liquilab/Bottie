@@ -196,6 +196,17 @@ impl CopyTrader {
                     continue;
                 }
 
+                // If delay is unknown (0 = trade not found in recent history),
+                // the wallet likely entered hours/days ago. Skip — we can't verify freshness.
+                if signal_delay_ms == 0 {
+                    info!(
+                        "SKIP: delay unknown for {} (wallet {}) — trade not in recent history",
+                        pos.title.as_deref().unwrap_or("?"),
+                        name
+                    );
+                    continue;
+                }
+
                 // Only trade if price hasn't moved much since entry — edge still exists
                 let cur_price = pos.cur_price_f64();
                 if cur_price > 0.0 && cur_price < 1.0 {
