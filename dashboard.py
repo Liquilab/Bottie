@@ -26,7 +26,16 @@ def load_trades():
             line = line.strip()
             if line:
                 try:
-                    trades.append(json.loads(line))
+                    t = json.loads(line)
+                    # Filter out manual trades and crypto Up/Down noise
+                    if t.get("signal_source") == "manual":
+                        continue
+                    title = (t.get("market_title") or "").lower()
+                    if "up or down" in title:
+                        continue
+                    if "bitcoin up" in title or "ethereum up" in title or "solana up" in title or "xrp up" in title:
+                        continue
+                    trades.append(t)
                 except Exception:
                     pass
     return trades
