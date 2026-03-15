@@ -342,21 +342,44 @@ def render_open_bets(trades, wallet_map):
         return '<div class="empty">Geen open bets.</div>'
     open_bets.sort(key=lambda t: t.get("timestamp") or "", reverse=True)
 
+    # Compute per-wallet actual WR and EV from our resolved trades
+    from collections import defaultdict
+    wallet_perf = defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0.0})
+    for t in trades:
+        if t.get("filled") and not t.get("dry_run") and t.get("result") in ("win", "loss"):
+            if "up or down" in (t.get("market_title") or "").lower():
+                continue
+            w = (t.get("copy_wallet") or "").lower()
+            if w:
+                wallet_perf[w]["pnl"] += t.get("pnl") or 0
+                if t["result"] == "win":
+                    wallet_perf[w]["wins"] += 1
+                else:
+                    wallet_perf[w]["losses"] += 1
+
     rows = ""
     for t in open_bets:
         age = fmt_age(t.get("timestamp"))
-        conf = t.get("confidence") or 0
         price = t.get("price") or 0
-        edge = (conf - price) / price * 100 if price > 0 and conf > price else 0
+        w = (t.get("copy_wallet") or "").lower()
+        perf = wallet_perf.get(w, {"wins": 0, "losses": 0, "pnl": 0.0})
+        n = perf["wins"] + perf["losses"]
+        our_wr = perf["wins"] / n if n > 0 else 0
+        our_ev = perf["pnl"] / n if n > 0 else 0
+        wr_color = "#3fb950" if our_wr >= 0.55 else "#f85149" if our_wr < 0.45 else "#bc8cff"
+        ev_color = "#3fb950" if our_ev > 0 else "#f85149"
+        delay_ms = t.get("signal_delay_ms") or 0
+        delay_str = f"{delay_ms/1000:.0f}s" if delay_ms > 0 else "—"
         rows += f"""
         <tr>
           <td><span class="badge sport">{t.get('sport','?')[:8]}</span></td>
           <td class="market-title">{t.get('market_title','?')}</td>
           <td><span class="badge {'green' if t.get('side')=='BUY' else 'red'}">{t.get('side','?')}</span> {t.get('outcome','')}</td>
           <td>{price:.0%}</td>
-          <td style="color:#bc8cff">{conf:.0%}</td>
-          <td>{edge:+.1f}%</td>
+          <td style="color:{wr_color}">{our_wr:.0%} <span class="muted">({n}t)</span></td>
+          <td style="color:{ev_color}">${our_ev:+.2f}</td>
           <td>${t.get('size_usdc',0):.2f}</td>
+          <td>{delay_str}</td>
           <td>{render_why(t, wallet_map)}</td>
           <td class="muted">{age}</td>
         </tr>"""
@@ -366,8 +389,8 @@ def render_open_bets(trades, wallet_map):
     <table>
       <thead><tr>
         <th>Sport</th><th>Market</th><th>Side / Outcome</th>
-        <th>Entry</th><th>Conf</th><th>Edge</th><th>Size</th>
-        <th>Waarom</th><th>Leeftijd</th>
+        <th>Entry</th><th>Our WR</th><th>Our EV</th><th>Size</th>
+        <th>Delay</th><th>Waarom</th><th>Leeftijd</th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table>

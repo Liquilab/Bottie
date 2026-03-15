@@ -276,16 +276,18 @@ impl CopyTrader {
 
                 let confidence = (base_win_rate * consensus_multiplier * sport_mult).min(0.95);
 
+                let our_trades = wallet_info.map(|w| w.total_tracked_trades).unwrap_or(0);
+                let our_wr = wallet_info.map(|w| w.overall_win_rate).unwrap_or(0.0);
                 info!(
-                    "SIGNAL: {} ({:.0}ct) | {} | {:.0}$ | {} wallets (score:{:.1}) | conf={:.0}% base_wr={:.0}% | delay={:.0}s",
+                    "SIGNAL: {} ({:.0}ct) | {} | {:.0}$ | {} wallets (score:{:.1}) | our_wr={:.0}% ({} trades) | delay={:.0}s",
                     name,
                     price * 100.0,
                     title.chars().take(50).collect::<String>(),
                     usdc_size,
                     consensus_wallets,
                     outcome_score,
-                    confidence * 100.0,
-                    base_win_rate * 100.0,
+                    our_wr * 100.0,
+                    our_trades,
                     signal_delay_ms as f64 / 1000.0
                 );
 
