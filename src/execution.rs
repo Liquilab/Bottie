@@ -297,7 +297,7 @@ impl Executor {
         let _ = actual_fee; // used for cache update above
 
         let order_id = resp.effective_id().map(|s| s.to_string());
-        let filled = !resp.is_rejected();
+        let filled = resp.is_filled();
 
         if filled {
             risk.record_trade_opened_with_context(

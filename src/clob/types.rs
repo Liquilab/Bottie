@@ -55,6 +55,22 @@ impl PostOrderResponse {
             || self.success == Some(false)
     }
 
+    /// Check if the order was actually filled (size_matched > 0).
+    /// An order can be accepted (has order_id) but not filled (FOK killed).
+    /// PM is source of truth — if size_matched is "0", we did NOT get filled.
+    pub fn is_filled(&self) -> bool {
+        if self.is_rejected() {
+            return false;
+        }
+        match &self.size_matched {
+            Some(s) => {
+                let matched: f64 = s.parse().unwrap_or(0.0);
+                matched > 0.0
+            }
+            None => self.effective_id().is_some(),
+        }
+    }
+
     pub fn effective_id(&self) -> Option<&str> {
         self.order_id.as_deref().or(self.id.as_deref())
     }
