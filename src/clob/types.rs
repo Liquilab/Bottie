@@ -354,6 +354,8 @@ pub struct WalletPosition {
     pub cash_pnl: Option<serde_json::Value>,
     #[serde(rename = "proxyWallet")]
     pub proxy_wallet: Option<String>,
+    #[serde(rename = "eventSlug")]
+    pub event_slug: Option<String>,
     #[serde(rename = "curPrice")]
     pub cur_price: Option<serde_json::Value>,
     #[serde(rename = "initialValue")]

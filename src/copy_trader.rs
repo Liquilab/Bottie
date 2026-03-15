@@ -273,7 +273,12 @@ impl CopyTrader {
                     signal_delay_ms as f64 / 1000.0
                 );
 
-                let event_slug = pos.slug.clone().unwrap_or_default();
+                // Use eventSlug (event-level) for dedup, not slug (market-level).
+                // eventSlug groups all markets for the same match (win/draw/spread/O-U).
+                // This prevents contradictory bets on the same event.
+                let event_slug = pos.event_slug.clone()
+                    .or_else(|| pos.slug.clone())
+                    .unwrap_or_default();
 
                 signals.push(CopySignal {
                     source_wallet: address.clone(),
