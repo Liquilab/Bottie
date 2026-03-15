@@ -62,14 +62,15 @@ impl PostOrderResponse {
         if self.is_rejected() {
             return false;
         }
-        // For FOK orders: size_matched MUST be present and > 0.
-        // If absent, the order was accepted but not filled.
+        // If size_matched is present and "0", explicitly not filled.
+        // If size_matched is absent, assume filled if we have an order_id.
+        // The phantom sync (every 5 min) catches false positives by checking PM.
         match &self.size_matched {
             Some(s) => {
                 let matched: f64 = s.parse().unwrap_or(0.0);
                 matched > 0.0
             }
-            None => false, // absent = not filled, PM is source of truth
+            None => self.effective_id().is_some(),
         }
     }
 
