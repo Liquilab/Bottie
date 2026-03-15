@@ -23,8 +23,13 @@ def composite_score(result: dict, config_changes: dict = None) -> float:
     # Small sample penalty: linearly penalize if fewer than 50 trades
     sample_adj = min(1.0, trades / 50.0)
 
-    # Drawdown penalty (relative to $200 bankroll)
-    dd_penalty = (max_drawdown / 200.0) * 2.0
+    # Drawdown penalty (relative to bankroll)
+    try:
+        from autoresearch import get_bankroll
+        bankroll_ref = max(25.0, get_bankroll())
+    except Exception:
+        bankroll_ref = 200.0
+    dd_penalty = (max_drawdown / bankroll_ref) * 2.0
 
     # Complexity penalty: 2% per parameter changed
     n_params = len(config_changes.keys()) if config_changes else 0
@@ -80,10 +85,20 @@ def backtest(trades: pd.DataFrame, config_changes: dict) -> dict:
     min_consensus = config_changes.get("min_consensus", 1)
     max_delay_ms = config_changes.get("max_delay_seconds", 300) * 1000
     min_edge_pct = config_changes.get("min_edge_pct", 0.0)
+    min_price = config_changes.get("min_price", 0.05)
+    max_price = config_changes.get("max_price", 1.0)
+    max_open_bets = config_changes.get("max_open_bets", 200)
+    max_resolution_days = config_changes.get("max_resolution_days", 7)
     wallet_weights = config_changes.get("wallet_weights", {})
     sport_multipliers = config_changes.get("sport_multipliers", {})
 
-    sim_bankroll = 200.0  # Fixed bankroll for fair comparison
+    # Use real bankroll if available, otherwise default
+    try:
+        from autoresearch import get_bankroll
+        real_bankroll = get_bankroll()
+    except Exception:
+        real_bankroll = 200.0
+    sim_bankroll = max(25.0, real_bankroll)  # floor at $25 to avoid division issues
     sim_pnl = 0.0
     sim_invested = 0.0
     sim_wins = 0
@@ -137,8 +152,10 @@ def backtest(trades: pd.DataFrame, config_changes: dict) -> dict:
         if price <= 0 or price >= 1.0:
             continue
 
-        # Skip penny markets
-        if price < 0.05:
+        # Price filters
+        if price < min_price:
+            continue
+        if price > max_price:
             continue
 
         # Copy trade base sizing — we trust the wallet, no Kelly edge required

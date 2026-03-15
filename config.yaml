@@ -33,7 +33,7 @@ copy_trading:
     - all
   - address: '0x036c159d5a348058a81066a76b89f35926d4178d'
     name: HedgeMaster88
-    weight: 0.7
+    weight: 0.9
     sports:
     - all
   - address: '0xdb2223cc5202a4718c3069f577ec971f71c96478'
@@ -48,7 +48,7 @@ copy_trading:
     - all
   - address: '0x7ea571c40408f340c1c8fc8eaacebab53c1bde7b'
     name: Cannae
-    weight: 0.3
+    weight: 0.7
     sports:
     - all
   - address: '0x63ce342161250d705dc0b16df89036c8e5f9ba9a'
@@ -58,17 +58,17 @@ copy_trading:
     - all
   - address: '0x2005d16a84ceefa912d4e380cd32e7ff827875ea'
     name: RN1
-    weight: 1.0
+    weight: 0.3
     sports:
     - all
   - address: '0x507e52ef684ca2dd91f90a9d26d149dd3288beae'
     name: GamblingIsAllYouNeed
-    weight: 1.0
+    weight: 0.5
     sports:
     - all
   - address: '0xee613b3fc183ee44f9da9c05f53e2da107e3debf'
     name: sovereign2013
-    weight: 1.0
+    weight: 0.5
     sports:
     - all
   - address: '0xd0d6053c3c37e727402d84c14069780d360993aa'
@@ -116,7 +116,12 @@ autoresearch:
   min_improvement_pct: 5.0
   claude_model: claude-sonnet-4-20250514
 autoresearch_params:
-  wallet_weights_override: {}
+  wallet_weights_override:
+    "0x2005d16a84ceefa912d4e380cd32e7ff827875ea": 0.3   # RN1 — arb trader, niet kopieerbaar
+    "0xee613b3fc183ee44f9da9c05f53e2da107e3debf": 0.5   # sovereign2013 — hedger
+    "0x507e52ef684ca2dd91f90a9d26d149dd3288beae": 0.5   # GamblingIsAllYouNeed — arb+directioneel
+    "0x7ea571c40408f340c1c8fc8eaacebab53c1bde7b": 0.7   # Cannae — clean directional
+    "0x036c159d5a348058a81066a76b89f35926d4178d": 0.9   # HedgeMaster88 — cleanest directional
   sport_multipliers: {}
   timing_rules: []
   active_strategies: []

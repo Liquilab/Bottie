@@ -54,8 +54,14 @@ def load_config(path: str = CONFIG_PATH) -> dict:
 
 
 def save_config(config: dict, path: str = CONFIG_PATH):
-    with open(path, "w") as f:
+    """Atomic config write: tmp → fsync → rename."""
+    import os
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.rename(tmp_path, path)
 
 
 def load_scout_report() -> dict:
@@ -70,19 +76,35 @@ def load_scout_report() -> dict:
 
 
 def get_bankroll() -> float:
-    """Get current bankroll from bot's last status in trades.jsonl."""
+    """Get current bankroll from bot's STATUS log (on-chain USDC).
+
+    Prefers the real on-chain balance logged by the bot.
+    Falls back to PnL-based estimate only if no STATUS found.
+    """
+    import subprocess
+
+    # Try to get real on-chain bankroll from bot's STATUS log
+    try:
+        result = subprocess.run(
+            ["journalctl", "-u", "bottie", "--no-pager", "-n", "200"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in reversed(result.stdout.strip().splitlines()):
+            if "bankroll=$" in line:
+                # Parse: bankroll=$25.80
+                idx = line.index("bankroll=$") + len("bankroll=$")
+                end = line.index(" ", idx) if " " in line[idx:] else len(line)
+                return max(1.0, float(line[idx:end]))
+    except Exception:
+        pass
+
+    # Fallback: estimate from trades
     trades_path = Path("data/trades.jsonl")
     if not trades_path.exists():
-        return 30.0  # default
-
-    # Read last line for most recent state
-    lines = trades_path.read_text().strip().splitlines()
-    if not lines:
         return 30.0
 
-    # Count resolved PnL (rough estimate — UI is the real source)
     total_pnl = 0
-    for line in lines:
+    for line in trades_path.read_text().strip().splitlines():
         try:
             t = json.loads(line)
             if t.get("filled") and not t.get("dry_run") and t.get("pnl") is not None:
@@ -90,26 +112,60 @@ def get_bankroll() -> float:
         except (json.JSONDecodeError, KeyError):
             continue
 
-    # Start capital was ~$250, but we can't know deposits. Use a safe estimate.
     return max(1.0, 250 + total_pnl)
 
 
-def determine_mode(bankroll: float) -> str:
-    if bankroll < 25:
+def get_portfolio_value() -> float:
+    """Estimate total portfolio value (cash + open positions)."""
+    bankroll = get_bankroll()
+
+    trades_path = Path("data/trades.jsonl")
+    if not trades_path.exists():
+        return bankroll
+
+    open_value = 0.0
+    for line in trades_path.read_text().strip().splitlines():
+        try:
+            t = json.loads(line)
+            if t.get("filled") and not t.get("dry_run") and t.get("result") is None:
+                # Open position: estimate value as initial investment * 0.7 (conservative)
+                open_value += (t.get("size_usdc", 0) or 0) * 0.7
+        except (json.JSONDecodeError, KeyError):
+            continue
+
+    return bankroll + open_value
+
+
+def determine_mode(bankroll: float, portfolio_value: float = None) -> str:
+    """Determine mode based on portfolio value, not just cash.
+
+    Cash bankroll can be misleading when capital is in open positions.
+    """
+    value = portfolio_value if portfolio_value else bankroll
+    if value < 50:
         return "conservative"
-    elif bankroll > 50:
+    elif value > 200:
         return "aggressive"
     return "normal"
 
 
 def apply_portfolio(portfolio: Portfolio, config: dict):
-    """Write the new watchlist to config.yaml."""
+    """Write the new watchlist to config.yaml.
+
+    Respects wallet_weights_override: manually pinned weights are preserved.
+    """
+    overrides = config.get("autoresearch_params", {}).get("wallet_weights_override", {})
+
     watchlist = []
     for w in portfolio.wallets:
+        weight = round(w.weight, 2)
+        # If this wallet has a manual override, use that weight instead
+        if w.address in overrides:
+            weight = overrides[w.address]
         watchlist.append({
             "address": w.address,
             "name": w.name,
-            "weight": round(w.weight, 2),
+            "weight": weight,
             "sports": ["all"],
         })
     config["copy_trading"]["watchlist"] = watchlist
@@ -159,8 +215,9 @@ async def evolution_cycle():
 
     # 4. Determine mode
     bankroll = get_bankroll()
-    mode = determine_mode(bankroll)
-    log.info(f"mode: {mode} (bankroll ~${bankroll:.0f})")
+    portfolio_value = get_portfolio_value()
+    mode = determine_mode(bankroll, portfolio_value)
+    log.info(f"mode: {mode} (bankroll ~${bankroll:.0f}, portfolio ~${portfolio_value:.0f})")
 
     # 5. Get candidates
     current_addrs = {w.address for w in current.wallets}

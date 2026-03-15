@@ -100,6 +100,34 @@ async def fetch_closed_positions(client: httpx.AsyncClient, address: str, max_pa
     return all_closed
 
 
+async def check_copyability(positions: list[dict]) -> float:
+    """Check what fraction of positions are both-sides (arb/hedge).
+
+    Returns both_sides_ratio (0.0 = clean directional, 1.0 = all both-sides).
+    Wallets with high both_sides_ratio are arb traders whose edge is NOT copyable.
+    """
+    from collections import defaultdict
+    by_cid = defaultdict(set)
+    for p in positions:
+        size = p.get("size", 0)
+        if isinstance(size, str):
+            try:
+                size = float(size)
+            except ValueError:
+                size = 0
+        if size and size > 0:
+            cid = p.get("conditionId", "")
+            outcome = p.get("outcome", "")
+            if cid:
+                by_cid[cid].add(outcome)
+
+    if not by_cid:
+        return 0.0
+
+    both_sides = sum(1 for outcomes in by_cid.values() if len(outcomes) > 1)
+    return both_sides / len(by_cid)
+
+
 async def evaluate_wallet(client: httpx.AsyncClient, address: str) -> dict:
     """Full wallet evaluation using /positions and /closed-positions."""
     positions = await fetch_positions(client, address)
@@ -135,6 +163,9 @@ async def evaluate_wallet(client: httpx.AsyncClient, address: str) -> dict:
         sharpe = 0
         worst_trade = 0
 
+    # Copyability check
+    both_sides_ratio = await check_copyability(positions)
+
     return {
         "total_positions": len(positions),
         "active_positions": len(active),
@@ -145,6 +176,7 @@ async def evaluate_wallet(client: httpx.AsyncClient, address: str) -> dict:
         "avg_pnl_per_trade": round(avg_pnl, 2),
         "sharpe": round(sharpe, 3),
         "worst_trade": round(worst_trade, 2),
+        "both_sides_ratio": round(both_sides_ratio, 3),
     }
 
 
@@ -169,6 +201,12 @@ def score_wallet(eval_data: dict, leaderboard_pnl: float, leaderboard_volume: fl
     if win_rate >= 0.95 and closed >= 50 and not is_current:
         return 0  # Suspiciously perfect — likely data artifact (skip for current wallets, API is unreliable for them)
 
+    # Copyability check: penalize arb/hedge wallets
+    both_sides_ratio = eval_data.get("both_sides_ratio", 0)
+    if both_sides_ratio >= 0.30 and not is_current:
+        return 0  # >30% both-sides = arb trader, not copyable
+    # Moderate both-sides: 15-30% gets penalty applied below
+
     # Scoring (0-100 scale)
     # Win rate: most important — every loss hurts at $200 bankroll
     wr_score = min(win_rate, 1.0) * 40  # max 40
@@ -186,6 +224,11 @@ def score_wallet(eval_data: dict, leaderboard_pnl: float, leaderboard_volume: fl
     volume_score = 5 if leaderboard_volume > 50000 else 0  # max 5
 
     score = wr_score + sharpe_score + track_score + activity_score + volume_score
+
+    # Copyability penalty: 15-30% both-sides = 20% score reduction
+    if both_sides_ratio >= 0.15:
+        penalty = min(0.4, both_sides_ratio)  # max 40% penalty
+        score *= (1.0 - penalty)
 
     return round(score, 2)
 
@@ -258,6 +301,7 @@ async def scout_cycle():
                 f"  {name:20s} | {eval_data['closed_positions']:>4d} closed | "
                 f"{eval_data['win_rate']:>5.1%} WR | sharpe={eval_data['sharpe']:>5.2f} | "
                 f"sport={eval_data['sport_pct']:>4.0%} | "
+                f"bs={eval_data.get('both_sides_ratio', 0):>4.0%} | "
                 f"score={eval_data['score']:>5.1f}"
             )
 
