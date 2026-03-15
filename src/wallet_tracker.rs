@@ -9,6 +9,7 @@ pub struct WatchedWallet {
     pub name: String,
     pub overall_win_rate: f64,
     pub sport_win_rates: HashMap<String, f64>,
+    pub sport_trade_counts: HashMap<String, u32>,
     pub avg_roi: f64,
     pub total_tracked_trades: u32,
     pub total_wins: u32,
@@ -39,6 +40,7 @@ impl WalletTracker {
                     name: entry.name.clone(),
                     overall_win_rate: 0.55, // default assumption
                     sport_win_rates: HashMap::new(),
+                    sport_trade_counts: HashMap::new(),
                     avg_roi: 0.0,
                     total_tracked_trades: 0,
                     total_wins: 0,
@@ -90,13 +92,16 @@ impl WalletTracker {
             // Bayesian win rate with Laplace smoothing (prior: 50% over 10 virtual trades)
             w.overall_win_rate = (w.total_wins as f64 + 5.0) / (w.total_tracked_trades as f64 + 10.0);
 
-            // Update sport-specific win rate (simple running average for sport)
-            let n = w.total_tracked_trades as f64;
+            // Update sport-specific win rate using per-sport trade count
             let win_val = if won { 1.0 } else { 0.0 };
+            let sport_count = w.sport_trade_counts.entry(sport.to_string()).or_insert(0);
+            *sport_count += 1;
+            let sn = *sport_count as f64;
             let sport_rate = w.sport_win_rates.entry(sport.to_string()).or_insert(0.5);
-            *sport_rate = *sport_rate * ((n - 1.0) / n) + win_val / n;
+            *sport_rate = *sport_rate * ((sn - 1.0) / sn) + win_val / sn;
 
             // Update ROI
+            let n = w.total_tracked_trades as f64;
             w.avg_roi = w.avg_roi * ((n - 1.0) / n) + pnl / n;
             w.last_seen = Utc::now();
         }

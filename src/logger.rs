@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -177,10 +177,16 @@ impl TradeLogger {
             tracing::error!("failed to truncate trade log: {e}");
             return;
         }
+        // CRITICAL: reset cursor to start after truncation, otherwise writes at old offset
+        if let Err(e) = file.seek(SeekFrom::Start(0)) {
+            tracing::error!("failed to seek trade log: {e}");
+            return;
+        }
         for trade in &trades {
             if let Ok(json) = serde_json::to_string(trade) {
                 let _ = writeln!(file, "{json}");
             }
         }
+        let _ = file.flush();
     }
 }

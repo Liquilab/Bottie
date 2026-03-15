@@ -230,10 +230,9 @@ impl ClobClient {
             signature_type: sig_type,
         };
 
-        // Try signing with neg_risk=false first (standard exchange, covers most markets).
-        // If the API returns "invalid signature", retry with neg_risk=true (neg-risk exchange).
-        // This handles both market types without needing to fetch market metadata upfront.
-        let signature = sign_order(&self.signer, &order_data, false).await?;
+        // Try signing with neg_risk=true first (sports/neg-risk markets are the common case).
+        // If the API returns "invalid signature", retry with neg_risk=false (standard exchange).
+        let signature = sign_order(&self.signer, &order_data, true).await?;
 
         let make_clob_order = |sig: String, _neg_risk_flag: bool| ClobOrder {
             salt,
@@ -280,10 +279,10 @@ impl ClobClient {
         let status = resp.status();
         let text = resp.text().await?;
 
-        // If invalid signature, retry with neg_risk exchange (some markets use it)
+        // If invalid signature, retry with opposite neg_risk setting (standard exchange)
         if !status.is_success() && text.contains("invalid signature") {
-            debug!("retrying order with neg_risk exchange");
-            let sig2 = sign_order(&self.signer, &order_data, true).await?;
+            debug!("retrying order with standard exchange (neg_risk=false)");
+            let sig2 = sign_order(&self.signer, &order_data, false).await?;
             let body2 = post_order(make_clob_order(sig2, true))?;
             let builder2 = self.http.post(format!("{CLOB_API}{path}"));
             let builder2 = self.l2_request(builder2, "POST", path, Some(&body2))?;
@@ -350,16 +349,37 @@ impl ClobClient {
     }
 
     pub async fn get_trades_for_wallet(&self, wallet: &str, limit: u32) -> Result<Vec<DataApiTrade>> {
+        // Query both maker and taker — wallets can be either depending on order type
+        let mut all_trades = Vec::new();
+
+        // Maker trades
         let url = format!("{DATA_API}/trades?maker={wallet}&limit={limit}");
-        let trades: Vec<DataApiTrade> = self
-            .http
-            .get(&url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        Ok(trades)
+        if let Ok(resp) = self.http.get(&url).send().await {
+            if let Ok(trades) = resp.json::<Vec<DataApiTrade>>().await {
+                all_trades.extend(trades);
+            }
+        }
+
+        // Taker trades (critical: FOK orders make the wallet a taker)
+        let url = format!("{DATA_API}/trades?taker={wallet}&limit={limit}");
+        if let Ok(resp) = self.http.get(&url).send().await {
+            if let Ok(trades) = resp.json::<Vec<DataApiTrade>>().await {
+                all_trades.extend(trades);
+            }
+        }
+
+        // Sort by timestamp descending (most recent first)
+        all_trades.sort_by(|a, b| {
+            b.timestamp_secs().unwrap_or(0).cmp(&a.timestamp_secs().unwrap_or(0))
+        });
+
+        // Dedup by trade ID
+        let mut seen = std::collections::HashSet::new();
+        all_trades.retain(|t| {
+            t.trade_id().map_or(true, |id| seen.insert(id))
+        });
+
+        Ok(all_trades)
     }
 
     // --- Per-wallet Activity (DEPRECATED: unreliable, use get_wallet_positions instead) ---

@@ -1,4 +1,4 @@
-use crate::config::SizingConfig;
+use crate::config::{SizingConfig, MIN_ORDER_VALUE};
 use crate::signal::AggregatedSignal;
 
 /// Kelly Criterion position sizing
@@ -50,8 +50,8 @@ pub fn kelly_size(
     // Convert to shares: size_usdc / price
     let shares = size_usdc / price;
 
-    // Enforce minimums
-    if size_usdc < 1.0 {
+    // Enforce Polymarket minimum
+    if size_usdc < MIN_ORDER_VALUE {
         return 0.0;
     }
 
@@ -96,11 +96,11 @@ pub fn copy_trade_size(
     let max_bet = bankroll * config.max_bet_pct / 100.0;
     let final_usdc = size_usdc.min(max_bet).min(bankroll);
 
-    // Polymarket minimum is $1.00 (not our old $3.50)
-    if final_usdc < 1.0 {
+    // Enforce Polymarket minimum
+    let shares = final_usdc / signal.price;
+    if final_usdc < MIN_ORDER_VALUE {
         return 0.0;
     }
 
-    // Convert to shares
-    final_usdc / signal.price
+    shares
 }

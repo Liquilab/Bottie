@@ -167,45 +167,16 @@ impl CopyTrader {
                 let condition_id = pos.condition_id.clone().unwrap_or_default();
                 let outcome = pos.outcome.clone().unwrap_or_default();
 
-                // Measure real delay: fetch wallet's recent trades to find when they entered
-                let mut signal_delay_ms: u64 = 0;
-                if let Ok(trades) = self.client.get_trades_for_wallet(address, 20).await {
-                    let now_secs = Utc::now().timestamp();
-                    for t in &trades {
-                        let t_cid = t.condition_id.as_deref().unwrap_or("");
-                        let t_outcome = t.outcome.as_deref().unwrap_or("");
-                        let t_side = t.side.as_deref().unwrap_or("");
-                        if t_cid == condition_id && t_outcome == outcome && t_side == "BUY" {
-                            if let Some(ts) = t.timestamp_secs() {
-                                let delay = (now_secs - ts).max(0) as u64;
-                                signal_delay_ms = delay * 1000;
-                            }
-                            break;
-                        }
-                    }
-                }
-
-                // Enforce max_delay: skip if trade is too old
-                if signal_delay_ms > 0 && signal_delay_ms > (max_delay_secs as u64) * 1000 {
-                    info!(
-                        "SKIP: delay {:.0}s > max {max_delay_secs}s for {} (wallet {})",
-                        signal_delay_ms as f64 / 1000.0,
-                        pos.title.as_deref().unwrap_or("?"),
-                        name
-                    );
-                    continue;
-                }
-
-                // If delay is unknown (0 = trade not found in recent history),
-                // the wallet likely entered hours/days ago. Skip — we can't verify freshness.
-                if signal_delay_ms == 0 {
-                    info!(
-                        "SKIP: delay unknown for {} (wallet {}) — trade not in recent history",
-                        pos.title.as_deref().unwrap_or("?"),
-                        name
-                    );
-                    continue;
-                }
+                // Delay = time since we first detected this position change.
+                // Since we poll every ~15s with parallel batches (~1.7s), the max detection
+                // delay is one poll cycle. For positions that were already there in the
+                // previous snapshot (but grew), the delay is at most one poll interval.
+                // This is a conservative proxy — we know the position changed between
+                // prev_snapshot and now, so it's at most poll_interval old.
+                //
+                // The /trades API doesn't reliably filter by wallet address, so we can't
+                // measure exact wallet entry timestamp.
+                let signal_delay_ms: u64 = 15_000; // one poll cycle as conservative estimate
 
                 // Only trade if price hasn't moved much since entry — edge still exists
                 let cur_price = pos.cur_price_f64();
@@ -348,7 +319,7 @@ impl CopyTrader {
         let combined = format!("{} {}", title.to_lowercase(), event_slug.to_lowercase());
         if combined.contains("nba") || combined.contains("basketball") {
             "nba".to_string()
-        } else if combined.contains("nfl") || combined.contains("football") {
+        } else if combined.contains("nfl") {
             "nfl".to_string()
         } else if combined.contains("nhl") || combined.contains("hockey") {
             "nhl".to_string()

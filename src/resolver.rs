@@ -293,6 +293,7 @@ async fn take_profit_check(
 
     let mut sold_count = 0u32;
     let mut total_profit = 0.0f64;
+    let mut sold_meta: Vec<(String, String, f64)> = Vec::new();
 
     for &idx in &open_indices {
         let token_id = trades[idx].token_id.clone();
@@ -316,7 +317,9 @@ async fn take_profit_check(
             &title[..title.len().min(50)], best_bid * 100.0, entry_price * 100.0, shares
         );
 
-        let fee_bps = 0; // most markets have no fee
+        // Get fee rate (don't assume 0 — fee markets would fail silently)
+        let fee_bps = client.get_fee_rate_bps(&token_id).await.unwrap_or(0);
+
         match client.create_and_post_order(
             &token_id,
             best_bid,
@@ -327,13 +330,18 @@ async fn take_profit_check(
         ).await {
             Ok(resp) => {
                 if resp.is_filled() {
-                    let sell_usdc = shares * best_bid;
-                    let profit = sell_usdc - trades[idx].size_usdc;
+                    let actual_shares = resp.filled_size().max(shares);
+                    let sell_usdc = actual_shares * best_bid;
+                    let fee_cost = sell_usdc * (fee_bps as f64 / 10000.0);
+                    let profit = sell_usdc - fee_cost - trades[idx].size_usdc;
+                    let wallet = trades[idx].copy_wallet.clone().unwrap_or_default();
+                    let sport = trades[idx].sport.clone();
                     trades[idx].result = Some("take_profit".to_string());
                     trades[idx].pnl = Some(profit);
                     trades[idx].resolved_at = Some(Utc::now());
                     sold_count += 1;
                     total_profit += profit;
+                    sold_meta.push((wallet, sport, profit));
 
                     info!(
                         "TAKE PROFIT FILLED: {} | profit=${:.2} | bid={:.0}ct",
@@ -355,8 +363,12 @@ async fn take_profit_check(
     if sold_count > 0 {
         logger.rewrite_all(trades);
         let mut r = risk.write().await;
-        for _ in 0..sold_count {
-            r.record_trade_closed_with_context(0.0, None, "");
+        for (wallet, sport, pnl) in &sold_meta {
+            r.record_trade_closed_with_context(
+                *pnl,
+                if wallet.is_empty() { None } else { Some(wallet.as_str()) },
+                sport,
+            );
         }
         info!("take-profit: sold {} positions, total profit ${:.2}", sold_count, total_profit);
     }

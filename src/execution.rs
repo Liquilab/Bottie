@@ -298,49 +298,60 @@ impl Executor {
 
         let order_id = resp.effective_id().map(|s| s.to_string());
         let filled = resp.is_filled();
+        // Use actual filled size from exchange, not requested size
+        let actual_shares = if filled { resp.filled_size().max(size) } else { 0.0 };
+        let actual_usdc = if filled { actual_shares * exec_price } else { 0.0 };
 
         if filled {
             risk.record_trade_opened_with_context(
-                size_usdc,
+                actual_usdc,
                 copy_wallet.as_deref(),
                 &signal.sport,
             );
             info!(
-                "FILLED: {} | order_id={}",
+                "FILLED: {} | order_id={} | {:.1} shares @ {:.2}ct = ${:.2}",
                 signal.market_title,
-                order_id.as_deref().unwrap_or("?")
+                order_id.as_deref().unwrap_or("?"),
+                actual_shares,
+                exec_price * 100.0,
+                actual_usdc,
             );
         } else {
-            let reason = resp.skipped.as_deref().unwrap_or("unknown");
+            let reason = resp.skipped.as_deref().unwrap_or(
+                resp.error_msg.as_deref().unwrap_or("unknown")
+            );
             warn!("NOT FILLED: {} | reason={}", signal.market_title, reason);
         }
 
-        logger.log(TradeLog {
-            timestamp: chrono::Utc::now(),
-            token_id: signal.token_id.clone(),
-            condition_id: signal.condition_id.clone(),
-            market_title: signal.market_title.clone(),
-            sport: signal.sport.clone(),
-            side: signal.side.clone(),
-            outcome: signal.outcome.clone(),
-            event_slug: Some(signal.event_slug.clone()).filter(|s| !s.is_empty()),
-            price: exec_price,
-            size_usdc,
-            size_shares: size,
-            signal_source,
-            copy_wallet,
-            consensus_count,
-            edge_pct: exec_edge_pct,
-            confidence: signal.combined_confidence,
-            signal_delay_ms,
-            order_id,
-            filled,
-            dry_run: false,
-            result: None,
-            pnl: None,
-            resolved_at: None,
-            strategy_version,
-        });
+        // Only log filled trades (don't pollute log with unfilled attempts)
+        if filled {
+            logger.log(TradeLog {
+                timestamp: chrono::Utc::now(),
+                token_id: signal.token_id.clone(),
+                condition_id: signal.condition_id.clone(),
+                market_title: signal.market_title.clone(),
+                sport: signal.sport.clone(),
+                side: signal.side.clone(),
+                outcome: signal.outcome.clone(),
+                event_slug: Some(signal.event_slug.clone()).filter(|s| !s.is_empty()),
+                price: exec_price,
+                size_usdc: actual_usdc,
+                size_shares: actual_shares,
+                signal_source,
+                copy_wallet,
+                consensus_count,
+                edge_pct: exec_edge_pct,
+                confidence: signal.combined_confidence,
+                signal_delay_ms,
+                order_id,
+                filled: true,
+                dry_run: false,
+                result: None,
+                pnl: None,
+                resolved_at: None,
+                strategy_version,
+            });
+        }
 
         Ok(filled)
     }

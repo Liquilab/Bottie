@@ -62,13 +62,23 @@ impl PostOrderResponse {
         if self.is_rejected() {
             return false;
         }
+        // For FOK orders: size_matched MUST be present and > 0.
+        // If absent, the order was accepted but not filled.
         match &self.size_matched {
             Some(s) => {
                 let matched: f64 = s.parse().unwrap_or(0.0);
                 matched > 0.0
             }
-            None => self.effective_id().is_some(),
+            None => false, // absent = not filled, PM is source of truth
         }
+    }
+
+    /// The actual filled size (shares), or 0 if not filled.
+    pub fn filled_size(&self) -> f64 {
+        self.size_matched
+            .as_ref()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0)
     }
 
     pub fn effective_id(&self) -> Option<&str> {
