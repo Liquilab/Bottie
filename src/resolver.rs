@@ -330,7 +330,7 @@ async fn take_profit_check(
         ).await {
             Ok(resp) => {
                 if resp.is_filled() {
-                    let actual_shares = resp.filled_size().max(shares);
+                    let actual_shares = { let fs = resp.filled_size(); if fs > 0.0 { fs } else { shares } };
                     let sell_usdc = actual_shares * best_bid;
                     let fee_cost = sell_usdc * (fee_bps as f64 / 10000.0);
                     let profit = sell_usdc - fee_cost - trades[idx].size_usdc;

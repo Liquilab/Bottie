@@ -299,7 +299,7 @@ impl Executor {
         let order_id = resp.effective_id().map(|s| s.to_string());
         let filled = resp.is_filled();
         // Use actual filled size from exchange, not requested size
-        let actual_shares = if filled { resp.filled_size().max(size) } else { 0.0 };
+        let actual_shares = if filled { let fs = resp.filled_size(); if fs > 0.0 { fs } else { size } } else { 0.0 };
         let actual_usdc = if filled { actual_shares * exec_price } else { 0.0 };
 
         if filled {
