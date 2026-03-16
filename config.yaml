@@ -109,7 +109,7 @@ sizing:
 risk:
   max_daily_loss_pct: 15.0
   min_bankroll: 5.0
-  max_open_bets: 50
+  max_open_bets: 65
 autoresearch:
   interval_hours: 2
   min_backtest_trades: 20

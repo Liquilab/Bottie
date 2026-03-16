@@ -29,9 +29,10 @@ git -C <PROJECT_ROOT> branch --show-current
 git -C <PROJECT_ROOT> status --short
 ```
 
-Optioneel:
-- Actieve/gesloten tickets van vandaag
-- Status van draaiende services
+**Verplicht:**
+- Actieve/gesloten tickets ophalen uit Linear (team: RustedPoly, project: Bottie)
+- Tickets bijwerken met resultaten van vandaag
+- Status van draaiende services checken
 
 ### Stap 2: Schrijf EOD
 
@@ -58,8 +59,16 @@ Schrijf naar `data/sessions/YYYY-MM-DD-eod.md`.
 3. **Volgende stappen:** [concrete acties]
 
 ---
-**Commits vandaag:** X | **Tickets gesloten:** Y
+**Commits vandaag:** X | **Tickets gesloten:** Y | **Linear:** [link naar project board]
 ```
+
+### Stap 3: Linear Bijwerken
+
+**Verplicht bij elke /eod:**
+- Update tickets in RustedPoly/Bottie project met resultaten
+- Sluit afgeronde tickets (state: Done)
+- Voeg comments toe aan in-progress tickets met huidige stand
+- Maak nieuwe tickets voor ontdekte issues
 
 ### Stap 3: Optioneel Detail
 
