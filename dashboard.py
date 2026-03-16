@@ -12,10 +12,110 @@ DAG_FILE       = BASE_DIR / "data" / "research_dag.jsonl"
 SCOUT_FILE     = BASE_DIR / "data" / "scout_report.json"
 PLAYBOOK_FILE  = BASE_DIR / "data" / "playbook.md"
 CONFIG_FILE    = BASE_DIR / "config.yaml"
-INITIAL_BANKROLL = 250.0  # $200 start + $50 deposit
+PM_CACHE_FILE  = BASE_DIR / "data" / "pm_cache.json"
+INITIAL_BANKROLL = 377.0  # total deposited
+
+# Polymarket Data API — source of truth
+PM_DATA_API = "https://data-api.polymarket.com"
+PM_FUNDER = "0x9f23f6d5d18f9Fc5aeF42EFEc8f63a7db3dB6D15"
 
 
-# ── Data Loading ────────────────────────────────────────────────────────────
+# ── PM API Data (source of truth) ──────────────────────────────────────────
+
+import urllib.request, urllib.error, time
+
+_pm_cache = {"data": None, "ts": 0}
+
+def fetch_pm_data():
+    """Fetch real data from Polymarket API. Cached for 60 seconds."""
+    now = time.time()
+    if _pm_cache["data"] and now - _pm_cache["ts"] < 60:
+        return _pm_cache["data"]
+
+    result = {"trades": [], "positions": [], "value": 0, "cash": 0, "error": None}
+
+    try:
+        # Trades (our actual buys and sells)
+        url = "%s/trades?user=%s&limit=10000" % (PM_DATA_API, PM_FUNDER)
+        resp = urllib.request.urlopen(url, timeout=15)
+        result["trades"] = json.loads(resp.read())
+    except Exception as e:
+        result["error"] = "trades: %s" % e
+
+    try:
+        # Open positions
+        url = "%s/positions?user=%s&limit=500&sizeThreshold=0" % (PM_DATA_API, PM_FUNDER)
+        resp = urllib.request.urlopen(url, timeout=15)
+        result["positions"] = json.loads(resp.read())
+    except Exception as e:
+        result["error"] = "positions: %s" % e
+
+    try:
+        # Portfolio value
+        url = "%s/value?user=%s" % (PM_DATA_API, PM_FUNDER)
+        resp = urllib.request.urlopen(url, timeout=10)
+        val = json.loads(resp.read())
+        if isinstance(val, list) and val:
+            result["value"] = float(val[0].get("value", 0))
+    except Exception:
+        pass
+
+    _pm_cache["data"] = result
+    _pm_cache["ts"] = now
+    return result
+
+
+def sf(v):
+    """Safe float conversion."""
+    if isinstance(v, (int, float)): return float(v)
+    if isinstance(v, str):
+        try: return float(v)
+        except: return 0.0
+    return 0.0
+
+
+def compute_pm_kpis():
+    """Compute KPIs from Polymarket API data (source of truth)."""
+    pm = fetch_pm_data()
+    trades = pm["trades"]
+    positions = pm["positions"]
+
+    # Filter out crypto up/down
+    trades = [t for t in trades if "up or down" not in (t.get("title") or "").lower()]
+
+    buys = [t for t in trades if (t.get("side") or "").upper() == "BUY"]
+    sells = [t for t in trades if (t.get("side") or "").upper() == "SELL"]
+
+    total_bought = sum(sf(t.get("size", 0)) * sf(t.get("price", 0)) for t in buys)
+    total_sold = sum(sf(t.get("size", 0)) * sf(t.get("price", 0)) for t in sells)
+
+    active = [p for p in positions if sf(p.get("size", 0)) > 0]
+    position_value = sum(sf(p.get("currentValue", 0)) for p in active)
+    position_cost = sum(sf(p.get("initialValue", 0)) for p in active)
+
+    # Cash = INITIAL_BANKROLL - total_bought + total_sold + resolved_winnings
+    # But we just use the value API for portfolio value
+    portfolio_value = pm["value"] if pm["value"] > 0 else position_value
+
+    return {
+        "portfolio_value": portfolio_value,
+        "position_value": position_value,
+        "position_cost": position_cost,
+        "unrealized_pnl": position_value - position_cost,
+        "total_bought": total_bought,
+        "total_sold": total_sold,
+        "open_count": len(active),
+        "total_trades": len(trades),
+        "buy_count": len(buys),
+        "sell_count": len(sells),
+        "deposited": INITIAL_BANKROLL,
+        "rendement": portfolio_value - INITIAL_BANKROLL if portfolio_value > 0 else 0,
+        "rendement_pct": (portfolio_value / INITIAL_BANKROLL - 1) * 100 if portfolio_value > 0 and INITIAL_BANKROLL > 0 else 0,
+        "pm_error": pm["error"],
+    }
+
+
+# ── Data Loading (trades.jsonl — for wallet attribution only) ──────────────
 
 def load_trades():
     if not TRADES_FILE.exists():
@@ -105,13 +205,14 @@ def load_hypotheses():
 # ── Aggregations ────────────────────────────────────────────────────────────
 
 def compute_kpis(trades):
-    filled = [t for t in trades if t.get("filled") and not t.get("dry_run")]
-    open_  = [t for t in filled if t.get("result") is None]
-    resolved = [t for t in filled if t.get("result") in ("win", "loss")]
-    wins   = [t for t in resolved if t.get("result") == "win"]
+    """Compute KPIs — uses PM API for portfolio/value, trades.jsonl for WR attribution."""
+    pm = compute_pm_kpis()
 
-    total_pnl = sum(t.get("pnl") or 0 for t in resolved)
-    win_rate  = len(wins) / len(resolved) * 100 if resolved else 0
+    # WR from trades.jsonl (for relative comparison only)
+    filled = [t for t in trades if t.get("filled") and not t.get("dry_run")]
+    resolved = [t for t in filled if t.get("result") in ("win", "loss")]
+    wins = [t for t in resolved if t.get("result") == "win"]
+    win_rate = len(wins) / len(resolved) * 100 if resolved else 0
 
     today = datetime.now(timezone.utc).date()
     daily_resolved = [t for t in resolved if t.get("resolved_at") and t["resolved_at"][:10] == str(today)]
@@ -119,21 +220,27 @@ def compute_kpis(trades):
     daily_wins = sum(1 for t in daily_resolved if t.get("result") == "win")
     daily_losses = sum(1 for t in daily_resolved if t.get("result") == "loss")
 
-    # Open bet value (total $ in open positions)
-    open_value = sum(t.get("size_usdc") or 0 for t in open_)
-
     return {
-        "total_pnl": total_pnl,
+        # PM API data (source of truth)
+        "portfolio_value": pm["portfolio_value"],
+        "position_value": pm["position_value"],
+        "unrealized_pnl": pm["unrealized_pnl"],
+        "open_count": pm["open_count"],
+        "open_value": pm["position_cost"],
+        "deposited": pm["deposited"],
+        "rendement": pm["rendement"],
+        "rendement_pct": pm["rendement_pct"],
+        "total_trades": pm["total_trades"],
+        "pm_error": pm["pm_error"],
+        # trades.jsonl data (relative only)
+        "total_pnl": sum(t.get("pnl") or 0 for t in resolved),
         "win_rate": win_rate,
-        "open_count": len(open_),
-        "open_value": open_value,
         "resolved_count": len(resolved),
         "wins_count": len(wins),
         "losses_count": len(resolved) - len(wins),
         "daily_pnl": daily_pnl,
         "daily_wins": daily_wins,
         "daily_losses": daily_losses,
-        "total_trades": len(filled),
         "dry_run": not filled and any(t.get("dry_run") for t in trades),
     }
 
@@ -292,29 +399,33 @@ def render_why(trade, wallet_map):
     return f'<span class="muted">{src or "?"}</span>'
 
 def render_kpi_row(kpis, wallet_map):
-    pnl = kpis["total_pnl"]
-    pnl_color = "#3fb950" if pnl >= 0 else "#f85149"
+    # PM API data (source of truth)
+    portfolio = kpis.get("portfolio_value", 0)
+    rendement = kpis.get("rendement", 0)
+    rendement_pct = kpis.get("rendement_pct", 0)
+    deposited = kpis.get("deposited", INITIAL_BANKROLL)
+    unrealized = kpis.get("unrealized_pnl", 0)
+    rend_color = "#3fb950" if rendement >= 0 else "#f85149"
+    unr_color = "#3fb950" if unrealized >= 0 else "#f85149"
+
     wr = kpis["win_rate"]
     wr_color = "#3fb950" if wr >= 55 else "#f85149" if wr < 45 else "#d29922"
-    dpnl = kpis["daily_pnl"]
-    dpnl_color = "#3fb950" if dpnl >= 0 else "#f85149"
 
     goal = 10000.0
-    # Rough portfolio estimate: invested + PnL + open value
-    estimated_portfolio = INITIAL_BANKROLL + pnl + kpis["open_value"]
-    progress = min(100, max(0, estimated_portfolio / goal * 100))
+    progress = min(100, max(0, portfolio / goal * 100)) if portfolio > 0 else 0
 
-    daily_detail = f'{kpis["daily_wins"]}W {kpis["daily_losses"]}L' if kpis["daily_wins"] + kpis["daily_losses"] > 0 else ""
+    pm_error = kpis.get("pm_error")
+    error_badge = f' <span style="color:#f85149;font-size:11px">⚠ PM API: {pm_error}</span>' if pm_error else ""
 
     tiles = [
-        ("Open Posities", f'${kpis["open_value"]:.0f}', "#388bfd",
-         f'{kpis["open_count"]} bets'),
-        ("Resolved P&L", f'{"+" if pnl >= 0 else ""}${pnl:.2f}', pnl_color,
-         f'{kpis["wins_count"]}W / {kpis["losses_count"]}L'),
+        ("Portfolio (PM)", f'${portfolio:.0f}', "#388bfd",
+         f'gestort: ${deposited:.0f}'),
+        ("Rendement", f'{"+" if rendement >= 0 else ""}${rendement:.0f} ({rendement_pct:+.1f}%)', rend_color,
+         f'PM = source of truth'),
+        ("Open Posities", f'${kpis.get("position_value", 0):.0f}', unr_color,
+         f'{kpis["open_count"]} bets | unrealized: {"+" if unrealized >= 0 else ""}${unrealized:.0f}'),
         ("Win Rate", f"{wr:.1f}%" if kpis["resolved_count"] else "—", wr_color,
-         f'{kpis["resolved_count"]} resolved'),
-        ("Vandaag", f'{"+" if dpnl >= 0 else ""}${dpnl:.2f}', dpnl_color,
-         daily_detail),
+         f'{kpis["resolved_count"]} resolved (trades.jsonl)'),
     ]
 
     tiles_html = ""
@@ -327,11 +438,11 @@ def render_kpi_row(kpis, wallet_map):
         </div>"""
 
     return f"""
-    <div class="kpi-row">{tiles_html}</div>
+    <div class="kpi-row">{tiles_html}</div>{error_badge}
     <div class="goal-bar-wrap">
       <div class="goal-label">
-        DOEL: ${INITIAL_BANKROLL:.0f} → ${goal:.0f}
-        <span class="muted" style="float:right">{progress:.1f}% &nbsp; ~${estimated_portfolio:.0f}</span>
+        DOEL: ${deposited:.0f} → ${goal:.0f}
+        <span class="muted" style="float:right">{progress:.1f}% &nbsp; ${portfolio:.0f}</span>
       </div>
       <div class="goal-bar"><div class="goal-fill" style="width:{progress:.1f}%"></div></div>
     </div>"""
