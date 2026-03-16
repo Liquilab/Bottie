@@ -40,9 +40,33 @@ git -C <PROJECT_ROOT> branch --show-current
 **D. Issue tracking** (optioneel):
 - Haal actieve tickets op
 
-**E. Production checks** (optioneel — alleen als het project servers/services heeft):
-- Check draaiende processen
-- Bekijk recente logs (laatste 30 min)
+**E. Production checks** (Bottie VPS):
+SSH: `sshpass -p 'T[b5%{i}o#JMJWUD' ssh -o StrictHostKeyChecking=no root@45.76.38.183`
+
+1. **Portfolio (PM API — source of truth)**:
+```bash
+python3 -c "
+import json, urllib.request
+API='https://data-api.polymarket.com'
+F='0x9f23f6d5d18f9Fc5aeF42EFEc8f63a7db3dB6D15'
+def g(u): return json.loads(urllib.request.urlopen(urllib.request.Request(u,headers={'User-Agent':'B/1','Accept':'application/json'}),timeout=15).read())
+val=g(f'{API}/value?user={F}')
+pos=g(f'{API}/positions?user={F}&limit=500&sizeThreshold=0.01')
+pv=float(val[0]['value']) if val else 0
+op=[p for p in pos if float(p.get('size',0))>0.01]
+print(f'Positions value: \${pv:.2f}')
+print(f'Open positions: {len(op)}')
+"
+```
+
+2. **Bot status + cash** (uit logs, ALLEEN voor service status en cash):
+```bash
+journalctl -u bottie --since "30 min ago" --no-pager -n 30
+```
+Gebruik `bankroll=` uit STATUS regel voor cash. Totaal portfolio = positions value + bankroll.
+
+**⚠️ NOOIT de WR/PnL/trade count uit de STATUS log gebruiken — deze zijn onbetrouwbaar door phantom fills.**
+**Portfolio waarde = PM /value (posities) + bankroll (cash). ALTIJD optellen!**
 
 ### Stap 2: Presenteer Briefing
 
@@ -86,6 +110,8 @@ Prioriteit:
 | Lees alleen de LAATSTE session save | Alle saves doorlezen |
 | Focus op "Context for tomorrow" uit EOD | Hele EOD narratief lezen |
 | Check productie EERST | Aannemen dat alles draait |
+| PM API + cash = portfolio | Bot STATUS log WR/PnL gebruiken |
+| Positions value + bankroll optellen | PM /value als totaal behandelen |
 | Presenteer 10-15 regel briefing | Multi-paragraaf status schrijven |
 | Handel op duidelijke next steps | Vragen "zal ik doorgaan?" |
 

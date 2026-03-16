@@ -32,7 +32,7 @@ def fetch_pm_data():
     if _pm_cache["data"] and now - _pm_cache["ts"] < 60:
         return _pm_cache["data"]
 
-    result = {"trades": [], "positions": [], "value": 0, "cash": 0, "error": None}
+    result = {"trades": [], "positions": [], "value": 0, "positions_value": 0, "cash": 0, "error": None}
 
     def pm_get(url):
         """Fetch PM API with proper headers to avoid 403."""
@@ -43,8 +43,17 @@ def fetch_pm_data():
         return urllib.request.urlopen(req, timeout=15)
 
     try:
-        url = "%s/trades?user=%s&limit=10000" % (PM_DATA_API, PM_FUNDER)
-        result["trades"] = json.loads(pm_get(url).read())
+        # Paginate PM trades API (max 1000 per request, safety cap at 10K)
+        all_trades = []
+        offset = 0
+        while offset < 10000:
+            url = "%s/trades?user=%s&limit=1000&offset=%d" % (PM_DATA_API, PM_FUNDER, offset)
+            batch = json.loads(pm_get(url).read())
+            all_trades.extend(batch)
+            if len(batch) < 1000:
+                break
+            offset += 1000
+        result["trades"] = all_trades
     except Exception as e:
         result["error"] = "trades: %s" % e
 
@@ -58,9 +67,28 @@ def fetch_pm_data():
         url = "%s/value?user=%s" % (PM_DATA_API, PM_FUNDER)
         val = json.loads(pm_get(url).read())
         if isinstance(val, list) and val:
-            result["value"] = float(val[0].get("value", 0))
+            result["positions_value"] = float(val[0].get("value", 0))
     except Exception:
         pass
+
+    # Cash = on-chain USDC.e balance via Polygon RPC (same as bot uses)
+    try:
+        addr = PM_FUNDER.lower().replace("0x", "")
+        data = "0x70a08231" + addr.rjust(64, "0")  # balanceOf(address)
+        payload = json.dumps({"jsonrpc": "2.0", "method": "eth_call",
+                              "params": [{"to": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174", "data": data}, "latest"], "id": 1})
+        rpc_req = urllib.request.Request("https://polygon-bor-rpc.publicnode.com",
+                                         data=payload.encode(),
+                                         headers={"Content-Type": "application/json", "User-Agent": "Bottie-Dashboard/1.0"},
+                                         method="POST")
+        rpc_resp = json.loads(urllib.request.urlopen(rpc_req, timeout=10).read())
+        hex_val = rpc_resp.get("result", "0x0").replace("0x", "")
+        result["cash"] = int(hex_val, 16) / 1_000_000.0  # USDC has 6 decimals
+    except Exception:
+        result["cash"] = 0
+
+    # Total portfolio = positions value + cash (matches PM UI exactly)
+    result["value"] = result["positions_value"] + result["cash"]
 
     _pm_cache["data"] = result
     _pm_cache["ts"] = now
@@ -95,12 +123,14 @@ def compute_pm_kpis():
     position_value = sum(sf(p.get("currentValue", 0)) for p in active)
     position_cost = sum(sf(p.get("initialValue", 0)) for p in active)
 
-    # Cash = INITIAL_BANKROLL - total_bought + total_sold + resolved_winnings
-    # But we just use the value API for portfolio value
+    # Portfolio = positions value + cash (from Polygon RPC USDC balance)
     portfolio_value = pm["value"] if pm["value"] > 0 else position_value
+
+    cash = pm.get("cash", 0)
 
     return {
         "portfolio_value": portfolio_value,
+        "cash": cash,
         "position_value": position_value,
         "position_cost": position_cost,
         "unrealized_pnl": position_value - position_cost,
@@ -212,19 +242,20 @@ def compute_kpis(trades):
 
     # WR from trades.jsonl (for relative comparison only)
     filled = [t for t in trades if t.get("filled") and not t.get("dry_run")]
-    resolved = [t for t in filled if t.get("result") in ("win", "loss")]
-    wins = [t for t in resolved if t.get("result") == "win"]
+    resolved = [t for t in filled if t.get("result") in ("win", "loss", "take_profit", "sold")]
+    wins = [t for t in resolved if t.get("result") in ("win", "take_profit")]
     win_rate = len(wins) / len(resolved) * 100 if resolved else 0
 
     today = datetime.now(timezone.utc).date()
     daily_resolved = [t for t in resolved if t.get("resolved_at") and t["resolved_at"][:10] == str(today)]
     daily_pnl = sum((t.get("pnl") or 0) for t in daily_resolved)
-    daily_wins = sum(1 for t in daily_resolved if t.get("result") == "win")
+    daily_wins = sum(1 for t in daily_resolved if t.get("result") in ("win", "take_profit"))
     daily_losses = sum(1 for t in daily_resolved if t.get("result") == "loss")
 
     return {
         # PM API data (source of truth)
         "portfolio_value": pm["portfolio_value"],
+        "cash": pm.get("cash", 0),
         "position_value": pm["position_value"],
         "unrealized_pnl": pm["unrealized_pnl"],
         "open_count": pm["open_count"],
@@ -276,10 +307,27 @@ def compute_wallet_stats(trades, wallet_map):
     all_addrs = set(wallet_map.keys()) | set(by_wallet.keys())
     for addr in all_addrs:
         group = by_wallet.get(addr, [])
-        resolved = [t for t in group if t.get("result") in ("win", "loss")]
-        wins = [t for t in resolved if t.get("result") == "win"]
+        resolved = [t for t in group if t.get("result") in ("win", "loss", "take_profit", "sold")]
+        wins = [t for t in resolved if t.get("result") in ("win", "take_profit")]
+        losses = [t for t in resolved if t.get("result") == "loss"]
+        tp = [t for t in resolved if t.get("result") == "take_profit"]
+        sold = [t for t in resolved if t.get("result") == "sold"]
         pnl_resolved = sum(t.get("pnl") or 0 for t in resolved)
         wr = len(wins) / len(resolved) * 100 if resolved else None
+        total_invested = sum(t.get("size_usdc") or 0 for t in group)
+        avg_size = total_invested / len(group) if group else 0
+        roi = (pnl_resolved / total_invested * 100) if total_invested > 0 else 0
+
+        # Avg entry price
+        avg_entry = sum(t.get("price") or 0 for t in group) / len(group) if group else 0
+
+        # Recent form: last 10 resolved trades
+        recent_resolved = sorted(resolved, key=lambda t: t.get("resolved_at") or t.get("timestamp") or "", reverse=True)[:10]
+        recent_form = "".join("W" if t.get("result") in ("win", "take_profit") else "L" for t in recent_resolved)
+
+        # Best and worst single trade
+        best_trade = max((t.get("pnl") or 0 for t in resolved), default=0)
+        worst_trade = min((t.get("pnl") or 0 for t in resolved), default=0)
 
         # Open positions: match with PM for current value
         open_trades = [t for t in group if t.get("result") is None]
@@ -305,8 +353,18 @@ def compute_wallet_stats(trades, wallet_map):
             "trades": len(group),
             "resolved": len(resolved),
             "wins": len(wins),
+            "losses": len(losses),
+            "tp": len(tp),
+            "sold": len(sold),
             "win_rate": wr,
             "pnl": pnl_resolved,
+            "total_invested": total_invested,
+            "avg_size": avg_size,
+            "avg_entry": avg_entry,
+            "roi": roi,
+            "recent_form": recent_form,
+            "best_trade": best_trade,
+            "worst_trade": worst_trade,
             "open_count": len(open_trades),
             "open_invested": open_invested,
             "open_current": open_current,
@@ -325,8 +383,8 @@ def compute_sport_stats(trades):
 
     stats = []
     for sport, group in by_sport.items():
-        resolved = [t for t in group if t.get("result") in ("win", "loss")]
-        wins = [t for t in resolved if t.get("result") == "win"]
+        resolved = [t for t in group if t.get("result") in ("win", "loss", "take_profit", "sold")]
+        wins = [t for t in resolved if t.get("result") in ("win", "take_profit")]
         pnl = sum(t.get("pnl") or 0 for t in resolved)
         wr = len(wins) / len(resolved) * 100 if resolved else None
         avg_conf = sum(t.get("confidence") or 0 for t in group) / len(group) if group else 0
@@ -347,8 +405,8 @@ def compute_source_stats(trades):
     arb_t  = [t for t in filled if (t.get("signal_source") or "").startswith("odds_arb")]
 
     def stats(group):
-        resolved = [t for t in group if t.get("result") in ("win", "loss")]
-        wins = [t for t in resolved if t.get("result") == "win"]
+        resolved = [t for t in group if t.get("result") in ("win", "loss", "take_profit", "sold")]
+        wins = [t for t in resolved if t.get("result") in ("win", "take_profit")]
         return {
             "total": len(group),
             "resolved": len(resolved),
@@ -363,7 +421,7 @@ def compute_source_stats(trades):
     return {"copy": stats(copy_t), "arb": stats(arb_t)}
 
 def compute_daily_pnl(trades):
-    filled = [t for t in trades if t.get("filled") and not t.get("dry_run") and t.get("result") in ("win", "loss")]
+    filled = [t for t in trades if t.get("filled") and not t.get("dry_run") and t.get("result") in ("win", "loss", "take_profit", "sold")]
     by_day = {}
     for t in filled:
         day = (t.get("resolved_at") or t.get("timestamp") or "")[:10]
@@ -395,9 +453,12 @@ def fmt_result(t):
     r = t.get("result")
     if not t.get("filled"): return '<span class="muted">unfilled</span>'
     if t.get("dry_run"):    return '<span class="muted">dry run</span>'
-    if r == "win":   return '<span class="green">✓ WIN</span>'
-    if r == "loss":  return '<span class="red">✗ LOSS</span>'
-    return '<span class="yellow">⏳ open</span>'
+    if r == "win":          return '<span class="green">WIN</span>'
+    if r == "loss":         return '<span class="red">LOSS</span>'
+    if r == "take_profit":  return '<span class="green">SOLD TP</span>'
+    if r == "sold":         return '<span class="yellow">SOLD</span>'
+    if r == "phantom":      return '<span class="muted">PHANTOM</span>'
+    return '<span class="yellow">OPEN</span>'
 
 def fmt_age(ts_str):
     if not ts_str: return ""
@@ -454,13 +515,16 @@ def render_kpi_row(kpis, wallet_map):
     pm_error = kpis.get("pm_error")
     error_badge = f' <span style="color:#f85149;font-size:11px">⚠ PM API: {pm_error}</span>' if pm_error else ""
 
+    cash = kpis.get("cash", 0)
+    pos_val = kpis.get("position_value", 0)
+
     tiles = [
         ("Portfolio (PM)", f'${portfolio:.0f}', "#388bfd",
-         f'gestort: ${deposited:.0f}'),
+         f'cash: ${cash:.0f} + posities: ${pos_val:.0f}'),
         ("Rendement", f'{"+" if rendement >= 0 else ""}${rendement:.0f} ({rendement_pct:+.1f}%)', rend_color,
-         f'PM = source of truth'),
-        ("Open Posities", f'${kpis.get("position_value", 0):.0f}', unr_color,
-         f'{kpis["open_count"]} bets | unrealized: {"+" if unrealized >= 0 else ""}${unrealized:.0f}'),
+         f'gestort: ${deposited:.0f}'),
+        ("Open Posities", f'${pos_val:.0f}', unr_color,
+         f'{kpis["open_count"]} bets | cash: ${cash:.0f}'),
         ("Win Rate", f"{wr:.1f}%" if kpis["resolved_count"] else "—", wr_color,
          f'{kpis["resolved_count"]} resolved (trades.jsonl)'),
     ]
@@ -544,41 +608,89 @@ def render_open_bets(trades, wallet_map):
     </table>
     </div>"""
 
-def render_wallet_table(stats, wallet_map):
+def render_wallet_table(stats, wallet_map, compact=False):
     if not stats:
         return '<div class="empty">Geen wallet data.</div>'
     rows = ""
     for i, w in enumerate(stats, 1):
         wr_html = fmt_pct(w["win_rate"])
         pnl_html = fmt_pnl(w["pnl"])
-        unr = w.get("unrealized", 0)
-        unr_html = f'<span style="color:{"#3fb950" if unr >= 0 else "#f85149"}">{"+" if unr >= 0 else ""}${unr:.0f}</span>'
         total = w.get("total_value", 0)
         total_color = "#3fb950" if total >= 0 else "#f85149"
         dim = ' style="opacity:0.5"' if w["trades"] == 0 else ""
-        open_count = w.get("open_count", 0)
-        rows += f"""
+
+        # Record: W-L
+        record = f'{w["wins"]}-{w["losses"]}'
+        if w.get("tp", 0) > 0:
+            record += f' <span class="muted" style="font-size:0.75em">+{w["tp"]}tp</span>'
+        if w.get("sold", 0) > 0:
+            record += f' <span class="muted" style="font-size:0.75em">+{w["sold"]}s</span>'
+
+        # ROI
+        roi = w.get("roi", 0)
+        roi_color = "#3fb950" if roi >= 0 else "#f85149"
+
+        # Recent form dots
+        form = w.get("recent_form", "")
+        form_dots = ""
+        for ch in form:
+            if ch == "W":
+                form_dots += '<span style="color:#3fb950">&#9679;</span>'
+            else:
+                form_dots += '<span style="color:#f85149">&#9679;</span>'
+
+        if compact:
+            rows += f"""
+        <tr{dim}>
+          <td class="muted">{i}</td>
+          <td><strong>{w['name']}</strong></td>
+          <td>{w['weight']:.2f}</td>
+          <td>{record}</td>
+          <td>{wr_html}</td>
+          <td>{pnl_html}</td>
+          <td style="color:{total_color};font-weight:bold">{"+" if total >= 0 else ""}${total:.0f}</td>
+        </tr>"""
+        else:
+            unr = w.get("unrealized", 0)
+            unr_html = f'<span style="color:{"#3fb950" if unr >= 0 else "#f85149"}">{"+" if unr >= 0 else ""}${unr:.0f}</span>'
+            rows += f"""
         <tr{dim}>
           <td class="muted">{i}</td>
           <td><span class="badge" style="background:{'#388bfd' if w['tier']=='T1' else '#3fb950' if w['tier']=='T2' else '#8b949e'};color:{'#fff' if w['tier']!='T2' else '#000'}">{w['tier']}</span></td>
           <td><strong>{w['name']}</strong></td>
           <td>{w['weight']:.2f}</td>
           <td>{w['trades']}</td>
-          <td>{w['resolved']}</td>
+          <td>{record}</td>
           <td>{wr_html}</td>
+          <td>${w.get('avg_size',0):.2f}</td>
           <td>{pnl_html}</td>
-          <td>{open_count}</td>
+          <td style="color:{roi_color}">{roi:+.1f}%</td>
+          <td style="font-family:monospace;letter-spacing:1px">{form_dots}</td>
+          <td>{w.get('open_count',0)}</td>
           <td>{unr_html}</td>
           <td style="color:{total_color};font-weight:bold">{"+" if total >= 0 else ""}${total:.0f}</td>
         </tr>"""
+
+    if compact:
+        return f"""
+    <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>#</th><th>Wallet</th><th>Wt</th><th>Record</th>
+        <th>Win%</th><th>P&L</th><th>Totaal</th>
+      </tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+    </div>"""
 
     return f"""
     <div class="table-wrap">
     <table>
       <thead><tr>
-        <th>#</th><th>Tier</th><th>Wallet</th><th>Weight</th>
-        <th>Trades</th><th>Resolved</th><th>Win%</th><th>Resolved P&L</th>
-        <th>Open</th><th>Unrealized</th><th>Totaal</th>
+        <th>#</th><th>Tier</th><th>Wallet</th><th>Wt</th>
+        <th>Signals</th><th>Record</th><th>Win%</th><th>Avg Size</th>
+        <th>P&L</th><th>ROI</th><th>Vorm</th>
+        <th>Open</th><th>Unreal.</th><th>Totaal</th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table>
@@ -678,30 +790,56 @@ def render_hypotheses(hypotheses):
         </div>"""
     return items
 
-def render_resolved_trades(trades, wallet_map):
-    """Recently resolved trades — shows outcomes and PnL."""
-    resolved = [t for t in trades if t.get("filled") and not t.get("dry_run") and t.get("result") in ("win", "loss")]
-    if not resolved:
-        return '<div class="empty">Nog geen resolved trades.</div>'
-    resolved.sort(key=lambda t: t.get("resolved_at") or t.get("timestamp") or "", reverse=True)
+def render_resolved_trades(trades, wallet_map, limit=50):
+    """All closed trades — chronological, grouped by event."""
+    closed = [t for t in trades if t.get("filled") and not t.get("dry_run")
+              and t.get("result") in ("win", "loss", "take_profit", "sold")]
+    if not closed:
+        return '<div class="empty">Nog geen gesloten trades.</div>'
+    # Sort by buy timestamp, newest first
+    closed.sort(key=lambda t: t.get("timestamp") or "", reverse=True)
+    closed = closed[:limit]
+
+    # Group consecutive trades with same event_slug for visual grouping
+    from collections import OrderedDict
+    groups = OrderedDict()
+    for t in closed:
+        slug = t.get("event_slug") or t.get("condition_id") or id(t)
+        groups.setdefault(slug, []).append(t)
 
     rows = ""
-    for t in resolved[:50]:
-        result = t.get("result", "")
-        pnl = t.get("pnl") or 0
-        result_html = f'<span class="green">WIN</span>' if result == "win" else f'<span class="red">LOSS</span>'
-        pnl_html = fmt_pnl(pnl)
-        addr = (t.get("copy_wallet") or "").lower()
-        info = wallet_map.get(addr, {})
-        wallet_name = info.get("name", addr[:10] + "..." if addr else "?")
-        resolved_at = t.get("resolved_at") or ""
-        age = fmt_age(resolved_at) if resolved_at else fmt_age(t.get("timestamp"))
-        price = t.get("price") or 0
-        rows += f"""
-        <tr>
-          <td class="muted">{age}</td>
-          <td>{result_html}</td>
-          <td class="market-title">{t.get('market_title','?')}</td>
+    prev_slug = None
+    for slug, group in groups.items():
+        is_multi = len(group) > 1
+        group_pnl = sum(t.get("pnl") or 0 for t in group)
+        group_cost = sum(t.get("size_usdc") or 0 for t in group)
+
+        for i, t in enumerate(group):
+            pnl = t.get("pnl") or 0
+            pnl_html = fmt_pnl(pnl)
+            addr = (t.get("copy_wallet") or "").lower()
+            info = wallet_map.get(addr, {})
+            wallet_name = info.get("name", addr[:10] + "..." if addr else "—")
+            ts = (t.get("timestamp") or "")[:16].replace("T", " ")
+            price = t.get("price") or 0
+
+            # Visual grouping: top border on first row of new event group
+            group_cls = ""
+            if is_multi and i == 0:
+                group_cls = ' class="group-first"'
+            elif is_multi and i > 0:
+                group_cls = ' class="group-cont"'
+
+            # Show event badge on first row of multi-bet events
+            event_badge = ""
+            if is_multi and i == 0:
+                event_badge = f' <span class="badge event-group">{len(group)} bets → {fmt_pnl(group_pnl, show_sign=True)}</span>'
+
+            rows += f"""
+        <tr{group_cls}>
+          <td class="muted" style="white-space:nowrap">{ts}</td>
+          <td>{fmt_result(t)}</td>
+          <td class="market-title">{t.get('market_title','?')}{event_badge}</td>
           <td>{t.get('outcome','')}</td>
           <td>{price:.0%}</td>
           <td>${t.get('size_usdc',0):.2f}</td>
@@ -713,7 +851,7 @@ def render_resolved_trades(trades, wallet_map):
     <div class="table-wrap">
     <table>
       <thead><tr>
-        <th>Wanneer</th><th>Uitkomst</th><th>Market</th><th>Side</th>
+        <th>Gekocht</th><th>Uitkomst</th><th>Market</th><th>Side</th>
         <th>Entry</th><th>Inzet</th><th>Wallet</th><th>P&L</th>
       </tr></thead>
       <tbody>{rows}</tbody>
@@ -989,6 +1127,19 @@ tbody td { padding: 9px 12px; vertical-align: middle; }
 .badge.green { background: var(--green); color: #000; }
 .badge.red { background: var(--red); color: #fff; }
 .badge.yellow { background: var(--yellow); color: #000; }
+.badge.event-group { background: #30363d; color: var(--muted); font-size: 0.65rem; margin-left: 6px; }
+
+/* Event grouping in trade log */
+tr.group-first { border-top: 2px solid var(--border); }
+tr.group-cont td { padding-top: 2px; padding-bottom: 2px; }
+tr.group-cont td:first-child { color: transparent; }
+tr.group-cont .market-title { padding-left: 12px; font-size: 0.85em; }
+
+/* Wallet detail cards */
+.wallet-detail-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 16px; overflow: hidden; }
+.wallet-detail-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.wallet-detail-card table { width: 100%; }
+.wallet-detail-card th { background: transparent; }
 
 /* Sport grid */
 .sport-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
@@ -1078,13 +1229,13 @@ def render_overview(trades, wallet_map):
       {render_pnl_chart(daily_pnl)}
     </div>
     <div class="section">
-      <div class="section-title">Resolved Trades (laatste 20)</div>
-      {render_resolved_trades(trades, wallet_map)}
+      <div class="section-title">Trade Log (laatste 30)</div>
+      {render_resolved_trades(trades, wallet_map, limit=30)}
     </div>
     <div class="two-col">
       <div class="section">
         <div class="section-title">Wallet Leaderboard</div>
-        {render_wallet_table(wallet_stats, wallet_map)}
+        {render_wallet_table(wallet_stats, wallet_map, compact=True)}
       </div>
       <div class="section">
         <div class="section-title">Per Sport</div>
@@ -1102,8 +1253,8 @@ def render_trades_page(trades, wallet_map):
       {render_open_bets(trades, wallet_map)}
     </div>
     <div class="section">
-      <div class="section-title">Resolved Trades (laatste 50)</div>
-      {render_resolved_trades(trades, wallet_map)}
+      <div class="section-title">Trade Log (laatste 50)</div>
+      {render_resolved_trades(trades, wallet_map, limit=50)}
     </div>
     <div class="section">
       <div class="section-title">Alle Trades (laatste 200)</div>
@@ -1112,13 +1263,90 @@ def render_trades_page(trades, wallet_map):
     return page_wrap("/trades", body)
 
 
+def render_wallet_detail(trades, wallet_map, stats):
+    """Per-wallet trade breakdown — shows last 10 trades per wallet."""
+    filled = [t for t in trades if t.get("filled") and not t.get("dry_run")]
+    # Group by wallet
+    by_wallet = {}
+    for t in filled:
+        addr = (t.get("copy_wallet") or "").lower() or "_manual"
+        by_wallet.setdefault(addr, []).append(t)
+
+    # Only show wallets that are in config or have trades
+    cards = ""
+    for w in stats:
+        addr = w["addr"]
+        group = by_wallet.get(addr, [])
+        if not group:
+            continue
+        group.sort(key=lambda t: t.get("timestamp") or "", reverse=True)
+        recent = group[:10]
+
+        # Header stats
+        pnl = w["pnl"]
+        pnl_color = "#3fb950" if pnl >= 0 else "#f85149"
+        wr = w["win_rate"]
+
+        trade_rows = ""
+        for t in recent:
+            price = t.get("price") or 0
+            ts = (t.get("timestamp") or "")[:16].replace("T", " ")
+            trade_rows += f"""
+              <tr>
+                <td class="muted" style="white-space:nowrap;font-size:0.8em">{ts}</td>
+                <td style="font-size:0.85em">{t.get('market_title','?')[:50]}</td>
+                <td>{t.get('outcome','')}</td>
+                <td>{price:.0%}</td>
+                <td>${t.get('size_usdc',0):.2f}</td>
+                <td>{fmt_result(t)}</td>
+                <td>{fmt_pnl(t.get('pnl'))}</td>
+              </tr>"""
+
+        # Form dots
+        form = w.get("recent_form", "")
+        form_html = ""
+        for ch in form:
+            color = "#3fb950" if ch == "W" else "#f85149"
+            form_html += f'<span style="color:{color};font-size:1.1em">&#9679;</span>'
+
+        cards += f"""
+        <div class="wallet-detail-card">
+          <div class="wallet-detail-header">
+            <div>
+              <span class="badge" style="background:{'#388bfd' if w['tier']=='T1' else '#3fb950' if w['tier']=='T2' else '#8b949e'};color:{'#fff' if w['tier']!='T2' else '#000'}">{w['tier']}</span>
+              <strong style="font-size:1.05em;margin-left:6px">{w['name']}</strong>
+              <span class="muted" style="margin-left:8px">wt {w['weight']:.2f}</span>
+            </div>
+            <div style="display:flex;gap:16px;align-items:center">
+              <span>{form_html}</span>
+              <span>{w['wins']}-{w['losses']}</span>
+              <span>{f'{wr:.0f}%' if wr is not None else '—'}</span>
+              <span style="color:{pnl_color};font-weight:bold">{"+" if pnl >= 0 else ""}${pnl:.2f}</span>
+              <span class="muted">ROI {w['roi']:+.1f}%</span>
+            </div>
+          </div>
+          <table style="font-size:0.85em">
+            <thead><tr>
+              <th>Tijd</th><th>Market</th><th>Side</th><th>Entry</th><th>Size</th><th>Result</th><th>P&L</th>
+            </tr></thead>
+            <tbody>{trade_rows}</tbody>
+          </table>
+        </div>"""
+
+    return cards
+
+
 def render_wallets_page(trades, wallet_map):
     wallet_stats = compute_wallet_stats(trades, wallet_map)
     scout = load_scout_report()
     body = f"""
     <div class="section">
-      <div class="section-title">Wallet Leaderboard</div>
+      <div class="section-title">Wallet Ranking</div>
       {render_wallet_table(wallet_stats, wallet_map)}
+    </div>
+    <div class="section">
+      <div class="section-title">Per Wallet Detail</div>
+      {render_wallet_detail(trades, wallet_map, wallet_stats)}
     </div>
     <div class="section">
       <div class="section-title">Wallet Scout Rapport</div>

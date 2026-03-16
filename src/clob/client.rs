@@ -317,6 +317,10 @@ impl ClobClient {
             warn!("Order rejected: {}", parsed.skipped.as_deref().unwrap_or("unknown"));
         }
 
+        // Log raw response to diagnose size_matched availability
+        debug!("CLOB response: size_matched={:?} order_id={:?} status={:?}",
+               parsed.size_matched, parsed.effective_id(), parsed.status);
+
         Ok(parsed)
     }
 

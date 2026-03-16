@@ -33,18 +33,15 @@ pub async fn resolver_loop(
     let mut tp_counter: u32 = 0;
 
     loop {
+        // Phantom sync FIRST — catch false fills before resolution resolves them as win/loss
+        sync_phantoms(&client, &logger, &risk).await;
+
         check_resolutions(&client, &logger, &risk, &tracker, &mut check_state).await;
 
         // Take-profit check every 2 minutes: sell positions above 95ct
         tp_counter += 1;
         if tp_counter % 2 == 0 {
             take_profit_check(&client, &logger, &risk).await;
-        }
-
-        // Sync phantom positions every 5 minutes:
-        // mark trades as "phantom" if we no longer hold them on PM
-        if tp_counter % 5 == 0 {
-            sync_phantoms(&client, &logger, &risk).await;
         }
 
         // Base tick: every 60 seconds. Individual markets are skipped if not due.

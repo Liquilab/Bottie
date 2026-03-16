@@ -12,7 +12,11 @@ pub struct Portfolio {
 impl Portfolio {
     pub fn from_logs(logger: &TradeLogger) -> Self {
         let trades = logger.load_all();
-        let resolved: Vec<&TradeLog> = trades.iter().filter(|t| t.result.is_some()).collect();
+        // Exclude phantoms — they are false fills not actually on Polymarket
+        let resolved: Vec<&TradeLog> = trades
+            .iter()
+            .filter(|t| t.result.is_some() && t.result.as_deref() != Some("phantom"))
+            .collect();
 
         let wins = resolved.iter().filter(|t| t.result.as_deref() == Some("win")).count() as u32;
         let losses = resolved.iter().filter(|t| t.result.as_deref() == Some("loss")).count() as u32;
@@ -31,10 +35,11 @@ impl Portfolio {
     }
 
     pub fn win_rate(&self) -> f64 {
-        if self.total_trades == 0 {
+        let decided = self.wins + self.losses;
+        if decided == 0 {
             return 0.0;
         }
-        self.wins as f64 / self.total_trades as f64
+        self.wins as f64 / decided as f64
     }
 
     pub fn summary(&self) -> String {

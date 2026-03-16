@@ -309,10 +309,31 @@ impl Executor {
         let _ = actual_fee; // used for cache update above
 
         let order_id = resp.effective_id().map(|s| s.to_string());
-        let filled = resp.is_filled();
+        let mut filled = resp.is_filled();
         // Use actual filled size from exchange, not requested size
         let actual_shares = if filled { let fs = resp.filled_size(); if fs > 0.0 { fs } else { size } } else { 0.0 };
         let actual_usdc = if filled { actual_shares * exec_price } else { 0.0 };
+
+        // Verify fill against PM positions (CLOB API never returns size_matched,
+        // so is_filled() is unreliable — ~53% phantom rate without this check)
+        if filled {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            let funder = self.client.funder_address();
+            match self.client.get_wallet_positions(&funder, 500).await {
+                Ok(positions) => {
+                    let key = format!("{}:{}", signal.condition_id, signal.outcome);
+                    let on_pm = positions.iter().any(|p| p.size_f64() > 0.01 && p.position_key() == key);
+                    if !on_pm {
+                        warn!("PHANTOM PREVENTED: {} — not found on PM after 3s", signal.market_title);
+                        filled = false;
+                    }
+                }
+                Err(e) => {
+                    // If we can't verify, trust the CLOB response (phantom sync will catch it)
+                    warn!("fill verification failed ({}), trusting CLOB response", e);
+                }
+            }
+        }
 
         if filled {
             risk.record_trade_opened_with_context(
