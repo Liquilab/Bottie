@@ -34,27 +34,29 @@ def fetch_pm_data():
 
     result = {"trades": [], "positions": [], "value": 0, "cash": 0, "error": None}
 
+    def pm_get(url):
+        """Fetch PM API with proper headers to avoid 403."""
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Bottie-Dashboard/1.0",
+            "Accept": "application/json",
+        })
+        return urllib.request.urlopen(req, timeout=15)
+
     try:
-        # Trades (our actual buys and sells)
         url = "%s/trades?user=%s&limit=10000" % (PM_DATA_API, PM_FUNDER)
-        resp = urllib.request.urlopen(url, timeout=15)
-        result["trades"] = json.loads(resp.read())
+        result["trades"] = json.loads(pm_get(url).read())
     except Exception as e:
         result["error"] = "trades: %s" % e
 
     try:
-        # Open positions
         url = "%s/positions?user=%s&limit=500&sizeThreshold=0" % (PM_DATA_API, PM_FUNDER)
-        resp = urllib.request.urlopen(url, timeout=15)
-        result["positions"] = json.loads(resp.read())
+        result["positions"] = json.loads(pm_get(url).read())
     except Exception as e:
         result["error"] = "positions: %s" % e
 
     try:
-        # Portfolio value
         url = "%s/value?user=%s" % (PM_DATA_API, PM_FUNDER)
-        resp = urllib.request.urlopen(url, timeout=10)
-        val = json.loads(resp.read())
+        val = json.loads(pm_get(url).read())
         if isinstance(val, list) and val:
             result["value"] = float(val[0].get("value", 0))
     except Exception:
