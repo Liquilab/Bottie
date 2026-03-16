@@ -237,9 +237,11 @@ impl CopyTrader {
                 // Use eventSlug (event-level) for consensus grouping.
                 // This means Celtics moneyline + Celtics O/U + Celtics spread
                 // all count as consensus on the same event.
-                let event_slug = pos.event_slug.clone()
+                let raw_slug = pos.event_slug.clone()
                     .or_else(|| pos.slug.clone())
                     .unwrap_or_default();
+                // Normalize: strip "-more-markets" so variant slugs match the base event
+                let event_slug = raw_slug.trim_end_matches("-more-markets").to_string();
 
                 let consensus_key = if event_slug.is_empty() {
                     // Fallback to conditionId if no event slug

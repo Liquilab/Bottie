@@ -94,7 +94,12 @@ pub fn copy_trade_size(
 
     // Cap at max bet percentage of bankroll
     let max_bet = bankroll * config.max_bet_pct / 100.0;
-    let final_usdc = size_usdc.min(max_bet).min(bankroll);
+    let mut final_usdc = size_usdc.min(max_bet).min(bankroll);
+
+    // Guarantee minimum bet of $2.50 if bankroll allows it
+    if final_usdc < 2.50 && bankroll >= 2.50 {
+        final_usdc = 2.50;
+    }
 
     // Enforce Polymarket minimum
     let shares = final_usdc / signal.price;

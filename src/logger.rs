@@ -95,8 +95,9 @@ impl TradeLogger {
         for t in &open {
             if let Some(slug) = &t.event_slug {
                 if !slug.is_empty() {
+                    let normalized = Self::normalize_slug(slug);
                     let mtype = Self::market_type(&t.market_title);
-                    event_types.insert(slug.clone(), mtype);
+                    event_types.insert(normalized, mtype);
                 }
             }
         }
@@ -129,8 +130,9 @@ impl TradeLogger {
             self.open_positions.lock().unwrap().insert(key);
             if let Some(slug) = &trade.event_slug {
                 if !slug.is_empty() {
+                    let normalized = Self::normalize_slug(slug);
                     let mtype = Self::market_type(&trade.market_title);
-                    self.open_event_types.lock().unwrap().insert(slug.clone(), mtype);
+                    self.open_event_types.lock().unwrap().insert(normalized, mtype);
                 }
             }
         }
@@ -167,13 +169,21 @@ impl TradeLogger {
         self.open_positions.lock().unwrap().contains(&key)
     }
 
+    /// Normalize event slug: strip "-more-markets" suffix so
+    /// "bra-cha-gre-2026-03-16" and "bra-cha-gre-2026-03-16-more-markets" match.
+    fn normalize_slug(slug: &str) -> String {
+        slug.trim_end_matches("-more-markets").to_string()
+    }
+
     /// Check if there is ANY open position on this event.
     /// With consensus strategy: 1 trade per event, regardless of market type.
     pub fn has_any_open_on_event(&self, event_slug: &str) -> bool {
         if event_slug.is_empty() {
             return false;
         }
-        self.open_event_types.lock().unwrap().contains_key(event_slug)
+        let normalized = Self::normalize_slug(event_slug);
+        let event_types = self.open_event_types.lock().unwrap();
+        event_types.keys().any(|k| Self::normalize_slug(k) == normalized)
     }
 
     /// Rewrite the entire log with updated records (used by the resolver).
@@ -192,8 +202,9 @@ impl TradeLogger {
         for t in &open {
             if let Some(slug) = &t.event_slug {
                 if !slug.is_empty() {
+                    let normalized = Self::normalize_slug(slug);
                     let mtype = Self::market_type(&t.market_title);
-                    new_event_types.insert(slug.clone(), mtype);
+                    new_event_types.insert(normalized, mtype);
                 }
             }
         }
