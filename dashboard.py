@@ -245,38 +245,73 @@ def compute_kpis(trades):
     }
 
 def compute_wallet_stats(trades, wallet_map):
-    filled = [t for t in trades if t.get("filled") and t.get("signal_source") == "copy" and not t.get("dry_run")]
+    """Per-wallet stats combining trades.jsonl attribution with PM positions data."""
+    pm = fetch_pm_data()
+    pm_positions = pm.get("positions", [])
+
+    # Build map: conditionId:outcome → current value from PM
+    pm_value_map = {}
+    for p in pm_positions:
+        if sf(p.get("size", 0)) > 0:
+            key = (p.get("conditionId", "") + ":" + (p.get("outcome") or "")).lower()
+            pm_value_map[key] = {
+                "current_value": sf(p.get("currentValue", 0)),
+                "initial_value": sf(p.get("initialValue", 0)),
+                "cur_price": sf(p.get("curPrice", 0)),
+            }
+
+    filled = [t for t in trades if t.get("filled") and not t.get("dry_run")]
     by_wallet = {}
     for t in filled:
         addr = (t.get("copy_wallet") or "").lower()
+        if not addr:
+            addr = "_manual"
         if addr not in by_wallet:
             by_wallet[addr] = []
         by_wallet[addr].append(t)
 
     stats = []
-    # Include all configured wallets
     all_addrs = set(wallet_map.keys()) | set(by_wallet.keys())
     for addr in all_addrs:
         group = by_wallet.get(addr, [])
         resolved = [t for t in group if t.get("result") in ("win", "loss")]
         wins = [t for t in resolved if t.get("result") == "win"]
-        pnl = sum(t.get("pnl") or 0 for t in resolved)
+        pnl_resolved = sum(t.get("pnl") or 0 for t in resolved)
         wr = len(wins) / len(resolved) * 100 if resolved else None
-        avg_delay = sum(t.get("signal_delay_ms") or 0 for t in group) / len(group) / 1000 if group else 0
+
+        # Open positions: match with PM for current value
+        open_trades = [t for t in group if t.get("result") is None]
+        open_invested = 0.0
+        open_current = 0.0
+        for t in open_trades:
+            key = (t.get("condition_id", "") + ":" + (t.get("outcome") or "")).lower()
+            pm_pos = pm_value_map.get(key)
+            if pm_pos:
+                open_invested += pm_pos["initial_value"]
+                open_current += pm_pos["current_value"]
+            else:
+                open_invested += t.get("size_usdc", 0) or 0
+
+        unrealized = open_current - open_invested if open_current > 0 else 0
+
         info = wallet_map.get(addr, {})
         stats.append({
             "addr": addr,
-            "name": info.get("name", addr[:10] + "..."),
+            "name": info.get("name", "manual" if addr == "_manual" else addr[:10] + "..."),
             "tier": info.get("tier", "?"),
             "weight": info.get("weight", 0),
             "trades": len(group),
             "resolved": len(resolved),
             "wins": len(wins),
             "win_rate": wr,
-            "pnl": pnl,
-            "avg_delay_s": avg_delay,
+            "pnl": pnl_resolved,
+            "open_count": len(open_trades),
+            "open_invested": open_invested,
+            "open_current": open_current,
+            "unrealized": unrealized,
+            "total_value": pnl_resolved + unrealized,
         })
-    stats.sort(key=lambda x: x["pnl"], reverse=True)
+    stats.sort(key=lambda x: x["total_value"], reverse=True)
     return stats
 
 def compute_sport_stats(trades):
@@ -514,7 +549,12 @@ def render_wallet_table(stats, wallet_map):
     for i, w in enumerate(stats, 1):
         wr_html = fmt_pct(w["win_rate"])
         pnl_html = fmt_pnl(w["pnl"])
+        unr = w.get("unrealized", 0)
+        unr_html = f'<span style="color:{"#3fb950" if unr >= 0 else "#f85149"}">{"+" if unr >= 0 else ""}${unr:.0f}</span>'
+        total = w.get("total_value", 0)
+        total_color = "#3fb950" if total >= 0 else "#f85149"
         dim = ' style="opacity:0.5"' if w["trades"] == 0 else ""
+        open_count = w.get("open_count", 0)
         rows += f"""
         <tr{dim}>
           <td class="muted">{i}</td>
@@ -525,7 +565,9 @@ def render_wallet_table(stats, wallet_map):
           <td>{w['resolved']}</td>
           <td>{wr_html}</td>
           <td>{pnl_html}</td>
-          <td class="muted">{w['avg_delay_s']:.1f}s</td>
+          <td>{open_count}</td>
+          <td>{unr_html}</td>
+          <td style="color:{total_color};font-weight:bold">{"+" if total >= 0 else ""}${total:.0f}</td>
         </tr>"""
 
     return f"""
@@ -533,7 +575,8 @@ def render_wallet_table(stats, wallet_map):
     <table>
       <thead><tr>
         <th>#</th><th>Tier</th><th>Wallet</th><th>Weight</th>
-        <th>Gekopieerd</th><th>Resolved</th><th>Win%</th><th>P&L</th><th>Delay</th>
+        <th>Trades</th><th>Resolved</th><th>Win%</th><th>Resolved P&L</th>
+        <th>Open</th><th>Unrealized</th><th>Totaal</th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table>
