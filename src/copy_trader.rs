@@ -277,9 +277,16 @@ impl CopyTrader {
                 );
 
                 // Seeding phase: skip solo positions but allow consensus trades.
-                // This lets the bot trade on existing consensus immediately after restart,
-                // instead of waiting for new position changes.
                 if is_seeding && consensus_wallets < 2 {
+                    continue;
+                }
+
+                // Only trade the majority side. If this signal's outcome is NOT
+                // the majority outcome for this event → skip (prevents trading
+                // the minority side of a split, e.g. 6× No vs 2× Yes → only trade No).
+                if consensus_wallets >= 2 && !Self::outcome_matches_majority(
+                    &self.recent_bets, &consensus_key, &outcome, consensus_window_mins, Utc::now()
+                ) {
                     continue;
                 }
 
@@ -400,8 +407,16 @@ impl CopyTrader {
         poll_count % warm_every_n == 0
     }
 
-    /// Prune recent_bets older than window_minutes, then count unique wallets
-    /// for a given token_key. Returns (weighted_score, unique_wallet_count, wallet_names).
+    /// Score consensus for an event, outcome-aware.
+    ///
+    /// Groups bets by outcome, finds the majority side.
+    /// Only counts wallets on the majority side as consensus.
+    /// If the signal's outcome doesn't match the majority → consensus = 1 (skip).
+    ///
+    /// Example: 6 wallets on "No", 2 on "Yes" → majority="No" (75%).
+    /// Signal for "No" → consensus=6. Signal for "Yes" → consensus=1 (solo).
+    ///
+    /// Returns (weighted_score, majority_wallet_count, majority_wallet_names, majority_outcome).
     pub fn consensus_score(
         recent_bets: &HashMap<String, Vec<RecentBet>>,
         token_key: &str,
@@ -412,23 +427,62 @@ impl CopyTrader {
         let window = chrono::Duration::minutes(window_minutes as i64);
         match recent_bets.get(token_key) {
             Some(bets) => {
-                let mut score = 0.0f64;
-                let mut wallets = std::collections::HashSet::new();
+                // Group valid (within window) bets by outcome → unique wallets
+                let mut by_outcome: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+                let mut scores_by_outcome: HashMap<String, f64> = HashMap::new();
                 for b in bets {
                     if now.signed_duration_since(b.timestamp) < window {
-                        score += b.weight * (1.0 + b.usdc_size.sqrt() / 100.0);
-                        wallets.insert(b.wallet.clone());
+                        by_outcome.entry(b.outcome.clone()).or_default().insert(b.wallet.clone());
+                        *scores_by_outcome.entry(b.outcome.clone()).or_default() +=
+                            b.weight * (1.0 + b.usdc_size.sqrt() / 100.0);
                     }
                 }
-                if wallets.is_empty() {
-                    (fallback_weight, 1, vec![])
-                } else {
-                    let names: Vec<String> = wallets.into_iter().collect();
-                    let count = names.len() as u32;
-                    (score, count, names)
+
+                if by_outcome.is_empty() {
+                    return (fallback_weight, 1, vec![]);
                 }
+
+                // Find majority outcome (most unique wallets)
+                let (majority_outcome, majority_wallets) = by_outcome
+                    .iter()
+                    .max_by_key(|(_, ws)| ws.len())
+                    .map(|(o, ws)| (o.clone(), ws.clone()))
+                    .unwrap();
+
+                let majority_count = majority_wallets.len() as u32;
+                let majority_score = scores_by_outcome.get(&majority_outcome).copied().unwrap_or(0.0);
+                let majority_names: Vec<String> = majority_wallets.into_iter().collect();
+
+                (majority_score, majority_count, majority_names)
             }
             None => (fallback_weight, 1, vec![]),
+        }
+    }
+
+    /// Check if a signal's outcome matches the consensus majority for its event.
+    pub fn outcome_matches_majority(
+        recent_bets: &HashMap<String, Vec<RecentBet>>,
+        consensus_key: &str,
+        outcome: &str,
+        window_minutes: u32,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let window = chrono::Duration::minutes(window_minutes as i64);
+        match recent_bets.get(consensus_key) {
+            Some(bets) => {
+                let mut by_outcome: HashMap<String, usize> = HashMap::new();
+                for b in bets {
+                    if now.signed_duration_since(b.timestamp) < window {
+                        *by_outcome.entry(b.outcome.clone()).or_default() += 1;
+                    }
+                }
+                let majority = by_outcome.iter().max_by_key(|(_, c)| *c);
+                match majority {
+                    Some((maj_outcome, _)) => maj_outcome == outcome,
+                    None => true,
+                }
+            }
+            None => true,
         }
     }
 

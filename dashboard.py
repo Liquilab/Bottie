@@ -1547,7 +1547,35 @@ def render_consensus_signals(trades, wallet_map):
     if not filled:
         return '<div class="empty">Nog geen consensus trades. Wacht op 2+ wallets die dezelfde markt kiezen.</div>'
 
-    filled.sort(key=lambda t: t.get("timestamp") or "", reverse=True)
+    def extract_resolve_date(trade):
+        """Extract resolve date from market title or event_slug."""
+        import re
+        title = trade.get("market_title") or ""
+        slug = trade.get("event_slug") or ""
+        # Match YYYY-MM-DD in title or slug
+        for text in [title, slug]:
+            m = re.search(r'(2026-\d{2}-\d{2})', text)
+            if m:
+                return m.group(1)
+        # Match "March 16" etc
+        months = {"january":"01","february":"02","march":"03","april":"04","may":"05","june":"06",
+                  "july":"07","august":"08","september":"09","october":"10","november":"11","december":"12"}
+        for month_name, month_num in months.items():
+            m = re.search(month_name + r'\s+(\d{1,2})', title.lower())
+            if m:
+                return "2026-%s-%02d" % (month_num, int(m.group(1)))
+        return ""
+
+    # Add resolve_date to each trade for sorting
+    for t in filled:
+        t["_resolve_date"] = extract_resolve_date(t)
+
+    # Sort: open trades with soonest resolve date first, then by timestamp
+    filled.sort(key=lambda t: (
+        0 if t.get("result") is None else 1,  # open first
+        t.get("_resolve_date") or "9999",       # soonest resolve first
+        -(t.get("consensus_count") or 1),       # highest consensus first within same date
+    ))
 
     # Count per consensus level for filter buttons
     from collections import Counter
@@ -1576,9 +1604,13 @@ def render_consensus_signals(trades, wallet_map):
             cw_name = (t.get("copy_wallet") or "")[:15]
             wallets_html = f'<strong>{cw_name}</strong>' if cw_name else '<span class="muted">?</span>'
 
+        resolve = t.get("_resolve_date") or ""
+        resolve_short = resolve[5:] if resolve else "?"  # MM-DD
+        resolve_color = "#3fb950" if resolve and resolve <= "2026-03-16" else "#d29922" if resolve and resolve <= "2026-03-17" else "#8b949e"
+
         rows += f"""
         <tr data-cc="{cc}">
-          <td class="muted" style="white-space:nowrap">{ts}</td>
+          <td style="color:{resolve_color};white-space:nowrap;font-weight:600">{resolve_short}</td>
           <td><span class="badge" style="background:{cc_color};color:#000;cursor:pointer" onclick="filterCC({cc})">{cc} wallets</span></td>
           <td><span class="badge sport">{t.get('sport','?')[:8]}</span></td>
           <td class="market-title">{t.get('market_title','?')}</td>
@@ -1595,7 +1627,7 @@ def render_consensus_signals(trades, wallet_map):
     <div class="table-wrap">
     <table id="consensus-table">
       <thead><tr>
-        <th>Tijd</th><th>Consensus</th><th>Sport</th><th>Market</th>
+        <th>Resolves</th><th>Consensus</th><th>Sport</th><th>Market</th>
         <th>Side</th><th>Entry</th><th>Size</th><th>Traders</th><th>Resultaat</th><th>P&L</th>
       </tr></thead>
       <tbody>{rows}</tbody>

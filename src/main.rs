@@ -332,7 +332,7 @@ async fn copy_trading_loop(
                 config.read().await.copy_trading.consensus.min_traders
             };
 
-            let filtered_signals: Vec<_> = copy_signals
+            let mut filtered_signals: Vec<_> = copy_signals
                 .into_iter()
                 .filter(|s| {
                     if s.consensus_count < min_traders {
@@ -345,7 +345,21 @@ async fn copy_trading_loop(
                         true
                     }
                 })
-                .collect();
+                .collect::<Vec<_>>();
+
+            // Sort by consensus count descending, then soonest resolve date first.
+            // Extract date from title (e.g. "2026-03-16") for sorting.
+            fn extract_date(title: &str) -> String {
+                if let Some(pos) = title.find("2026-") {
+                    title[pos..pos+10.min(title.len())].to_string()
+                } else {
+                    "9999-99-99".to_string()
+                }
+            }
+            filtered_signals.sort_by(|a, b| {
+                b.consensus_count.cmp(&a.consensus_count)
+                    .then_with(|| extract_date(&a.market_title).cmp(&extract_date(&b.market_title)))
+            });
 
             // Aggregate (no arb signals in this loop)
             let aggregated = SignalAggregator::aggregate(&filtered_signals, &[]);
