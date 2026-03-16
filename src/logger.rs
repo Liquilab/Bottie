@@ -22,6 +22,8 @@ pub struct TradeLog {
     pub signal_source: String,
     pub copy_wallet: Option<String>,
     pub consensus_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consensus_wallets: Option<Vec<String>>,
     pub edge_pct: f64,
     pub confidence: f64,
     pub signal_delay_ms: u64,
@@ -165,25 +167,13 @@ impl TradeLogger {
         self.open_positions.lock().unwrap().contains(&key)
     }
 
-    /// Check if there is a CONFLICTING open position on this event.
-    /// Moneyline/draw bets conflict with each other (only one outcome wins).
-    /// Spread and O/U don't conflict with moneyline or each other.
-    pub fn has_conflicting_event(&self, event_slug: &str, market_title: &str) -> bool {
+    /// Check if there is ANY open position on this event.
+    /// With consensus strategy: 1 trade per event, regardless of market type.
+    pub fn has_any_open_on_event(&self, event_slug: &str) -> bool {
         if event_slug.is_empty() {
             return false;
         }
-        let new_type = Self::market_type(market_title);
-        let event_types = self.open_event_types.lock().unwrap();
-        match event_types.get(event_slug) {
-            Some(existing_type) => {
-                // Same market type on same event = conflict
-                // Moneyline vs moneyline: Stuttgart Yes vs Draw Yes
-                // Spread vs spread: PHI +6.5 vs POR -7.5
-                // Total vs total: O 225.5 vs U 224.5
-                existing_type == &new_type
-            }
-            None => false,
-        }
+        self.open_event_types.lock().unwrap().contains_key(event_slug)
     }
 
     /// Rewrite the entire log with updated records (used by the resolver).

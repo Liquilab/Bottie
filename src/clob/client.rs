@@ -184,26 +184,23 @@ impl ClobClient {
     ) -> Result<PostOrderResponse> {
         let sig_type: u8 = 2; // Gnosis Safe
 
-        // Round price/size to 2 decimal places first to avoid floating-point drift
-        // when computing micro-amounts for EIP712 and the JSON body.
-        // Both JSON and EIP712 use raw integer micro-amounts (e.g. "5450000" for 5.45 USDC).
+        // Round price to tick size (0.01) and size to 2 decimals.
+        // Micro-amounts are computed directly without intermediate rounding
+        // to match the CLOB API's expected precision (6 decimal places).
         let price = (price * 100.0).round() / 100.0;
         let size = (size * 100.0).round() / 100.0;
 
         let (maker_amount, taker_amount) = match side {
             Side::Buy => {
-                let maker_usdc = (price * size * 100.0).round() / 100.0;
-                (
-                    Self::to_token_decimals(maker_usdc),
-                    Self::to_token_decimals(size),
-                )
+                // maker_amount = price * size, rounded at micro-amount level (6 decimals)
+                let maker_raw = (price * size * CTF_DECIMAL_FACTOR).round() as u128;
+                let taker_raw = (size * CTF_DECIMAL_FACTOR).round() as u128;
+                (U256::from(maker_raw), U256::from(taker_raw))
             }
             Side::Sell => {
-                let taker_usdc = (price * size * 100.0).round() / 100.0;
-                (
-                    Self::to_token_decimals(size),
-                    Self::to_token_decimals(taker_usdc),
-                )
+                let maker_raw = (size * CTF_DECIMAL_FACTOR).round() as u128;
+                let taker_raw = (price * size * CTF_DECIMAL_FACTOR).round() as u128;
+                (U256::from(maker_raw), U256::from(taker_raw))
             }
         };
 

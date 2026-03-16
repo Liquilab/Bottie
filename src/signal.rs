@@ -16,6 +16,7 @@ pub struct CopySignal {
     pub event_slug: String,
     pub confidence: f64,
     pub consensus_count: u32,
+    pub consensus_wallets: Vec<String>,
     pub timestamp: DateTime<Utc>,
     pub signal_delay_ms: u64,
 }

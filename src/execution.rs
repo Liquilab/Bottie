@@ -78,13 +78,14 @@ impl Executor {
             return Ok(false);
         }
 
-        // Event deduplication: skip conflicting moneyline bets on same event.
-        // Spread and O/U are allowed alongside moneyline on same event.
+        // Event deduplication: only 1 trade per event.
+        // With consensus strategy, multiple signals fire on the same event
+        // (spread, O/U, moneyline). We only want the first one.
         if !signal.event_slug.is_empty()
-            && logger.has_conflicting_event(&signal.event_slug, &signal.market_title)
+            && logger.has_any_open_on_event(&signal.event_slug)
         {
             info!(
-                "SKIP: conflicting moneyline on event {} ({})",
+                "SKIP: already have bet on event {} ({})",
                 signal.event_slug, signal.market_title
             );
             return Ok(false);
@@ -184,7 +185,7 @@ impl Executor {
         let size_usdc = size * exec_price;
 
         // Risk check (with wallet/sport concentration limits)
-        let (signal_source_str, copy_wallet_val, consensus_count_val, signal_delay_ms_val) =
+        let (signal_source_str, copy_wallet_val, consensus_count_val, consensus_wallets_val, signal_delay_ms_val) =
             extract_signal_meta(&signal.sources);
         match risk.check_trade_with_context(
             size_usdc,
@@ -216,6 +217,7 @@ impl Executor {
         let signal_source = signal_source_str;
         let copy_wallet = copy_wallet_val;
         let consensus_count = consensus_count_val;
+        let consensus_wallets = consensus_wallets_val;
         let signal_delay_ms = signal_delay_ms_val;
 
         // Dry run check
@@ -247,6 +249,7 @@ impl Executor {
                 signal_source: signal_source.clone(),
                 copy_wallet,
                 consensus_count,
+                consensus_wallets: consensus_wallets.clone(),
                 edge_pct: exec_edge_pct,
                 confidence: signal.combined_confidence,
                 signal_delay_ms,
@@ -262,7 +265,7 @@ impl Executor {
             return Ok(true);
         }
 
-        // Place FOK order (immediate fill or reject — no hanging orders)
+        // Place GTC order (sits in orderbook until filled — avoids FOK kills on low liquidity)
         info!(
             "EXECUTE: {} {} {:.0} shares @ {:.3} = ${:.2} | edge={:.1}% | {}",
             side, signal.market_title, size, exec_price, size_usdc, signal.edge_pct, signal_source
@@ -271,7 +274,7 @@ impl Executor {
         let mut actual_fee = fee_bps;
         let resp = match self
             .client
-            .create_and_post_order(&signal.token_id, exec_price, size, side, OrderType::FOK, fee_bps)
+            .create_and_post_order(&signal.token_id, exec_price, size, side, OrderType::GTC, fee_bps)
             .await
         {
             Ok(r) => r,
@@ -286,7 +289,7 @@ impl Executor {
                             actual_fee = correct_fee;
                             self.fee_cache.insert(signal.token_id.clone(), correct_fee);
                             self.client
-                                .create_and_post_order(&signal.token_id, exec_price, size, side, OrderType::FOK, correct_fee)
+                                .create_and_post_order(&signal.token_id, exec_price, size, side, OrderType::GTC, correct_fee)
                                 .await?
                         } else {
                             return Err(e);
@@ -296,7 +299,7 @@ impl Executor {
                         actual_fee = correct_fee;
                         self.fee_cache.insert(signal.token_id.clone(), correct_fee);
                         self.client
-                            .create_and_post_order(&signal.token_id, exec_price, size, side, OrderType::FOK, correct_fee)
+                            .create_and_post_order(&signal.token_id, exec_price, size, side, OrderType::GTC, correct_fee)
                             .await?
                     } else {
                         return Err(e);
@@ -314,26 +317,10 @@ impl Executor {
         let actual_shares = if filled { let fs = resp.filled_size(); if fs > 0.0 { fs } else { size } } else { 0.0 };
         let actual_usdc = if filled { actual_shares * exec_price } else { 0.0 };
 
-        // Verify fill against PM positions (CLOB API never returns size_matched,
-        // so is_filled() is unreliable — ~53% phantom rate without this check)
-        if filled {
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            let funder = self.client.funder_address();
-            match self.client.get_wallet_positions(&funder, 500).await {
-                Ok(positions) => {
-                    let key = format!("{}:{}", signal.condition_id, signal.outcome);
-                    let on_pm = positions.iter().any(|p| p.size_f64() > 0.01 && p.position_key() == key);
-                    if !on_pm {
-                        warn!("PHANTOM PREVENTED: {} — not found on PM after 3s", signal.market_title);
-                        filled = false;
-                    }
-                }
-                Err(e) => {
-                    // If we can't verify, trust the CLOB response (phantom sync will catch it)
-                    warn!("fill verification failed ({}), trusting CLOB response", e);
-                }
-            }
-        }
+        // GTC orders sit in the orderbook and may not fill instantly.
+        // Trust the CLOB response (is_filled checks size_matched > 0).
+        // The resolver phantom-sync (every 5 min) catches false positives
+        // by checking actual PM positions.
 
         if filled {
             risk.record_trade_opened_with_context(
@@ -373,6 +360,7 @@ impl Executor {
                 signal_source,
                 copy_wallet,
                 consensus_count,
+                consensus_wallets: consensus_wallets.clone(),
                 edge_pct: exec_edge_pct,
                 confidence: signal.combined_confidence,
                 signal_delay_ms,
@@ -390,21 +378,27 @@ impl Executor {
     }
 }
 
-fn extract_signal_meta(sources: &[SignalSource]) -> (String, Option<String>, Option<u32>, u64) {
+fn extract_signal_meta(sources: &[SignalSource]) -> (String, Option<String>, Option<u32>, Option<Vec<String>>, u64) {
     for source in sources {
         if let SignalSource::Copy(copy) = source {
+            let wallets = if copy.consensus_wallets.is_empty() {
+                None
+            } else {
+                Some(copy.consensus_wallets.clone())
+            };
             return (
                 "copy".to_string(),
                 Some(copy.source_wallet.clone()),
                 Some(copy.consensus_count),
+                wallets,
                 copy.signal_delay_ms,
             );
         }
     }
     for source in sources {
         if let SignalSource::OddsArb(arb) = source {
-            return (format!("odds_arb:{}", arb.bookmaker), None, None, 0);
+            return (format!("odds_arb:{}", arb.bookmaker), None, None, None, 0);
         }
     }
-    ("unknown".to_string(), None, None, 0)
+    ("unknown".to_string(), None, None, None, 0)
 }

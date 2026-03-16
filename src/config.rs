@@ -112,6 +112,20 @@ pub struct CopyTradingConfig {
     /// Max days until market resolution — skip markets that resolve further out (capital efficiency)
     #[serde(default = "default_max_resolution_days")]
     pub max_resolution_days: u32,
+    /// Poll interval for warm-tier wallets (no recent signal). Hot wallets use poll_interval_seconds.
+    #[serde(default = "default_warm_poll_interval")]
+    pub warm_poll_interval_seconds: u64,
+    /// Batch size for parallel wallet fetches (higher = faster but more API pressure)
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+}
+
+fn default_warm_poll_interval() -> u64 {
+    60
+}
+
+fn default_batch_size() -> usize {
+    8
 }
 
 fn default_max_resolution_days() -> u32 {
@@ -129,8 +143,15 @@ pub struct WatchlistEntry {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConsensusConfig {
     pub min_traders: u32,
+    /// Consensus window in minutes — bets older than this are pruned
+    #[serde(default = "default_consensus_window")]
+    pub window_minutes: u32,
     pub multiplier_2: f64,
     pub multiplier_3plus: f64,
+}
+
+fn default_consensus_window() -> u32 {
+    30
 }
 
 #[derive(Debug, Clone, Deserialize)]

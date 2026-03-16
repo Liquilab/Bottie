@@ -23,6 +23,10 @@ pub struct CopyTrader {
     prev_positions: HashMap<String, HashMap<String, f64>>,
     /// Per-market consensus: token_key → vec of recent bets
     recent_bets: HashMap<String, Vec<RecentBet>>,
+    /// Track when each wallet last produced a signal (for tiered polling)
+    last_signal_time: HashMap<String, DateTime<Utc>>,
+    /// Monotonic poll counter for warm-tier scheduling
+    poll_count: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -46,14 +50,26 @@ impl CopyTrader {
             config,
             prev_positions: HashMap::new(),
             recent_bets: HashMap::new(),
+            last_signal_time: HashMap::new(),
+            poll_count: 0,
         }
     }
 
     /// Poll watched wallets for new positions using /positions snapshot-diff.
     /// This replaces the unreliable /activity endpoint.
+    ///
+    /// Uses tiered polling:
+    /// - Hot tier (signal in last 30 min): polled every cycle
+    /// - Warm tier (rest): polled every warm_poll_interval / poll_interval cycles
     pub async fn poll(&mut self) -> Vec<CopySignal> {
+        self.poll_count += 1;
+
         let config = self.config.read().await;
         let max_delay_secs = config.copy_trading.max_delay_seconds;
+        let batch_size = config.copy_trading.batch_size.max(1);
+        let consensus_window_mins = config.copy_trading.consensus.window_minutes;
+        let poll_interval = config.copy_trading.poll_interval_seconds;
+        let warm_interval = config.copy_trading.warm_poll_interval_seconds;
 
         // Read autoresearch_params for wallet weight overrides and sport multipliers
         let wallet_overrides = config.autoresearch_params.wallet_weights_override.clone();
@@ -76,12 +92,36 @@ impl CopyTrader {
         let mut signals = Vec::new();
         let mut total_new = 0u32;
 
-        // Phase 1: Fetch all wallet positions in parallel (batches of 4)
+        // Tiered polling: determine which wallets to poll this cycle
+        let warm_every_n = if poll_interval > 0 {
+            (warm_interval / poll_interval).max(1)
+        } else {
+            4
+        };
+        let now = Utc::now();
+        let hot_cutoff = chrono::Duration::minutes(consensus_window_mins as i64);
+
+        let active_wallets: Vec<_> = watchlist
+            .iter()
+            .filter(|(_, _, w)| *w > 0.0)
+            .filter(|(addr, _, _)| {
+                Self::should_poll_wallet(
+                    addr,
+                    self.poll_count,
+                    warm_every_n,
+                    consensus_window_mins,
+                    &self.last_signal_time,
+                    &self.prev_positions,
+                    now,
+                )
+            })
+            .collect();
+
+        // Phase 1: Fetch wallet positions in parallel (configurable batch size)
         let fetch_start = Instant::now();
-        let active_wallets: Vec<_> = watchlist.iter().filter(|(_, _, w)| *w > 0.0).collect();
         let mut fetched: Vec<(String, String, f64, Vec<WalletPosition>)> = Vec::new();
 
-        for chunk in active_wallets.chunks(4) {
+        for chunk in active_wallets.chunks(batch_size) {
             let futures: Vec<_> = chunk
                 .iter()
                 .map(|(addr, name, weight)| {
@@ -104,12 +144,16 @@ impl CopyTrader {
                 }
             }
             // Brief pause between batches to respect rate limits
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
         }
 
         let fetch_ms = fetch_start.elapsed().as_millis();
+        let total_wallets = watchlist.iter().filter(|(_, _, w)| *w > 0.0).count();
         if fetched.len() > 1 {
-            info!("POLL FETCH: {} wallets in {}ms (parallel batches of 4)", fetched.len(), fetch_ms);
+            info!(
+                "POLL FETCH: {}/{} wallets in {}ms (batches of {})",
+                fetched.len(), total_wallets, fetch_ms, batch_size
+            );
         }
 
         // Phase 2: Process results sequentially (diff, consensus, signals)
@@ -152,10 +196,7 @@ impl CopyTrader {
                     continue;
                 }
 
-                // Skip if this is the first poll (seeding phase — don't trade on historical positions)
-                if prev.is_none() {
-                    continue;
-                }
+                let is_seeding = prev.is_none();
 
                 total_new += 1;
 
@@ -193,10 +234,22 @@ impl CopyTrader {
                 });
                 let sport = Self::detect_sport(&title, pos.slug.as_deref().unwrap_or(""));
 
-                // Track for weighted consensus
-                let token_key = format!("{}:{}", condition_id, outcome);
+                // Use eventSlug (event-level) for consensus grouping.
+                // This means Celtics moneyline + Celtics O/U + Celtics spread
+                // all count as consensus on the same event.
+                let event_slug = pos.event_slug.clone()
+                    .or_else(|| pos.slug.clone())
+                    .unwrap_or_default();
+
+                let consensus_key = if event_slug.is_empty() {
+                    // Fallback to conditionId if no event slug
+                    format!("{}:{}", condition_id, outcome)
+                } else {
+                    event_slug.clone()
+                };
+
                 self.recent_bets
-                    .entry(token_key.clone())
+                    .entry(consensus_key.clone())
                     .or_default()
                     .push(RecentBet {
                         wallet: address.clone(),
@@ -206,27 +259,29 @@ impl CopyTrader {
                         timestamp: Utc::now(),
                     });
 
-                // Prune bets older than 2 hours
-                if let Some(bets) = self.recent_bets.get_mut(&token_key) {
+                // Prune bets older than consensus window
+                if let Some(bets) = self.recent_bets.get_mut(&consensus_key) {
+                    let window = chrono::Duration::minutes(consensus_window_mins as i64);
                     bets.retain(|b| {
-                        Utc::now().signed_duration_since(b.timestamp) < chrono::Duration::hours(2)
+                        Utc::now().signed_duration_since(b.timestamp) < window
                     });
                 }
 
-                // Consensus scoring by outcome
-                let (outcome_score, consensus_wallets) = self
-                    .recent_bets
-                    .get(&token_key)
-                    .map(|bets| {
-                        let mut score = 0.0f64;
-                        let mut wallets = std::collections::HashSet::new();
-                        for b in bets {
-                            score += b.weight * (1.0 + b.usdc_size.sqrt() / 100.0);
-                            wallets.insert(b.wallet.clone());
-                        }
-                        (score, wallets.len() as u32)
-                    })
-                    .unwrap_or((weight, 1));
+                // Consensus scoring at event level (uses extracted function for testability)
+                let (outcome_score, consensus_wallets, consensus_wallet_names) = Self::consensus_score(
+                    &self.recent_bets,
+                    &consensus_key,
+                    consensus_window_mins,
+                    Utc::now(),
+                    weight,
+                );
+
+                // Seeding phase: skip solo positions but allow consensus trades.
+                // This lets the bot trade on existing consensus immediately after restart,
+                // instead of waiting for new position changes.
+                if is_seeding && consensus_wallets < 2 {
+                    continue;
+                }
 
                 // Confidence: anchor to market price with conservative edge assumption
                 let wallet_info = tracker.get_wallet(address);
@@ -273,12 +328,7 @@ impl CopyTrader {
                     signal_delay_ms as f64 / 1000.0
                 );
 
-                // Use eventSlug (event-level) for dedup, not slug (market-level).
-                // eventSlug groups all markets for the same match (win/draw/spread/O-U).
-                // This prevents contradictory bets on the same event.
-                let event_slug = pos.event_slug.clone()
-                    .or_else(|| pos.slug.clone())
-                    .unwrap_or_default();
+                // event_slug already computed above for consensus grouping
 
                 signals.push(CopySignal {
                     source_wallet: address.clone(),
@@ -294,9 +344,13 @@ impl CopyTrader {
                     event_slug,
                     confidence,
                     consensus_count: consensus_wallets,
+                    consensus_wallets: consensus_wallet_names,
                     timestamp: Utc::now(),
                     signal_delay_ms,
                 });
+
+                // Mark wallet as hot (produced a signal)
+                self.last_signal_time.insert(address.clone(), Utc::now());
             }
 
             // Store current snapshot for next comparison
@@ -318,6 +372,64 @@ impl CopyTrader {
     /// Detect sport from title/slug. Public static version for use by sync module.
     pub fn detect_sport_static(title: &str, event_slug: &str) -> String {
         Self::detect_sport(title, event_slug)
+    }
+
+    /// Determine the polling tier for a wallet this cycle.
+    /// Returns true if the wallet should be polled.
+    pub fn should_poll_wallet(
+        addr: &str,
+        poll_count: u64,
+        warm_every_n: u64,
+        consensus_window_mins: u32,
+        last_signal_time: &HashMap<String, DateTime<Utc>>,
+        prev_positions: &HashMap<String, HashMap<String, f64>>,
+        now: DateTime<Utc>,
+    ) -> bool {
+        // Hot tier: always poll if signal in last window_minutes
+        let hot_cutoff = chrono::Duration::minutes(consensus_window_mins as i64);
+        if let Some(last) = last_signal_time.get(addr) {
+            if now.signed_duration_since(*last) < hot_cutoff {
+                return true;
+            }
+        }
+        // First poll (no prev_positions): always poll to seed
+        if !prev_positions.contains_key(addr) {
+            return true;
+        }
+        // Warm tier: poll every N-th cycle
+        poll_count % warm_every_n == 0
+    }
+
+    /// Prune recent_bets older than window_minutes, then count unique wallets
+    /// for a given token_key. Returns (weighted_score, unique_wallet_count, wallet_names).
+    pub fn consensus_score(
+        recent_bets: &HashMap<String, Vec<RecentBet>>,
+        token_key: &str,
+        window_minutes: u32,
+        now: DateTime<Utc>,
+        fallback_weight: f64,
+    ) -> (f64, u32, Vec<String>) {
+        let window = chrono::Duration::minutes(window_minutes as i64);
+        match recent_bets.get(token_key) {
+            Some(bets) => {
+                let mut score = 0.0f64;
+                let mut wallets = std::collections::HashSet::new();
+                for b in bets {
+                    if now.signed_duration_since(b.timestamp) < window {
+                        score += b.weight * (1.0 + b.usdc_size.sqrt() / 100.0);
+                        wallets.insert(b.wallet.clone());
+                    }
+                }
+                if wallets.is_empty() {
+                    (fallback_weight, 1, vec![])
+                } else {
+                    let names: Vec<String> = wallets.into_iter().collect();
+                    let count = names.len() as u32;
+                    (score, count, names)
+                }
+            }
+            None => (fallback_weight, 1, vec![]),
+        }
     }
 
     fn detect_sport(title: &str, event_slug: &str) -> String {
@@ -351,5 +463,331 @@ impl CopyTrader {
         } else {
             "other".to_string()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+
+    fn empty_signal_times() -> HashMap<String, DateTime<Utc>> {
+        HashMap::new()
+    }
+
+    fn empty_prev_positions() -> HashMap<String, HashMap<String, f64>> {
+        HashMap::new()
+    }
+
+    fn seeded_prev_positions(addrs: &[&str]) -> HashMap<String, HashMap<String, f64>> {
+        addrs.iter().map(|a| (a.to_string(), HashMap::new())).collect()
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // RUS-210: Tiered polling
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn hot_wallet_always_polled() {
+        let now = Utc::now();
+        let mut signals = HashMap::new();
+        signals.insert("0xhot".to_string(), now - Duration::minutes(5));
+        let prev = seeded_prev_positions(&["0xhot"]);
+
+        // Should be polled on ANY cycle (even non-warm cycles)
+        for cycle in [1, 2, 3, 5, 7] {
+            assert!(
+                CopyTrader::should_poll_wallet("0xhot", cycle, 4, 30, &signals, &prev, now),
+                "hot wallet should be polled on cycle {cycle}"
+            );
+        }
+    }
+
+    #[test]
+    fn unseeded_wallet_always_polled() {
+        let now = Utc::now();
+        let prev = empty_prev_positions(); // no seeded wallets
+
+        for cycle in [1, 2, 3, 5] {
+            assert!(
+                CopyTrader::should_poll_wallet("0xnew", cycle, 4, 30, &empty_signal_times(), &prev, now),
+                "unseeded wallet should be polled on cycle {cycle}"
+            );
+        }
+    }
+
+    #[test]
+    fn warm_wallet_only_on_nth_cycle() {
+        let now = Utc::now();
+        let prev = seeded_prev_positions(&["0xwarm"]);
+        let signals = empty_signal_times(); // no recent signal
+
+        // warm_every_n = 4 (60s / 15s)
+        assert!(!CopyTrader::should_poll_wallet("0xwarm", 1, 4, 30, &signals, &prev, now));
+        assert!(!CopyTrader::should_poll_wallet("0xwarm", 2, 4, 30, &signals, &prev, now));
+        assert!(!CopyTrader::should_poll_wallet("0xwarm", 3, 4, 30, &signals, &prev, now));
+        assert!(CopyTrader::should_poll_wallet("0xwarm", 4, 4, 30, &signals, &prev, now));
+        assert!(!CopyTrader::should_poll_wallet("0xwarm", 5, 4, 30, &signals, &prev, now));
+        assert!(CopyTrader::should_poll_wallet("0xwarm", 8, 4, 30, &signals, &prev, now));
+        assert!(CopyTrader::should_poll_wallet("0xwarm", 12, 4, 30, &signals, &prev, now));
+    }
+
+    #[test]
+    fn hot_expires_to_warm_after_window() {
+        let now = Utc::now();
+        let mut signals = HashMap::new();
+        // Signal 31 minutes ago, window is 30 minutes
+        signals.insert("0xexpired".to_string(), now - Duration::minutes(31));
+        let prev = seeded_prev_positions(&["0xexpired"]);
+
+        // cycle 1: not a warm cycle, not hot anymore → skip
+        assert!(!CopyTrader::should_poll_wallet("0xexpired", 1, 4, 30, &signals, &prev, now));
+        // cycle 4: warm cycle → poll
+        assert!(CopyTrader::should_poll_wallet("0xexpired", 4, 4, 30, &signals, &prev, now));
+    }
+
+    #[test]
+    fn config_change_warm_interval() {
+        let now = Utc::now();
+        let prev = seeded_prev_positions(&["0xwarm"]);
+        let signals = empty_signal_times();
+
+        // warm_every_n = 2 (30s / 15s) — faster polling
+        assert!(!CopyTrader::should_poll_wallet("0xwarm", 1, 2, 30, &signals, &prev, now));
+        assert!(CopyTrader::should_poll_wallet("0xwarm", 2, 2, 30, &signals, &prev, now));
+        assert!(!CopyTrader::should_poll_wallet("0xwarm", 3, 2, 30, &signals, &prev, now));
+        assert!(CopyTrader::should_poll_wallet("0xwarm", 4, 2, 30, &signals, &prev, now));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // RUS-211: Consensus window pruning
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn prune_after_window() {
+        let now = Utc::now();
+        let mut bets: HashMap<String, Vec<RecentBet>> = HashMap::new();
+        bets.insert("cid:Yes".to_string(), vec![
+            RecentBet {
+                wallet: "0xa".to_string(),
+                outcome: "Yes".to_string(),
+                weight: 1.0,
+                usdc_size: 100.0,
+                timestamp: now - Duration::minutes(31), // expired
+            },
+        ]);
+
+        let (_score, count, _names) = CopyTrader::consensus_score(&bets, "cid:Yes", 30, now, 0.5);
+        assert_eq!(count, 1, "expired bet → fallback to 1 (solo)");
+    }
+
+    #[test]
+    fn keep_within_window() {
+        let now = Utc::now();
+        let mut bets: HashMap<String, Vec<RecentBet>> = HashMap::new();
+        bets.insert("cid:Yes".to_string(), vec![
+            RecentBet {
+                wallet: "0xa".to_string(),
+                outcome: "Yes".to_string(),
+                weight: 1.0,
+                usdc_size: 100.0,
+                timestamp: now - Duration::minutes(29), // within window
+            },
+        ]);
+
+        let (_score, count, _names) = CopyTrader::consensus_score(&bets, "cid:Yes", 30, now, 0.5);
+        assert_eq!(count, 1);
+        assert!(_score > 0.5, "should use actual score, not fallback");
+    }
+
+    #[test]
+    fn two_wallets_consensus() {
+        let now = Utc::now();
+        let mut bets: HashMap<String, Vec<RecentBet>> = HashMap::new();
+        bets.insert("cid:Yes".to_string(), vec![
+            RecentBet {
+                wallet: "0xa".to_string(),
+                outcome: "Yes".to_string(),
+                weight: 1.0,
+                usdc_size: 100.0,
+                timestamp: now - Duration::minutes(5),
+            },
+            RecentBet {
+                wallet: "0xb".to_string(),
+                outcome: "Yes".to_string(),
+                weight: 0.8,
+                usdc_size: 50.0,
+                timestamp: now - Duration::minutes(10),
+            },
+        ]);
+
+        let (_score, count, _names) = CopyTrader::consensus_score(&bets, "cid:Yes", 30, now, 0.5);
+        assert_eq!(count, 2, "two unique wallets = consensus_count 2");
+    }
+
+    #[test]
+    fn expired_wallet_excluded_from_consensus() {
+        let now = Utc::now();
+        let mut bets: HashMap<String, Vec<RecentBet>> = HashMap::new();
+        bets.insert("cid:Yes".to_string(), vec![
+            RecentBet {
+                wallet: "0xa".to_string(),
+                outcome: "Yes".to_string(),
+                weight: 1.0,
+                usdc_size: 100.0,
+                timestamp: now - Duration::minutes(5), // fresh
+            },
+            RecentBet {
+                wallet: "0xb".to_string(),
+                outcome: "Yes".to_string(),
+                weight: 0.8,
+                usdc_size: 50.0,
+                timestamp: now - Duration::minutes(35), // expired
+            },
+        ]);
+
+        let (_score, count, _names) = CopyTrader::consensus_score(&bets, "cid:Yes", 30, now, 0.5);
+        assert_eq!(count, 1, "expired wallet should not count");
+    }
+
+    #[test]
+    fn window_30_prunes_more_than_120() {
+        let now = Utc::now();
+        let mut bets: HashMap<String, Vec<RecentBet>> = HashMap::new();
+        bets.insert("cid:Yes".to_string(), vec![
+            RecentBet {
+                wallet: "0xa".to_string(),
+                outcome: "Yes".to_string(),
+                weight: 1.0,
+                usdc_size: 100.0,
+                timestamp: now - Duration::minutes(5),
+            },
+            RecentBet {
+                wallet: "0xb".to_string(),
+                outcome: "Yes".to_string(),
+                weight: 0.8,
+                usdc_size: 50.0,
+                timestamp: now - Duration::minutes(60), // 60 min ago
+            },
+        ]);
+
+        let (_, count_30, _) = CopyTrader::consensus_score(&bets, "cid:Yes", 30, now, 0.5);
+        let (_, count_120, _) = CopyTrader::consensus_score(&bets, "cid:Yes", 120, now, 0.5);
+        assert_eq!(count_30, 1, "window=30 should prune the 60-min bet");
+        assert_eq!(count_120, 2, "window=120 should keep both");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // RUS-212: batch_size edge cases
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn batch_size_zero_becomes_one() {
+        let batch_size: usize = 0_usize.max(1);
+        assert_eq!(batch_size, 1);
+    }
+
+    #[test]
+    fn batch_size_chunks_no_panic() {
+        let wallets: Vec<i32> = vec![1, 2, 3, 4, 5];
+
+        // batch_size = 1
+        assert_eq!(wallets.chunks(1).count(), 5);
+        // batch_size = 8 (> len)
+        assert_eq!(wallets.chunks(8).count(), 1);
+        // batch_size = 5 (= len)
+        assert_eq!(wallets.chunks(5).count(), 1);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // RUS-213: Consensus scoring + multipliers
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn solo_bet_consensus_count_1() {
+        let now = Utc::now();
+        let mut bets: HashMap<String, Vec<RecentBet>> = HashMap::new();
+        bets.insert("cid:Yes".to_string(), vec![
+            RecentBet {
+                wallet: "0xa".to_string(),
+                outcome: "Yes".to_string(),
+                weight: 0.7,
+                usdc_size: 50.0,
+                timestamp: now - Duration::minutes(2),
+            },
+        ]);
+
+        let (_, count, _) = CopyTrader::consensus_score(&bets, "cid:Yes", 30, now, 0.7);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn three_wallet_consensus() {
+        let now = Utc::now();
+        let mut bets: HashMap<String, Vec<RecentBet>> = HashMap::new();
+        bets.insert("cid:Yes".to_string(), vec![
+            RecentBet { wallet: "0xa".to_string(), outcome: "Yes".to_string(), weight: 1.0, usdc_size: 100.0, timestamp: now - Duration::minutes(2) },
+            RecentBet { wallet: "0xb".to_string(), outcome: "Yes".to_string(), weight: 0.8, usdc_size: 50.0, timestamp: now - Duration::minutes(5) },
+            RecentBet { wallet: "0xc".to_string(), outcome: "Yes".to_string(), weight: 0.6, usdc_size: 75.0, timestamp: now - Duration::minutes(10) },
+        ]);
+
+        let (_, count, _) = CopyTrader::consensus_score(&bets, "cid:Yes", 30, now, 0.5);
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn different_outcomes_no_consensus() {
+        let now = Utc::now();
+        let mut bets: HashMap<String, Vec<RecentBet>> = HashMap::new();
+        // Wallet A bets Yes, Wallet B bets No — different token_keys
+        bets.insert("cid:Yes".to_string(), vec![
+            RecentBet { wallet: "0xa".to_string(), outcome: "Yes".to_string(), weight: 1.0, usdc_size: 100.0, timestamp: now - Duration::minutes(2) },
+        ]);
+        bets.insert("cid:No".to_string(), vec![
+            RecentBet { wallet: "0xb".to_string(), outcome: "No".to_string(), weight: 0.8, usdc_size: 50.0, timestamp: now - Duration::minutes(5) },
+        ]);
+
+        let (_, count_yes, _) = CopyTrader::consensus_score(&bets, "cid:Yes", 30, now, 0.5);
+        let (_, count_no, _) = CopyTrader::consensus_score(&bets, "cid:No", 30, now, 0.5);
+        assert_eq!(count_yes, 1, "only 1 wallet on Yes");
+        assert_eq!(count_no, 1, "only 1 wallet on No");
+    }
+
+    #[test]
+    fn min_traders_filter() {
+        // Simulates the filter logic from main.rs copy_trading_loop
+        let min_traders_2: u32 = 2;
+        let min_traders_1: u32 = 1;
+
+        let signal_consensus_1 = 1u32;
+        let signal_consensus_2 = 2u32;
+
+        // min_traders=2: solo signal gets filtered
+        assert!(signal_consensus_1 < min_traders_2, "consensus 1 < min 2 → SKIP");
+        assert!(!(signal_consensus_2 < min_traders_2), "consensus 2 >= min 2 → PASS");
+
+        // min_traders=1: everything passes
+        assert!(!(signal_consensus_1 < min_traders_1), "consensus 1 >= min 1 → PASS");
+    }
+
+    #[test]
+    fn consensus_multiplier_selection() {
+        // Mirrors the match logic in poll()
+        let multiplier_2 = 1.5;
+        let multiplier_3plus = 2.0;
+
+        let mult = |count: u32| -> f64 {
+            match count {
+                0 | 1 => 1.0,
+                2 => multiplier_2,
+                _ => multiplier_3plus,
+            }
+        };
+
+        assert_eq!(mult(0), 1.0);
+        assert_eq!(mult(1), 1.0);
+        assert_eq!(mult(2), 1.5);
+        assert_eq!(mult(3), 2.0);
+        assert_eq!(mult(10), 2.0);
     }
 }

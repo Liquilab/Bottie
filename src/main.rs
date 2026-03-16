@@ -172,17 +172,9 @@ async fn main() -> Result<()> {
         config::watch_config(config_path_clone, shared_config_clone).await;
     });
 
-    // Spawn watchlist refresh loop (discovers hot wallets every 2h)
-    let _refresh_handle = {
-        let client = client.clone();
-        let tracker = tracker.clone();
-        let config = shared_config.clone();
-        tokio::spawn(async move {
-            // Wait 30s before first scan to let the bot settle
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-            watchlist_refresh::watchlist_refresh_loop(client, tracker, config).await;
-        })
-    };
+    // Watchlist refresh disabled — consensus strategy uses config.yaml as source of truth.
+    // Discovery is handled by prepare.py + score.py (Fase 2/3), not runtime hot-wallet scanning.
+    // Old code added random wallets at weight 0.05 which polluted the polling budget.
 
     // Spawn resolution tracker (checks open positions every 5 min)
     let _resolver_handle = {

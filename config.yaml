@@ -6,29 +6,9 @@ copy_trading:
   enabled: true
   poll_interval_seconds: 15
   watchlist:
-  - address: '0x2d8b401d2f0e6937afebf18e19e11ca568a5260a'
-    name: vidarx
-    weight: 0.91
-    sports:
-    - all
   - address: '0x17559efac103ac7f361be37ec0b93888d4c55aac'
     name: moisturizer
     weight: 1.0
-    sports:
-    - all
-  - address: '0x02227b8f5a9636e895607edd3185ed6ee5598ff7'
-    name: HorizonSplendidView
-    weight: 0.6
-    sports:
-    - all
-  - address: '0xb90494d9a5d8f71f1930b2aa4b599f95c344c255'
-    name: Avonmore
-    weight: 0.6
-    sports:
-    - all
-  - address: '0x07921379f7b31ef93da634b688b2fe36897db778'
-    name: ewelmealt
-    weight: 0.6
     sports:
     - all
   - address: '0x036c159d5a348058a81066a76b89f35926d4178d'
@@ -51,11 +31,6 @@ copy_trading:
     weight: 0.7
     sports:
     - all
-  - address: '0x63ce342161250d705dc0b16df89036c8e5f9ba9a'
-    name: 0x8dxd
-    weight: 0.6
-    sports:
-    - all
   - address: '0x2005d16a84ceefa912d4e380cd32e7ff827875ea'
     name: RN1
     weight: 0.3
@@ -71,22 +46,210 @@ copy_trading:
     weight: 0.5
     sports:
     - all
-  - address: '0xd0d6053c3c37e727402d84c14069780d360993aa'
-    name: k9Q2mX4L8A7ZP3R
-    weight: 0.6
+  - address: '0x351e27b94a4bb022c6852370e9407868cf72de8a'
+    name: jackmala
+    weight: 0.15
     sports:
     - all
-  - address: '0x1f0ebc543b2d411f66947041625c0aa1ce61cf86'
-    name: 0x1f0ebc543B2d411f66947041625c0Aa1ce61CF86-1772205597930
-    weight: 0.6
+  - address: '0x44fd6c291a43287728329b9b59c0a75c02c9b634'
+    name: quiteimprobable
+    weight: 0.15
+    sports:
+    - all
+  - address: '0x29b15e8557b2cb5b5ba1ec8b5cbba479ee26f737'
+    name: Elenes
+    weight: 0.15
+    sports:
+    - all
+  - address: '0x48e29b54cc028b71d9af1bcb157b7ba8e6482a5f'
+    name: '0x48E29B54CC028b71d9af1bcb157B'
+    weight: 0.15
+    sports:
+    - all
+  - address: '0xea00bae2993fccc506f4737710eb82aff5f2c1f1'
+    name: dechuan
+    weight: 0.15
+    sports:
+    - all
+  - address: '0x424408e8ec677f5cb12106a4c18199ac665c03a6'
+    name: zw666888
+    weight: 0.15
+    sports:
+    - all
+  - address: '0x1d1ade627d0bb0205758580b20d808573e720df6'
+    name: Pwaddler
+    weight: 0.15
+    sports:
+    - all
+  - address: '0xee0d153c17fe82b8866b484753b56a700ab457ab'
+    name: BBPK
+    weight: 0.15
+    sports:
+    - all
+  - address: '0xb6aee7f281e13b23bd959127f6e2b3dccb4e4df8'
+    name: hugesportswhale
+    weight: 0.15
+    sports:
+    - all
+  - address: '0xf19d7d88cf362110027dcd64750fdd209a04276f'
+    name: huhaoli
+    weight: 0.15
+    sports:
+    - all
+  - address: '0x83720820a8aa6c3f20ad71850e7a1a17d16c5223'
+    name: Jsram
+    weight: 0.15
+    sports:
+    - all
+  - address: '0xc65ca4755436f82d8eb461e65781584b8cadea39'
+    name: UAEVALORANTFAN
+    weight: 0.15
+    sports:
+    - all
+  - address: '0x21ecbb95a15822bbdd4ab71345385a6056d95348'
+    name: '0x21eCbb95a15822bBdD4Ab7134538'
+    weight: 0.15
+    sports:
+    - all
+  - address: '0x618534bef69023c72e9400f42191c412d1882965'
+    name: batya1
+    weight: 0.15
+    sports:
+    - all
+  - address: '0x4a867a1f268e153de1d359e337914a714fabd3e0'
+    name: SportWhale4a86
+    weight: 0.15
+    sports:
+    - all
+  - address: '0xd106952ebf30a3125affd8a23b6c1f30c35fc79c'
+    name: Herdonia
+    weight: 0.15
+    sports:
+    - all
+  - address: '0xead152b855effa6b5b5837f53b24c0756830c76a'
+    name: elkmonkey
+    weight: 0.15
+    sports:
+    - all
+  - address: '0xd0e77a638c0b0ddeef9a59db053d596d63fab14f'
+    name: PleaseBro
+    weight: 0.15
+    sports:
+    - all
+  - address: '0x6d3c5bd13984b2de47c3a88ddc455309aab3d294'
+    name: VeryLucky888
+    weight: 0.15
+    sports:
+    - all
+  - address: '0xc21ea96be762bb55041529af6e386e7c53b80215'
+    name: Just2SeeULaugh
+    weight: 0.15
+    sports:
+    - all
+  - address: '0x033f0346c007323030eb420305ffede19a95618e'
+    name: TheVeryGoodCow
+    weight: 0.15
+    sports:
+    - all
+  - address: '0xe790b0e6bcdaca3c430fdaa4d86e2d8ae6e6eadc'
+    name: kl98x0
+    weight: 0.15
+    sports:
+    - all
+  - address: '0xb55216ed55337cf9443139e4e5cace56426694a8'
+    name: KirksCousin
+    weight: 0.15
+    sports:
+    - all
+  - address: '0x067f7f6e3d5363f1cf962499d1be2ca6de8be041'
+    name: SappySeal67
+    weight: 0.15
+    sports:
+    - all
+  - address: '0x2d90f5a2e4a03e42a1186f759ff3e051e0aa1310'
+    name: Aceplus2
+    weight: 0.15
+    sports:
+    - all
+  - address: '0x68cabafd9ce49a6cd008dbe34c63868404939f73'
+    name: xjykkghj
+    weight: 0.15
+    sports:
+    - all
+  - address: '0x53757615de1c42b83f893b79d4241a009dc2aeea'
+    name: SportFocus5375
+    weight: 0.15
+    sports:
+    - all
+  - address: '0x5d189e816b4149be00977c1a3c8840374aec4972'
+    name: gloriafoster
+    weight: 0.15
+    sports:
+    - all
+  - address: '0xeb49e4a9b5b8335a00a731eec5b710b586c11fbe'
+    name: SportMix_eb49
+    weight: 0.15
+    sports:
+    - all
+  - address: '0xc44d644ddc841431037a94d87b3a28760f30935c'
+    name: onlyinvegas
+    weight: 0.15
+    sports:
+    - all
+  - address: '0xf588b19afe63e1aba00f125f91e3e3b0fdc62b81'
+    name: RandomPunter
+    weight: 0.15
+    sports:
+    - all
+  - address: '0x31c518f864d1394361fec967b3daa9093a86ede4'
+    name: BTCGambler247
+    weight: 0.15
+    sports:
+    - all
+  - address: '0x38e59b36aae31b164200d0cad7c3fe5e0ee795e7'
+    name: cowcat
+    weight: 0.15
+    sports:
+    - all
+  - address: '0x612f07e76abb9d4d1804264a088a37a666ecaa53'
+    name: J-E-R
+    weight: 0.15
+    sports:
+    - all
+  - address: '0xdbdd45150249e229eb4ca8aa48a30dca21faa5de'
+    name: EsportsMix_dbdd
+    weight: 0.15
+    sports:
+    - all
+  - address: '0xd37ab1a5eeb25696c568e20e94af72b8d3422358'
+    name: piepi
+    weight: 0.15
+    sports:
+    - all
+  - address: '0x96489abcb9f583d6835c8ef95ffc923d05a86825'
+    name: anoin123
+    weight: 0.15
+    sports:
+    - all
+  - address: '0x0b9cae2b0dfe7a71c413e0604eaac1c352f87e44'
+    name: geniusMC
+    weight: 0.15
+    sports:
+    - all
+  - address: '0x12d6cccfc7470a3f4bafc53599a4779cbf2cf2a8'
+    name: classified
+    weight: 0.15
     sports:
     - all
   consensus:
-    min_traders: 1
+    min_traders: 2
+    window_minutes: 60
     multiplier_2: 1.5
     multiplier_3plus: 2.0
   max_delay_seconds: 60
   max_resolution_days: 7
+  warm_poll_interval_seconds: 60
+  batch_size: 8
 odds_arb:
   enabled: false
   poll_interval_seconds: 300
@@ -105,7 +268,7 @@ sizing:
   kelly_fraction: 0.25
   max_bet_pct: 5.0
   copy_base_size_pct: 3.0
-  min_price: 0.20
+  min_price: 0.2
 risk:
   max_daily_loss_pct: 15.0
   min_bankroll: 5.0
@@ -117,11 +280,11 @@ autoresearch:
   claude_model: claude-sonnet-4-20250514
 autoresearch_params:
   wallet_weights_override:
-    "0x2005d16a84ceefa912d4e380cd32e7ff827875ea": 0.3   # RN1 — arb trader, niet kopieerbaar
-    "0xee613b3fc183ee44f9da9c05f53e2da107e3debf": 0.5   # sovereign2013 — hedger
-    "0x507e52ef684ca2dd91f90a9d26d149dd3288beae": 0.5   # GamblingIsAllYouNeed — arb+directioneel
-    "0x7ea571c40408f340c1c8fc8eaacebab53c1bde7b": 0.7   # Cannae — clean directional
-    "0x036c159d5a348058a81066a76b89f35926d4178d": 0.9   # HedgeMaster88 — cleanest directional
+    '0x2005d16a84ceefa912d4e380cd32e7ff827875ea': 0.0
+    '0xee613b3fc183ee44f9da9c05f53e2da107e3debf': 0.0
+    '0x507e52ef684ca2dd91f90a9d26d149dd3288beae': 0.0
+    '0x7ea571c40408f340c1c8fc8eaacebab53c1bde7b': 0.7
+    '0x036c159d5a348058a81066a76b89f35926d4178d': 0.9
   sport_multipliers: {}
   timing_rules: []
   active_strategies: []

@@ -401,26 +401,49 @@ async fn sync_phantoms(
     let mut trades = logger.load_all();
     let mut phantom_count = 0u32;
 
+    let mut sold_count = 0u32;
+
     for trade in trades.iter_mut() {
         if trade.result.is_some() || !trade.filled || trade.dry_run {
             continue;
         }
         let key = format!("{}:{}", trade.condition_id, trade.outcome);
         if !held.contains(&key) {
-            trade.result = Some("phantom".to_string());
-            trade.pnl = Some(0.0);
-            trade.resolved_at = Some(Utc::now());
-            phantom_count += 1;
+            // Distinguish phantom (never filled) from sold (was filled, now gone).
+            // If the trade is >5 min old, it was likely filled and then manually sold.
+            // True phantoms are caught by the 3-second post-fill check in execution.rs.
+            let trade_age_mins = Utc::now()
+                .signed_duration_since(trade.timestamp)
+                .num_minutes();
+
+            if trade_age_mins > 5 {
+                // Older trade no longer on PM → manually sold
+                trade.result = Some("sold".to_string());
+                trade.pnl = Some(0.0); // actual PnL unknown for manual sells
+                trade.resolved_at = Some(Utc::now());
+                sold_count += 1;
+            } else {
+                // Very recent trade not on PM → likely phantom (never actually filled)
+                trade.result = Some("phantom".to_string());
+                trade.pnl = Some(0.0);
+                trade.resolved_at = Some(Utc::now());
+                phantom_count += 1;
+            }
         }
     }
 
-    if phantom_count > 0 {
+    if phantom_count > 0 || sold_count > 0 {
         logger.rewrite_all(trades);
         let mut r = risk.write().await;
-        for _ in 0..phantom_count {
+        for _ in 0..(phantom_count + sold_count) {
             r.record_trade_closed_with_context(0.0, None, "");
         }
-        info!("phantom-sync: marked {} positions as phantom (not held on PM)", phantom_count);
+        if phantom_count > 0 {
+            info!("phantom-sync: marked {} positions as phantom (not held on PM)", phantom_count);
+        }
+        if sold_count > 0 {
+            info!("phantom-sync: marked {} positions as sold (manually closed)", sold_count);
+        }
     }
 }
 

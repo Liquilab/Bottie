@@ -13,6 +13,8 @@ SCOUT_FILE     = BASE_DIR / "data" / "scout_report.json"
 PLAYBOOK_FILE  = BASE_DIR / "data" / "playbook.md"
 CONFIG_FILE    = BASE_DIR / "config.yaml"
 PM_CACHE_FILE  = BASE_DIR / "data" / "pm_cache.json"
+CONSENSUS_BULK = BASE_DIR / "data" / "consensus_bulk.json"
+CONSENSUS_RESULTS = BASE_DIR / "data" / "consensus_results.json"
 INITIAL_BANKROLL = 377.0  # total deposited
 
 # Polymarket Data API — source of truth
@@ -29,7 +31,7 @@ _pm_cache = {"data": None, "ts": 0}
 def fetch_pm_data():
     """Fetch real data from Polymarket API. Cached for 60 seconds."""
     now = time.time()
-    if _pm_cache["data"] and now - _pm_cache["ts"] < 60:
+    if _pm_cache["data"] and now - _pm_cache["ts"] < 15:
         return _pm_cache["data"]
 
     result = {"trades": [], "positions": [], "value": 0, "positions_value": 0, "cash": 0, "error": None}
@@ -159,8 +161,8 @@ def load_trades():
             if line:
                 try:
                     t = json.loads(line)
-                    # Filter out manual trades and crypto Up/Down noise
-                    if t.get("signal_source") == "manual":
+                    # Filter out manual trades UNLESS they're still open (show all open positions)
+                    if t.get("signal_source") == "manual" and t.get("result") is not None:
                         continue
                     title = (t.get("market_title") or "").lower()
                     if "up or down" in title:
@@ -496,7 +498,7 @@ def render_why(trade, wallet_map):
                 f'<span class="badge" style="background:#3fb950;color:#000">+{edge:.1f}%</span>')
     return f'<span class="muted">{src or "?"}</span>'
 
-def render_kpi_row(kpis, wallet_map):
+def render_kpi_row(kpis, wallet_map, trades=None):
     # PM API data (source of truth)
     portfolio = kpis.get("portfolio_value", 0)
     rendement = kpis.get("rendement", 0)
@@ -518,13 +520,17 @@ def render_kpi_row(kpis, wallet_map):
     cash = kpis.get("cash", 0)
     pos_val = kpis.get("position_value", 0)
 
+    # Use filtered bot open count if trades available, otherwise PM total
+    bot_open = count_real_open_bets(trades) if trades else kpis["open_count"]
+    pm_total = kpis["open_count"]
+
     tiles = [
         ("Portfolio (PM)", f'${portfolio:.0f}', "#388bfd",
          f'cash: ${cash:.0f} + posities: ${pos_val:.0f}'),
         ("Rendement", f'{"+" if rendement >= 0 else ""}${rendement:.0f} ({rendement_pct:+.1f}%)', rend_color,
          f'gestort: ${deposited:.0f}'),
         ("Open Posities", f'${pos_val:.0f}', unr_color,
-         f'{kpis["open_count"]} bets | cash: ${cash:.0f}'),
+         f'{bot_open} bot bets | {pm_total} PM totaal | cash: ${cash:.0f}'),
         ("Win Rate", f"{wr:.1f}%" if kpis["resolved_count"] else "—", wr_color,
          f'{kpis["resolved_count"]} resolved (trades.jsonl)'),
     ]
@@ -548,8 +554,40 @@ def render_kpi_row(kpis, wallet_map):
       <div class="goal-bar"><div class="goal-fill" style="width:{progress:.1f}%"></div></div>
     </div>"""
 
+def count_real_open_bets(trades):
+    """Count open bets that actually exist on PM — for accurate headers."""
+    open_bets_raw = [t for t in trades if t.get("filled") and t.get("result") is None and not t.get("dry_run")]
+    pm = fetch_pm_data()
+    pm_positions = pm.get("positions", [])
+    pm_open_keys = set()
+    for p in pm_positions:
+        if sf(p.get("size", 0)) > 0:
+            key = (p.get("conditionId", "") + ":" + (p.get("outcome") or "")).lower()
+            pm_open_keys.add(key)
+    if pm_open_keys:
+        return len([t for t in open_bets_raw if
+                    (t.get("condition_id", "") + ":" + (t.get("outcome") or "")).lower() in pm_open_keys])
+    return len(open_bets_raw)
+
+
 def render_open_bets(trades, wallet_map):
-    open_bets = [t for t in trades if t.get("filled") and t.get("result") is None and not t.get("dry_run")]
+    open_bets_raw = [t for t in trades if t.get("filled") and t.get("result") is None and not t.get("dry_run")]
+
+    # Cross-reference with PM positions API — only show bets that are actually still open
+    pm = fetch_pm_data()
+    pm_positions = pm.get("positions", [])
+    pm_open_keys = set()
+    for p in pm_positions:
+        if sf(p.get("size", 0)) > 0:
+            key = (p.get("conditionId", "") + ":" + (p.get("outcome") or "")).lower()
+            pm_open_keys.add(key)
+
+    if pm_open_keys:
+        open_bets = [t for t in open_bets_raw if
+                     (t.get("condition_id", "") + ":" + (t.get("outcome") or "")).lower() in pm_open_keys]
+    else:
+        open_bets = open_bets_raw  # fallback if PM API fails
+
     if not open_bets:
         return '<div class="empty">Geen open bets.</div>'
     open_bets.sort(key=lambda t: t.get("timestamp") or "", reverse=True)
@@ -1181,6 +1219,7 @@ def page_wrap(active_page, body_html):
         ("Overview", "/"),
         ("Trades", "/trades"),
         ("Wallets", "/wallets"),
+        ("Consensus", "/consensus"),
         ("Research", "/research"),
     ]
     nav = ""
@@ -1222,7 +1261,7 @@ def render_overview(trades, wallet_map):
     sport_stats = compute_sport_stats(trades)
     daily_pnl = compute_daily_pnl(trades)
 
-    body = render_kpi_row(kpis, wallet_map)
+    body = render_kpi_row(kpis, wallet_map, trades)
     body += f"""
     <div class="section">
       <div class="section-title">Dagelijkse P&L (14d)</div>
@@ -1247,9 +1286,10 @@ def render_overview(trades, wallet_map):
 
 def render_trades_page(trades, wallet_map):
     kpis = compute_kpis(trades)
+    real_open = count_real_open_bets(trades)
     body = f"""
     <div class="section">
-      <div class="section-title">Open Bets ({kpis['open_count']})</div>
+      <div class="section-title">Open Bets ({real_open})</div>
       {render_open_bets(trades, wallet_map)}
     </div>
     <div class="section">
@@ -1371,11 +1411,401 @@ def render_research_page():
     return page_wrap("/research", body)
 
 
+# ── Consensus Page ────────────────────────────────────────────────────────────
+
+def load_consensus_config():
+    """Parse consensus-specific config from config.yaml."""
+    if not CONFIG_FILE.exists():
+        return {}
+    try:
+        import yaml
+        with open(CONFIG_FILE) as f:
+            config = yaml.safe_load(f)
+        ct = config.get("copy_trading", {})
+        cons = ct.get("consensus", {})
+        watchlist = ct.get("watchlist", [])
+        return {
+            "min_traders": cons.get("min_traders", 1),
+            "window_minutes": cons.get("window_minutes", 120),
+            "multiplier_2": cons.get("multiplier_2", 1.5),
+            "multiplier_3plus": cons.get("multiplier_3plus", 2.0),
+            "batch_size": ct.get("batch_size", 4),
+            "warm_poll_interval": ct.get("warm_poll_interval_seconds", 60),
+            "poll_interval": ct.get("poll_interval_seconds", 15),
+            "watchlist_count": len(watchlist),
+            "active_wallets": len([w for w in watchlist if (w.get("weight") or 0) > 0]),
+        }
+    except Exception:
+        return {}
+
+
+def load_consensus_bulk():
+    if not CONSENSUS_BULK.exists():
+        return None
+    try:
+        return json.loads(CONSENSUS_BULK.read_text())
+    except Exception:
+        return None
+
+
+def load_consensus_results():
+    if not CONSENSUS_RESULTS.exists():
+        return None
+    try:
+        return json.loads(CONSENSUS_RESULTS.read_text())
+    except Exception:
+        return None
+
+
+def compute_consensus_split(trades):
+    """Split trades by consensus_count: solo (1) vs consensus (2+)."""
+    filled = [t for t in trades if t.get("filled") and not t.get("dry_run")]
+    resolved = [t for t in filled if t.get("result") in ("win", "loss", "take_profit", "sold")]
+
+    solo = [t for t in resolved if (t.get("consensus_count") or 1) < 2]
+    consensus = [t for t in resolved if (t.get("consensus_count") or 1) >= 2]
+
+    def stats(group, label):
+        wins = [t for t in group if t.get("result") in ("win", "take_profit")]
+        pnl = sum(t.get("pnl") or 0 for t in group)
+        wr = len(wins) / len(group) * 100 if group else 0
+        avg_size = sum(t.get("size_usdc") or 0 for t in group) / len(group) if group else 0
+        return {
+            "label": label,
+            "count": len(group),
+            "wins": len(wins),
+            "losses": len(group) - len(wins),
+            "wr": wr,
+            "pnl": pnl,
+            "avg_size": avg_size,
+        }
+
+    return {
+        "solo": stats(solo, "Solo (1 wallet)"),
+        "consensus": stats(consensus, "Consensus (2+ wallets)"),
+        "total_resolved": len(resolved),
+    }
+
+
+def render_consensus_config_tiles(cfg):
+    """Config tiles for consensus settings."""
+    if not cfg:
+        return '<div class="empty">Config niet beschikbaar.</div>'
+
+    mode = "CONSENSUS" if cfg.get("min_traders", 1) >= 2 else "SOLO (legacy)"
+    mode_color = "#3fb950" if cfg.get("min_traders", 1) >= 2 else "#d29922"
+
+    tiles = [
+        ("Modus", mode, mode_color,
+         f'min_traders = {cfg.get("min_traders", 1)}'),
+        ("Wallets", f'{cfg.get("active_wallets", 0)}', "#388bfd",
+         f'van {cfg.get("watchlist_count", 0)} in config'),
+        ("Window", f'{cfg.get("window_minutes", 30)} min', "#bc8cff",
+         f'consensus bets ouder → geprund'),
+        ("Polling", f'{cfg.get("poll_interval", 15)}s / {cfg.get("warm_poll_interval", 60)}s', "#8b949e",
+         f'hot / warm | batch={cfg.get("batch_size", 8)}'),
+    ]
+
+    html = ""
+    for label, value, color, sub in tiles:
+        html += f"""
+        <div class="kpi-tile" style="border-top:3px solid {color}">
+          <div class="kpi-label">{label}</div>
+          <div class="kpi-value">{value}</div>
+          <div class="kpi-sub">{sub}</div>
+        </div>"""
+    return f'<div class="kpi-row">{html}</div>'
+
+
+def render_consensus_vs_solo(split):
+    """Side-by-side comparison of solo vs consensus trades."""
+    def box(data, accent):
+        wr = f"{data['wr']:.1f}%" if data['count'] else "—"
+        pnl_color = "#3fb950" if data["pnl"] >= 0 else "#f85149"
+        pnl_str = f'{"+" if data["pnl"] >= 0 else ""}${data["pnl"]:.2f}'
+        return f"""
+        <div class="source-box" style="border-top:3px solid {accent}">
+          <div class="source-title">{data['label']}</div>
+          <div class="stat-row"><span>Trades</span><span>{data['count']}</span></div>
+          <div class="stat-row"><span>Record</span><span>{data['wins']}-{data['losses']}</span></div>
+          <div class="stat-row"><span>Win Rate</span><span>{wr}</span></div>
+          <div class="stat-row"><span>P&L</span><span style="color:{pnl_color}">{pnl_str}</span></div>
+          <div class="stat-row"><span>Avg Size</span><span>${data['avg_size']:.2f}</span></div>
+        </div>"""
+
+    return f"""
+    <div class="source-row">
+      {box(split["solo"], "#f85149")}
+      {box(split["consensus"], "#3fb950")}
+    </div>"""
+
+
+def render_consensus_signals(trades, wallet_map):
+    """Show recent trades that had consensus (2+ wallets). Filterable by consensus count."""
+    filled = [t for t in trades if t.get("filled") and not t.get("dry_run")
+              and (t.get("consensus_count") or 1) >= 2]
+    if not filled:
+        return '<div class="empty">Nog geen consensus trades. Wacht op 2+ wallets die dezelfde markt kiezen.</div>'
+
+    filled.sort(key=lambda t: t.get("timestamp") or "", reverse=True)
+
+    # Count per consensus level for filter buttons
+    from collections import Counter
+    cc_counts = Counter((t.get("consensus_count") or 1) for t in filled)
+    filter_buttons = '<div style="margin-bottom:12px;display:flex;gap:6px;flex-wrap:wrap">'
+    filter_buttons += '<button class="cc-filter active" onclick="filterCC(0)" style="cursor:pointer;padding:4px 12px;border-radius:12px;border:1px solid var(--border);background:var(--blue);color:#fff;font-size:0.8rem">All (%d)</button>' % len(filled)
+    for cc_val in sorted(cc_counts.keys()):
+        filter_buttons += '<button class="cc-filter" onclick="filterCC(%d)" style="cursor:pointer;padding:4px 12px;border-radius:12px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:0.8rem">%d wallets (%d)</button>' % (cc_val, cc_val, cc_counts[cc_val])
+    filter_buttons += '</div>'
+
+    rows = ""
+    for t in filled[:100]:
+        pnl = t.get("pnl")
+        result_html = fmt_result(t)
+        pnl_html = fmt_pnl(pnl) if pnl is not None else '<span class="muted">open</span>'
+        ts = (t.get("timestamp") or "")[:16].replace("T", " ")
+        cc = t.get("consensus_count") or 1
+        cc_color = "#3fb950" if cc >= 3 else "#d29922"
+
+        # Show consensus wallet names
+        cw = t.get("consensus_wallets") or []
+        if cw:
+            wallets_html = ", ".join(f'<strong>{w[:15]}</strong>' for w in cw[:5])
+        else:
+            # Fallback: show copy_wallet if available
+            cw_name = (t.get("copy_wallet") or "")[:15]
+            wallets_html = f'<strong>{cw_name}</strong>' if cw_name else '<span class="muted">?</span>'
+
+        rows += f"""
+        <tr data-cc="{cc}">
+          <td class="muted" style="white-space:nowrap">{ts}</td>
+          <td><span class="badge" style="background:{cc_color};color:#000;cursor:pointer" onclick="filterCC({cc})">{cc} wallets</span></td>
+          <td><span class="badge sport">{t.get('sport','?')[:8]}</span></td>
+          <td class="market-title">{t.get('market_title','?')}</td>
+          <td>{t.get('outcome','')}</td>
+          <td>{t.get('price',0):.0%}</td>
+          <td>${t.get('size_usdc',0):.2f}</td>
+          <td style="font-size:0.8rem">{wallets_html}</td>
+          <td>{result_html}</td>
+          <td>{pnl_html}</td>
+        </tr>"""
+
+    return f"""
+    {filter_buttons}
+    <div class="table-wrap">
+    <table id="consensus-table">
+      <thead><tr>
+        <th>Tijd</th><th>Consensus</th><th>Sport</th><th>Market</th>
+        <th>Side</th><th>Entry</th><th>Size</th><th>Traders</th><th>Resultaat</th><th>P&L</th>
+      </tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+    </div>
+    <script>
+    function filterCC(n) {{
+      document.querySelectorAll('.cc-filter').forEach(b => {{
+        b.style.background = 'var(--surface)';
+        b.style.color = 'var(--text)';
+        b.classList.remove('active');
+      }});
+      if (n === 0) {{
+        document.querySelectorAll('.cc-filter')[0].style.background = 'var(--blue)';
+        document.querySelectorAll('.cc-filter')[0].style.color = '#fff';
+      }} else {{
+        document.querySelectorAll('.cc-filter').forEach(b => {{
+          if (b.textContent.startsWith(n + ' wallets')) {{
+            b.style.background = 'var(--blue)';
+            b.style.color = '#fff';
+          }}
+        }});
+      }}
+      document.querySelectorAll('#consensus-table tbody tr').forEach(row => {{
+        if (n === 0) {{
+          row.style.display = '';
+        }} else {{
+          row.style.display = row.dataset.cc == String(n) ? '' : 'none';
+        }}
+      }});
+    }}
+    </script>"""
+
+
+def render_consensus_pool(bulk):
+    """Show wallet discovery pool from consensus_bulk.json."""
+    if not bulk:
+        return '<div class="empty">Geen discovery data. Draai: <code>python research/consensus/prepare.py</code></div>'
+
+    ts = bulk.get("timestamp", "")[:16]
+    wallets = bulk.get("wallets", [])
+
+    # Apply filters matching prepare.py
+    valid = [w for w in wallets
+             if w.get("closed_count", 0) >= 10
+             and w.get("both_sides_ratio", 1) <= 0.15
+             and w.get("last_activity_days", 999) <= 2
+             and w.get("sport_pct", 0) >= 0.30
+             and w.get("win_rate", 0) >= 0.50]
+    valid.sort(key=lambda w: w.get("win_rate", 0) * max(w.get("sharpe", 0.01), 0.01), reverse=True)
+
+    rows = ""
+    for i, w in enumerate(valid[:30], 1):
+        wr = w.get("win_rate", 0)
+        wr_color = "#3fb950" if wr >= 0.60 else "#d29922" if wr >= 0.50 else "#f85149"
+        sharpe = w.get("sharpe", 0)
+        sharpe_color = "#3fb950" if sharpe >= 0.3 else "#d29922" if sharpe >= 0 else "#f85149"
+        rows += f"""
+        <tr>
+          <td class="muted">{i}</td>
+          <td><strong>{w.get('name','?')[:20]}</strong></td>
+          <td style="color:{wr_color}">{wr:.0%}</td>
+          <td style="color:{sharpe_color}">{sharpe:.2f}</td>
+          <td>{w.get('sport_pct',0):.0%}</td>
+          <td>{w.get('top_sport','?')}</td>
+          <td>{w.get('closed_count',0)}</td>
+          <td>{w.get('both_sides_ratio',0):.0%}</td>
+          <td>{w.get('last_activity_days','?')}d</td>
+        </tr>"""
+
+    return f"""
+    <div class="muted" style="margin-bottom:12px">
+      Scan: {ts} | {len(wallets)} totaal | {len(valid)} na filters
+    </div>
+    <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>#</th><th>Wallet</th><th>WR</th><th>Sharpe</th>
+        <th>Sport%</th><th>Top</th><th>Closed</th><th>Both Sides</th><th>Activiteit</th>
+      </tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+    </div>"""
+
+
+def render_consensus_pairs(results):
+    """Show top consensus pairs from score.py results."""
+    if not results:
+        return '<div class="empty">Geen pair data. Draai: <code>python research/consensus/score.py</code></div>'
+
+    pairs = results.get("top_pairs", [])
+    if not pairs:
+        return '<div class="empty">Geen pairs met consensus gevonden.</div>'
+
+    rows = ""
+    for i, p in enumerate(pairs[:15], 1):
+        wr = p.get("consensus_wr")
+        wr_str = f"{wr:.0%}" if wr is not None else "—"
+        wr_color = "#3fb950" if wr and wr >= 0.55 else "#f85149" if wr and wr < 0.45 else "#d29922"
+        score_color = "#3fb950" if p.get("score", 0) >= 2 else "#d29922"
+        rows += f"""
+        <tr>
+          <td class="muted">{i}</td>
+          <td><strong>{p.get('names','?')}</strong></td>
+          <td>{p.get('shared_events',0)}</td>
+          <td>{p.get('agreement_rate',0):.0%}</td>
+          <td style="color:{wr_color}">{wr_str}</td>
+          <td>{p.get('consensus_total',0)}</td>
+          <td style="color:{score_color}">{p.get('score',0):.1f}</td>
+        </tr>"""
+
+    return f"""
+    <div class="muted" style="margin-bottom:12px">
+      {len(pairs)} pairs met consensus | {results.get('valid_wallets',0)} wallets geanalyseerd
+    </div>
+    <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>#</th><th>Pair</th><th>Shared Events</th><th>Agreement</th>
+        <th>Consensus WR</th><th>Trades</th><th>Score</th>
+      </tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+    </div>"""
+
+
+def render_consensus_portfolios(results):
+    """Show recommended portfolios from score.py."""
+    if not results:
+        return ""
+    portfolios = results.get("portfolios", [])
+    if not portfolios:
+        return ""
+
+    cards = ""
+    for i, p in enumerate(portfolios[:3], 1):
+        cons_wr = p.get("consensus_wr")
+        wr_str = f"{cons_wr:.0%}" if cons_wr else "—"
+        wr_color = "#3fb950" if cons_wr and cons_wr >= 0.55 else "#d29922"
+
+        wallet_list = ""
+        for w in p.get("wallets", []):
+            wr = w.get("wr", 0)
+            wallet_list += f'<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:0.85em">'
+            wallet_list += f'<span><strong>{w.get("name","?")[:18]}</strong></span>'
+            wallet_list += f'<span style="color:{"#3fb950" if wr >= 0.55 else "#d29922"}">{wr:.0%}</span>'
+            wallet_list += f'<span class="muted">{w.get("sport","?")}</span>'
+            wallet_list += f'</div>'
+
+        cards += f"""
+        <div class="source-box" style="border-top:3px solid {"#3fb950" if i == 1 else "#388bfd" if i == 2 else "#8b949e"}">
+          <div class="source-title">Portfolio #{i} <span class="muted" style="font-weight:400;font-size:0.8em">score={p.get('score',0):.0f}</span></div>
+          <div class="stat-row"><span>Wallets</span><span>{p.get('size',0)}</span></div>
+          <div class="stat-row"><span>Active Pairs</span><span>{p.get('active_pairs',0)}</span></div>
+          <div class="stat-row"><span>Consensus WR</span><span style="color:{wr_color}">{wr_str}</span></div>
+          <div class="stat-row"><span>Consensus Trades</span><span>{p.get('consensus_wins',0)}/{p.get('consensus_events',0)}</span></div>
+          <div style="margin-top:8px;border-top:1px solid var(--border);padding-top:8px">
+            {wallet_list}
+          </div>
+        </div>"""
+
+    return f'<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px">{cards}</div>'
+
+
+def render_consensus_page(trades, wallet_map):
+    cfg = load_consensus_config()
+    split = compute_consensus_split(trades)
+    bulk = load_consensus_bulk()
+    results = load_consensus_results()
+
+    body = render_consensus_config_tiles(cfg)
+
+    body += f"""
+    <div class="section">
+      <div class="section-title">Solo vs Consensus Performance</div>
+      {render_consensus_vs_solo(split)}
+    </div>
+    <div class="section">
+      <div class="section-title">Consensus Trades</div>
+      {render_consensus_signals(trades, wallet_map)}
+    </div>"""
+
+    portfolios_html = render_consensus_portfolios(results)
+    if portfolios_html:
+        body += f"""
+    <div class="section">
+      <div class="section-title">Aanbevolen Portfolios</div>
+      {portfolios_html}
+    </div>"""
+
+    body += f"""
+    <div class="two-col">
+      <div class="section">
+        <div class="section-title">Top Wallet Pairs</div>
+        {render_consensus_pairs(results)}
+      </div>
+      <div class="section">
+        <div class="section-title">Discovery Pool</div>
+        {render_consensus_pool(bulk)}
+      </div>
+    </div>"""
+
+    return page_wrap("/consensus", body)
+
+
 # ── HTTP Server ───────────────────────────────────────────────────────────────
 
 class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path in ("/", "/index.html", "/trades", "/wallets", "/research"):
+        if self.path in ("/", "/index.html", "/trades", "/wallets", "/consensus", "/research"):
             try:
                 trades     = load_trades()
                 wallet_map = parse_config_wallets()
@@ -1383,6 +1813,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     html = render_trades_page(trades, wallet_map)
                 elif self.path == "/wallets":
                     html = render_wallets_page(trades, wallet_map)
+                elif self.path == "/consensus":
+                    html = render_consensus_page(trades, wallet_map)
                 elif self.path == "/research":
                     html = render_research_page()
                 else:

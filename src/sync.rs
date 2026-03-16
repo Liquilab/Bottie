@@ -71,6 +71,16 @@ pub async fn sync_own_trades(
             continue;
         }
 
+        // Skip very recent trades (< 10 min old) — these are likely trades the bot
+        // just placed itself. Execution.rs already logged them with proper consensus_count.
+        // Importing them again as "manual" would lose the consensus metadata.
+        if let Some(secs) = act.timestamp_secs() {
+            let age_mins = (chrono::Utc::now().timestamp() - secs) / 60;
+            if age_mins < 10 {
+                continue;
+            }
+        }
+
         let trade_time = match act.timestamp_secs() {
             Some(secs) => DateTime::from_timestamp(secs, 0).unwrap_or(chrono::Utc::now()),
             None => chrono::Utc::now(),
@@ -103,6 +113,7 @@ pub async fn sync_own_trades(
             signal_source: "manual".to_string(),
             copy_wallet: None,
             consensus_count: None,
+            consensus_wallets: None,
             edge_pct: 0.0,
             confidence: 0.0,
             signal_delay_ms: 0,
