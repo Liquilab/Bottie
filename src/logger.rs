@@ -93,12 +93,13 @@ impl TradeLogger {
             .collect();
         let mut event_types = HashMap::new();
         for t in &open {
-            if let Some(slug) = &t.event_slug {
-                if !slug.is_empty() {
-                    let normalized = Self::normalize_slug(slug);
-                    let mtype = Self::market_type(&t.market_title);
-                    event_types.insert(normalized, mtype);
-                }
+            let dedup_key = Self::event_dedup_key(
+                t.event_slug.as_deref().unwrap_or(""),
+                &t.market_title,
+            );
+            if !dedup_key.is_empty() {
+                let mtype = Self::market_type(&t.market_title);
+                event_types.insert(dedup_key, mtype);
             }
         }
         (positions, event_types)
@@ -128,12 +129,13 @@ impl TradeLogger {
         if trade.filled && trade.result.is_none() && !trade.outcome.is_empty() {
             let key = Self::position_key(&trade.condition_id, &trade.outcome);
             self.open_positions.lock().unwrap().insert(key);
-            if let Some(slug) = &trade.event_slug {
-                if !slug.is_empty() {
-                    let normalized = Self::normalize_slug(slug);
-                    let mtype = Self::market_type(&trade.market_title);
-                    self.open_event_types.lock().unwrap().insert(normalized, mtype);
-                }
+            let dedup_key = Self::event_dedup_key(
+                trade.event_slug.as_deref().unwrap_or(""),
+                &trade.market_title,
+            );
+            if !dedup_key.is_empty() {
+                let mtype = Self::market_type(&trade.market_title);
+                self.open_event_types.lock().unwrap().insert(dedup_key, mtype);
             }
         }
 
@@ -175,15 +177,46 @@ impl TradeLogger {
         slug.trim_end_matches("-more-markets").to_string()
     }
 
+    /// Extract a dedup key from a trade. Uses event_slug if available,
+    /// otherwise derives one from market title (team names / event description).
+    /// This prevents trades with empty event_slug from bypassing dedup.
+    pub fn event_dedup_key(event_slug: &str, market_title: &str) -> String {
+        let slug = Self::normalize_slug(event_slug);
+        if !slug.is_empty() {
+            return slug;
+        }
+        // Fallback: extract base event from title by removing market-type suffixes
+        // "Spread: Trail Blazers (-10.5)" → "trail blazers"
+        // "Trail Blazers vs. Nets: O/U 221.5" → "trail blazers vs. nets"
+        // "Will Brentford FC win on 2026-03-16?" → "brentford fc 2026-03-16"
+        let t = market_title.to_lowercase();
+        let t = t.trim_start_matches("spread: ")
+                 .trim_start_matches("will ");
+        // Remove everything after common separators
+        let base = t.split(": o/u").next()
+            .and_then(|s| s.split(": both").next())
+            .and_then(|s| s.split(" (-").next())
+            .and_then(|s| s.split(" (+").next())
+            .unwrap_or(t);
+        // Remove trailing question marks and whitespace
+        let clean = base.trim_end_matches('?').trim();
+        if clean.len() >= 5 {
+            format!("_title:{}", clean)
+        } else {
+            String::new() // too short to be reliable
+        }
+    }
+
     /// Check if there is ANY open position on this event.
     /// With consensus strategy: 1 trade per event, regardless of market type.
-    pub fn has_any_open_on_event(&self, event_slug: &str) -> bool {
-        if event_slug.is_empty() {
+    /// Uses event_dedup_key to also match trades that had empty event_slug.
+    pub fn has_any_open_on_event(&self, event_slug: &str, market_title: &str) -> bool {
+        let dedup_key = Self::event_dedup_key(event_slug, market_title);
+        if dedup_key.is_empty() {
             return false;
         }
-        let normalized = Self::normalize_slug(event_slug);
         let event_types = self.open_event_types.lock().unwrap();
-        event_types.keys().any(|k| Self::normalize_slug(k) == normalized)
+        event_types.contains_key(&dedup_key)
     }
 
     /// Rewrite the entire log with updated records (used by the resolver).
@@ -200,12 +233,13 @@ impl TradeLogger {
             .collect();
         let mut new_event_types = HashMap::new();
         for t in &open {
-            if let Some(slug) = &t.event_slug {
-                if !slug.is_empty() {
-                    let normalized = Self::normalize_slug(slug);
-                    let mtype = Self::market_type(&t.market_title);
-                    new_event_types.insert(normalized, mtype);
-                }
+            let dedup_key = Self::event_dedup_key(
+                t.event_slug.as_deref().unwrap_or(""),
+                &t.market_title,
+            );
+            if !dedup_key.is_empty() {
+                let mtype = Self::market_type(&t.market_title);
+                new_event_types.insert(dedup_key, mtype);
             }
         }
         *self.open_positions.lock().unwrap() = new_positions;

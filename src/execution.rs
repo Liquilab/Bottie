@@ -81,8 +81,8 @@ impl Executor {
         // Event deduplication: only 1 trade per event.
         // With consensus strategy, multiple signals fire on the same event
         // (spread, O/U, moneyline). We only want the first one.
-        if !signal.event_slug.is_empty()
-            && logger.has_any_open_on_event(&signal.event_slug)
+        // Uses title-based fallback when event_slug is empty.
+        if logger.has_any_open_on_event(&signal.event_slug, &signal.market_title)
         {
             info!(
                 "SKIP: already have bet on event {} ({})",
