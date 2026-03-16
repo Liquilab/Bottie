@@ -247,23 +247,34 @@ async def scout_cycle():
             if (i + 1) % 50 == 0:
                 log.info(f"  ... {i+1}/{len(unique)} evaluated")
 
-        # Sort: highest overlap first, then win rate
-        qualified.sort(key=lambda w: (-w["overlap"], -w["win_rate"]))
+        # Score function: overlap × WR (higher = better signal source)
+        def wallet_score(overlap, wr, live_count):
+            return overlap * wr * (1 + min(live_count, 20) / 20)
+
+        for w in qualified:
+            w["score"] = round(wallet_score(w["overlap"], w["win_rate"], w["live_count"]), 2)
+
+        qualified.sort(key=lambda w: -w["score"])
 
         log.info(f"\nQualified new wallets: {len(qualified)}")
         for w in qualified[:10]:
-            log.info(f"  {w['name']:20s} live={w['live_count']} overlap={w['overlap']} WR={w['win_rate']:.0%}")
+            log.info(f"  {w['name']:20s} score={w['score']:5.1f} live={w['live_count']} overlap={w['overlap']} WR={w['win_rate']:.0%}")
 
-        # Step 4: Remove inactive wallets (0 live positions)
+        # Step 4: Score existing wallets + remove inactive
         removed = []
         kept_watchlist = []
+        existing_scores = []  # (index_in_kept, score, name) for swap comparison
+
         for w in watchlist:
             addr = w["address"].lower()
             weight = overrides.get(addr, w.get("weight", 0))
-            if weight <= 0:
-                kept_watchlist.append(w)  # keep disabled wallets as-is
+
+            # Keep disabled wallets (weight 0) and original high-weight wallets untouched
+            if weight <= 0 or weight >= 0.5:
+                kept_watchlist.append(w)
                 continue
 
+            # Score active low-weight wallets (the signal sources we manage)
             positions = await fetch_positions(client, addr)
             live = [p for p in positions if float(p.get("size", 0) or 0) > 0
                     and 0.05 < float(p.get("curPrice", 0) or 0) < 0.95
@@ -272,28 +283,72 @@ async def scout_cycle():
             if len(live) == 0:
                 removed.append(w["name"])
                 log.info(f"  REMOVE: {w['name']} (0 live positions)")
-            else:
-                kept_watchlist.append(w)
+                continue
+
+            # Count overlap with other wallets
+            overlap = 0
+            for p in live:
+                slug = (p.get("eventSlug") or p.get("slug") or "").lower()
+                if slug in our_events:
+                    overlap += 1
+
+            # Fetch WR for scoring
+            closed = await fetch_closed_positions(client, addr, max_pages=3)
+            wr = sum(1 for p in closed if float(p.get("realizedPnl", 0) or 0) > 0) / len(closed) if closed else 0.5
+
+            score = wallet_score(overlap, wr, len(live))
+            kept_watchlist.append(w)
+            existing_scores.append((len(kept_watchlist) - 1, score, w["name"], addr))
             await asyncio.sleep(0.1)
 
-        # Step 5: Add qualified wallets (up to MAX_WALLETS)
+        # Step 5: Fill empty slots first
         slots = MAX_WALLETS - len(kept_watchlist)
         added = []
-        for w in qualified[:max(slots, 0)]:
-            kept_watchlist.append({
-                "address": w["address"],
-                "name": w["name"],
-                "weight": 0.15,
-                "sports": ["all"],
-            })
-            added.append(w["name"])
-            log.info(f"  ADD: {w['name']} (live={w['live_count']} overlap={w['overlap']} WR={w['win_rate']:.0%})")
+        candidates_left = list(qualified)  # copy for swapping later
 
-        # Step 6: Save config if changed
-        if added or removed:
+        if slots > 0:
+            for w in candidates_left[:slots]:
+                kept_watchlist.append({
+                    "address": w["address"],
+                    "name": w["name"],
+                    "weight": 0.15,
+                    "sports": ["all"],
+                })
+                added.append(f"{w['name']} (score={w['score']:.1f})")
+                log.info(f"  ADD: {w['name']} (score={w['score']:.1f} live={w['live_count']} overlap={w['overlap']} WR={w['win_rate']:.0%})")
+            candidates_left = candidates_left[slots:]
+
+        # Step 6: Swap — replace worst existing wallets with better candidates
+        MAX_SWAPS = 5
+        swaps = 0
+
+        if existing_scores and candidates_left:
+            existing_scores.sort(key=lambda x: x[1])  # worst first
+
+            for idx, score, name, addr in existing_scores:
+                if swaps >= MAX_SWAPS or not candidates_left:
+                    break
+
+                best_candidate = candidates_left[0]
+                if best_candidate["score"] > score * 1.5:  # must be 50% better to justify swap
+                    # Swap
+                    log.info(f"  SWAP: {name} (score={score:.1f}) → {best_candidate['name']} (score={best_candidate['score']:.1f})")
+                    kept_watchlist[idx] = {
+                        "address": best_candidate["address"],
+                        "name": best_candidate["name"],
+                        "weight": 0.15,
+                        "sports": ["all"],
+                    }
+                    candidates_left.pop(0)
+                    swaps += 1
+                else:
+                    break  # candidates are sorted, no point continuing
+
+        # Step 7: Save config if changed
+        if added or removed or swaps > 0:
             config["copy_trading"]["watchlist"] = kept_watchlist
             save_config(config)
-            log.info(f"Config updated: +{len(added)} added, -{len(removed)} removed = {len(kept_watchlist)} total")
+            log.info(f"Config updated: +{len(added)} added, -{len(removed)} removed, {swaps} swaps = {len(kept_watchlist)} total")
         else:
             log.info("No changes needed")
 
@@ -315,8 +370,8 @@ async def main():
             await scout_cycle()
         except Exception as e:
             log.error(f"scout cycle failed: {e}")
-        log.info("sleeping 30 min until next cycle...")
-        await asyncio.sleep(1800)
+        log.info("sleeping 1 hour until next cycle...")
+        await asyncio.sleep(3600)
 
 
 if __name__ == "__main__":
