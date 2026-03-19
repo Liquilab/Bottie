@@ -138,6 +138,16 @@ pub struct WatchlistEntry {
     pub name: String,
     pub weight: f64,
     pub sports: Vec<String>,
+    /// Allowed market types for this wallet (e.g. ["win", "ou", "spread", "ml", "draw"]).
+    /// Empty = all types allowed.
+    #[serde(default)]
+    pub market_types: Vec<String>,
+    /// Per-wallet min price override (falls back to global sizing.min_price)
+    #[serde(default)]
+    pub min_price: Option<f64>,
+    /// Per-wallet max price override (falls back to global sizing.max_price)
+    #[serde(default)]
+    pub max_price: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -170,10 +180,20 @@ pub struct SizingConfig {
     pub copy_base_size_pct: f64,
     #[serde(default = "default_min_price")]
     pub min_price: f64,
+    #[serde(default = "default_max_price")]
+    pub max_price: f64,
+    /// Reference portfolio value for tiered copy-trade sizing (cash + positions).
+    /// If 0, falls back to live bankroll (cash only).
+    #[serde(default)]
+    pub portfolio_reference_usdc: f64,
 }
 
 fn default_min_price() -> f64 {
     0.05
+}
+
+fn default_max_price() -> f64 {
+    0.95
 }
 
 #[derive(Debug, Clone, Deserialize)]

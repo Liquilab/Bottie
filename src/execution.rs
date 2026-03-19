@@ -67,28 +67,56 @@ impl Executor {
             }
         }
 
-        // Position deduplication: skip if we already have this exact position
-        if !signal.outcome.is_empty()
-            && logger.has_open_position(&signal.condition_id, &signal.outcome)
+        // Price boundary filter — Cannae's sweet spot is 25-65ct
         {
-            info!(
-                "SKIP: already open position on {} {}",
-                signal.market_title, signal.outcome
-            );
-            return Ok(false);
+            let sizing_config = &self.config.read().await.sizing;
+            if signal.price > sizing_config.max_price {
+                info!(
+                    "SKIP: price {:.0}ct > max {:.0}ct for {}",
+                    signal.price * 100.0, sizing_config.max_price * 100.0, signal.market_title
+                );
+                return Ok(false);
+            }
         }
 
-        // Event deduplication: only 1 trade per event.
-        // With consensus strategy, multiple signals fire on the same event
-        // (spread, O/U, moneyline). We only want the first one.
-        // Uses title-based fallback when event_slug is empty.
-        if logger.has_any_open_on_event(&signal.event_slug, &signal.market_title)
+        // Dedup against LIVE PM positions (source of truth, not trade log).
+        // Checks per condition_id (same market). This:
+        // - Blocks duplicates (same condition+outcome)
+        // - Blocks contradictions (same condition, opposite outcome)
+        // - Allows different market types on same event (different condition_id)
+        //   e.g. Cannae "Will X win? No" + sovereign "X O/U 233.5" = OK
         {
-            info!(
-                "SKIP: already have bet on event {} ({})",
-                signal.event_slug, signal.market_title
-            );
-            return Ok(false);
+            let funder = self.client.funder_address();
+            match self.client.get_wallet_positions(&funder, 500).await {
+                Ok(positions) => {
+                    for pos in &positions {
+                        if pos.size_f64() < 0.01 {
+                            continue;
+                        }
+                        let pos_cid = pos.condition_id.as_deref().unwrap_or("");
+
+                        if pos_cid == signal.condition_id {
+                            let pos_outcome = pos.outcome.as_deref().unwrap_or("");
+                            if pos_outcome.to_lowercase() == signal.outcome.to_lowercase() {
+                                info!(
+                                    "SKIP: already open position on {} {}",
+                                    signal.market_title, signal.outcome
+                                );
+                            } else {
+                                info!(
+                                    "SKIP: contradictory bet on {} (have {}, signal {})",
+                                    signal.market_title, pos_outcome, signal.outcome
+                                );
+                            }
+                            return Ok(false);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("PM position check failed ({}), skipping trade for safety", e);
+                    return Ok(false);
+                }
+            }
         }
 
         // Skip if we already attempted this market+outcome this session (5 min cooldown)
@@ -142,10 +170,18 @@ impl Executor {
                             // Don't enter markets ending within 30 minutes — edge is gone,
                             // risk of last-minute reversal is highest
                             if until_end.num_minutes() < 30 {
-                                info!(
-                                    "SKIP: {} ends in {}min — too close to resolution",
-                                    signal.market_title, until_end.num_minutes()
-                                );
+                                let mins = until_end.num_minutes();
+                                if mins < 0 {
+                                    info!(
+                                        "SKIP: {} already ended {}min ago — market resolved",
+                                        signal.market_title, mins.abs()
+                                    );
+                                } else {
+                                    info!(
+                                        "SKIP: {} ends in {}min — too close to resolution",
+                                        signal.market_title, mins
+                                    );
+                                }
                                 return Ok(false);
                             }
                         }
@@ -259,6 +295,9 @@ impl Executor {
                 result: None,
                 pnl: None,
                 resolved_at: None,
+                sell_price: None,
+                actual_pnl: None,
+                exit_type: None,
                 strategy_version: strategy_version.clone(),
             });
 
@@ -370,6 +409,9 @@ impl Executor {
                 result: None,
                 pnl: None,
                 resolved_at: None,
+                sell_price: None,
+                actual_pnl: None,
+                exit_type: None,
                 strategy_version,
             });
         }

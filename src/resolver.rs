@@ -30,19 +30,12 @@ pub async fn resolver_loop(
     tracker: Arc<RwLock<WalletTracker>>,
 ) {
     let mut check_state: HashMap<String, MarketCheckState> = HashMap::new();
-    let mut tp_counter: u32 = 0;
 
     loop {
         // Phantom sync FIRST — catch false fills before resolution resolves them as win/loss
         sync_phantoms(&client, &logger, &risk).await;
 
         check_resolutions(&client, &logger, &risk, &tracker, &mut check_state).await;
-
-        // Take-profit check every 2 minutes: sell positions above 95ct
-        tp_counter += 1;
-        if tp_counter % 2 == 0 {
-            take_profit_check(&client, &logger, &risk).await;
-        }
 
         // Base tick: every 60 seconds. Individual markets are skipped if not due.
         tokio::time::sleep(Duration::from_secs(60)).await;
@@ -213,6 +206,9 @@ async fn check_resolutions(
                 else { "loss".to_string() }
             );
             trade.pnl = Some(pnl);
+            trade.actual_pnl = Some(pnl);
+            trade.sell_price = Some(if won { 1.0 } else if is_invalid { trade.price } else { 0.0 });
+            trade.exit_type = Some("resolution".to_string());
             trade.resolved_at = Some(Utc::now());
 
             resolved_count += 1;
@@ -341,6 +337,9 @@ async fn take_profit_check(
                     let sport = trades[idx].sport.clone();
                     trades[idx].result = Some("take_profit".to_string());
                     trades[idx].pnl = Some(profit);
+                    trades[idx].actual_pnl = Some(profit);
+                    trades[idx].sell_price = Some(best_bid);
+                    trades[idx].exit_type = Some("take_profit".to_string());
                     trades[idx].resolved_at = Some(Utc::now());
                     sold_count += 1;
                     total_profit += profit;
@@ -409,23 +408,60 @@ async fn sync_phantoms(
         }
         let key = format!("{}:{}", trade.condition_id, trade.outcome);
         if !held.contains(&key) {
-            // Distinguish phantom (never filled) from sold (was filled, now gone).
-            // If the trade is >5 min old, it was likely filled and then manually sold.
-            // True phantoms are caught by the 3-second post-fill check in execution.rs.
             let trade_age_mins = Utc::now()
                 .signed_duration_since(trade.timestamp)
                 .num_minutes();
 
-            if trade_age_mins > 5 {
-                // Older trade no longer on PM → manually sold
-                trade.result = Some("sold".to_string());
-                trade.pnl = Some(0.0); // actual PnL unknown for manual sells
+            // Skip trades younger than 10 min — PM positions API has propagation delay.
+            if trade_age_mins < 10 {
+                continue;
+            }
+
+            if trade_age_mins > 120 {
+                // >2h old, not on PM → manually sold or resolved elsewhere.
+                // First check if market has officially resolved — if so use resolution PnL.
+                // This handles the case where user sold at 100ct just before/after resolution.
+                let winner = client.get_market_info(&trade.condition_id).await
+                    .ok()
+                    .flatten()
+                    .and_then(|m| m.winning_outcome());
+
+                let (result, pnl, sell_price, exit_type) = if let Some(w) = winner {
+                    let won = trade.outcome.to_lowercase() == w.to_lowercase();
+                    if won {
+                        let p = trade.size_shares * (1.0 - trade.price);
+                        ("win".to_string(), p, 1.0f64, "resolution".to_string())
+                    } else {
+                        ("loss".to_string(), -trade.size_usdc, 0.0f64, "resolution".to_string())
+                    }
+                } else {
+                    // Market not resolved — try current bid as best estimate
+                    let (p, sp) = if !trade.token_id.is_empty() {
+                        match client.get_best_bid(&trade.token_id).await {
+                            Ok(bid) if bid > 0.0 => {
+                                (bid * trade.size_shares - trade.size_usdc, bid)
+                            }
+                            _ => (0.0, 0.0),
+                        }
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    ("sold".to_string(), p, sp, "manual".to_string())
+                };
+
+                trade.sell_price = Some(sell_price);
+                trade.result = Some(result);
+                trade.pnl = Some(pnl);
+                trade.actual_pnl = Some(pnl);
+                trade.exit_type = Some(exit_type);
                 trade.resolved_at = Some(Utc::now());
                 sold_count += 1;
             } else {
-                // Very recent trade not on PM → likely phantom (never actually filled)
+                // 10min-2h old, not on PM → likely phantom (never actually filled)
                 trade.result = Some("phantom".to_string());
                 trade.pnl = Some(0.0);
+                trade.actual_pnl = Some(0.0);
+                trade.exit_type = Some("phantom".to_string());
                 trade.resolved_at = Some(Utc::now());
                 phantom_count += 1;
             }

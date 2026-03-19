@@ -197,4 +197,27 @@ impl RiskManager {
             self.open_bets = actual_count;
         }
     }
+
+    /// Full sync: rebuilds open_bets, open_per_wallet, and open_per_sport from trade log.
+    /// Fixes drift in per-wallet counters (e.g. after manual sells or phantom resets).
+    pub fn sync_full(&mut self, open_trades: &[(Option<String>, String)]) {
+        let actual_count = open_trades.len() as u32;
+        let mut per_wallet: HashMap<String, u32> = HashMap::new();
+        let mut per_sport: HashMap<String, u32> = HashMap::new();
+        for (wallet, sport) in open_trades {
+            if let Some(w) = wallet {
+                *per_wallet.entry(w.clone()).or_insert(0) += 1;
+            }
+            *per_sport.entry(sport.clone()).or_insert(0) += 1;
+        }
+        if self.open_bets != actual_count || self.open_per_wallet != per_wallet {
+            info!(
+                "risk: sync_full corrected open_bets {} → {}, per_wallet {:?} → {:?}",
+                self.open_bets, actual_count, self.open_per_wallet, per_wallet
+            );
+        }
+        self.open_bets = actual_count;
+        self.open_per_wallet = per_wallet;
+        self.open_per_sport = per_sport;
+    }
 }

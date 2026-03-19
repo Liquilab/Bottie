@@ -75,7 +75,10 @@ impl CopyTrader {
         let wallet_overrides = config.autoresearch_params.wallet_weights_override.clone();
         let sport_multipliers = config.autoresearch_params.sport_multipliers.clone();
 
-        let watchlist: Vec<(String, String, f64)> = config
+        let global_min_price = config.sizing.min_price;
+        let global_max_price = config.sizing.max_price;
+
+        let watchlist: Vec<(String, String, f64, Vec<String>, f64, f64)> = config
             .copy_trading
             .watchlist
             .iter()
@@ -83,7 +86,10 @@ impl CopyTrader {
                 let addr = e.address.to_lowercase();
                 let base_weight = e.weight;
                 let weight = wallet_overrides.get(&addr).copied().unwrap_or(base_weight);
-                (addr, e.name.clone(), weight)
+                let market_types = e.market_types.clone();
+                let min_price = e.min_price.unwrap_or(global_min_price);
+                let max_price = e.max_price.unwrap_or(global_max_price);
+                (addr, e.name.clone(), weight, market_types, min_price, max_price)
             })
             .collect();
         drop(config);
@@ -103,8 +109,8 @@ impl CopyTrader {
 
         let active_wallets: Vec<_> = watchlist
             .iter()
-            .filter(|(_, _, w)| *w > 0.0)
-            .filter(|(addr, _, _)| {
+            .filter(|(_, _, w, _, _, _)| *w > 0.0)
+            .filter(|(addr, _, _, _, _, _)| {
                 Self::should_poll_wallet(
                     addr,
                     self.poll_count,
@@ -119,27 +125,30 @@ impl CopyTrader {
 
         // Phase 1: Fetch wallet positions in parallel (configurable batch size)
         let fetch_start = Instant::now();
-        let mut fetched: Vec<(String, String, f64, Vec<WalletPosition>)> = Vec::new();
+        let mut fetched: Vec<(String, String, f64, Vec<String>, f64, f64, Vec<WalletPosition>)> = Vec::new();
 
         for chunk in active_wallets.chunks(batch_size) {
             let futures: Vec<_> = chunk
                 .iter()
-                .map(|(addr, name, weight)| {
+                .map(|(addr, name, weight, market_types, min_price, max_price)| {
                     let client = self.client.clone();
                     let addr = addr.clone();
                     let name = name.clone();
                     let weight = *weight;
+                    let market_types = market_types.clone();
+                    let min_price = *min_price;
+                    let max_price = *max_price;
                     async move {
                         let result = client.get_wallet_positions(&addr, 100).await;
-                        (addr, name, weight, result)
+                        (addr, name, weight, market_types, min_price, max_price, result)
                     }
                 })
                 .collect();
 
             let results = join_all(futures).await;
-            for (addr, name, weight, result) in results {
+            for (addr, name, weight, market_types, min_price, max_price, result) in results {
                 match result {
-                    Ok(positions) => fetched.push((addr, name, weight, positions)),
+                    Ok(positions) => fetched.push((addr, name, weight, market_types, min_price, max_price, positions)),
                     Err(e) => warn!("positions fetch failed for {name}: {e}"),
                 }
             }
@@ -148,7 +157,7 @@ impl CopyTrader {
         }
 
         let fetch_ms = fetch_start.elapsed().as_millis();
-        let total_wallets = watchlist.iter().filter(|(_, _, w)| *w > 0.0).count();
+        let total_wallets = watchlist.iter().filter(|(_, _, w, _, _, _)| *w > 0.0).count();
         if fetched.len() > 1 {
             info!(
                 "POLL FETCH: {}/{} wallets in {}ms (batches of {})",
@@ -157,16 +166,34 @@ impl CopyTrader {
         }
 
         // Phase 2: Process results sequentially (diff, consensus, signals)
-        for (address, name, weight, positions) in &fetched {
+        for (address, name, weight, wallet_market_types, wallet_min_price, wallet_max_price, positions) in &fetched {
             let weight = *weight;
             // Build current snapshot: position_key → size
+            // Only include open (unresolved) positions: 0.01 < curPrice < 0.99
             let mut current_snapshot: HashMap<String, f64> = HashMap::new();
             for pos in positions {
                 let key = pos.position_key();
                 if key == ":" {
                     continue; // skip invalid positions
                 }
+                let cur = pos.cur_price_f64();
+                if cur <= 0.01 || cur >= 0.99 {
+                    continue; // already resolved — exclude from snapshot
+                }
                 current_snapshot.insert(key, pos.size_f64());
+            }
+
+            // Hauptbet filter: per conditionId, find the largest USDC position.
+            // Only consider open positions (curPrice 0.01–0.99).
+            let mut max_usdc_per_condition: HashMap<String, f64> = HashMap::new();
+            for pos in positions {
+                let cid = pos.condition_id.clone().unwrap_or_default();
+                if cid.is_empty() { continue; }
+                let cur = pos.cur_price_f64();
+                if cur <= 0.01 || cur >= 0.99 { continue; } // resolved
+                let usdc = pos.initial_value_f64();
+                let entry = max_usdc_per_condition.entry(cid).or_insert(0.0);
+                if usdc > *entry { *entry = usdc; }
             }
 
             // Compare with previous snapshot to find NEW positions
@@ -180,6 +207,12 @@ impl CopyTrader {
 
                 let cur_size = pos.size_f64();
                 if cur_size <= 0.0 {
+                    continue;
+                }
+
+                // Skip already-resolved markets (curPrice at 0 or 1)
+                let cur_price = pos.cur_price_f64();
+                if cur_price <= 0.01 || cur_price >= 0.99 {
                     continue;
                 }
 
@@ -208,6 +241,16 @@ impl CopyTrader {
                 let condition_id = pos.condition_id.clone().unwrap_or_default();
                 let outcome = pos.outcome.clone().unwrap_or_default();
 
+                // Hauptbet filter: skip if this is a hedge (not the largest position
+                // for this conditionId). Allows tied positions (e.g. two equal bets).
+                if !condition_id.is_empty() {
+                    let usdc = pos.initial_value_f64();
+                    let max_for_cond = max_usdc_per_condition.get(&condition_id).copied().unwrap_or(0.0);
+                    if usdc < max_for_cond {
+                        continue; // hedge / smaller bet — skip
+                    }
+                }
+
                 // Delay = time since we first detected this position change.
                 // Since we poll every ~15s with parallel batches (~1.7s), the max detection
                 // delay is one poll cycle. For positions that were already there in the
@@ -220,12 +263,10 @@ impl CopyTrader {
                 let signal_delay_ms: u64 = 15_000; // one poll cycle as conservative estimate
 
                 // Only trade if price hasn't moved much since entry — edge still exists
-                let cur_price = pos.cur_price_f64();
-                if cur_price > 0.0 && cur_price < 1.0 {
-                    let drift = (cur_price - price).abs() / price;
-                    if drift > 0.15 {
-                        continue; // price moved >15% since entry, edge is gone
-                    }
+                // (cur_price already validated as 0.01–0.99 above)
+                let drift = (cur_price - price).abs() / price;
+                if drift > 0.15 {
+                    continue; // price moved >15% since entry, edge is gone
                 }
                 let usdc_size = pos.initial_value_f64();
                 let asset = pos.asset.clone().unwrap_or_default();
@@ -233,6 +274,19 @@ impl CopyTrader {
                     condition_id[..12.min(condition_id.len())].to_string()
                 });
                 let sport = Self::detect_sport(&title, pos.slug.as_deref().unwrap_or(""));
+
+                // Per-wallet market type filter
+                if !wallet_market_types.is_empty() {
+                    let detected = Self::detect_market_type(&title);
+                    if !wallet_market_types.iter().any(|mt| mt == &detected) {
+                        continue;
+                    }
+                }
+
+                // Per-wallet price filter
+                if price < *wallet_min_price || price > *wallet_max_price {
+                    continue;
+                }
 
                 // Use eventSlug (event-level) for consensus grouping.
                 // This means Celtics moneyline + Celtics O/U + Celtics spread
@@ -485,6 +539,29 @@ impl CopyTrader {
                 }
             }
             None => true,
+        }
+    }
+
+    /// Detect market type from title.
+    /// - "win" = title contains "win on" or "win the"
+    /// - "ou" = title contains "O/U"
+    /// - "spread" = title contains "Spread"
+    /// - "draw" = title contains "draw"
+    /// - "ml" = title contains "vs." and none of the above
+    pub fn detect_market_type(title: &str) -> String {
+        let t = title.to_lowercase();
+        if t.contains("win on") || t.contains("win the") {
+            "win".to_string()
+        } else if t.contains("o/u") {
+            "ou".to_string()
+        } else if t.contains("spread") {
+            "spread".to_string()
+        } else if t.contains("draw") {
+            "draw".to_string()
+        } else if t.contains("vs.") {
+            "ml".to_string()
+        } else {
+            "other".to_string()
         }
     }
 

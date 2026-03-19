@@ -313,13 +313,15 @@ async fn copy_trading_loop(
                     r.update_bankroll(balance);
                 }
             }
-            // Recount actual open bets from trade log (fixes drift from manual UI sells)
-            let actual_open = logger.load_all().iter()
+            // Full sync from trade log: fixes drift in global + per-wallet + per-sport counters
+            let open_context: Vec<(Option<String>, String)> = logger.load_all()
+                .into_iter()
                 .filter(|t| t.filled && t.result.is_none() && !t.dry_run)
-                .count() as u32;
+                .map(|t| (t.copy_wallet, t.sport))
+                .collect();
             {
                 let mut r = risk.write().await;
-                r.sync_open_bets(actual_open);
+                r.sync_full(&open_context);
             }
         }
 

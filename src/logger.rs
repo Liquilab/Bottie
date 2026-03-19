@@ -35,9 +35,19 @@ pub struct TradeLog {
     pub filled: bool,
     pub dry_run: bool,
 
-    pub result: Option<String>, // "win" | "loss" | "refund"
+    pub result: Option<String>, // "win" | "loss" | "refund" | "take_profit" | "sold" | "phantom"
     pub pnl: Option<f64>,
     pub resolved_at: Option<DateTime<Utc>>,
+
+    /// Price at which position was exited (TP sell or estimated at phantom-sync time for manual sells)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sell_price: Option<f64>,
+    /// Actual PnL = sell_price × shares - buy_price × shares (populated for all non-resolution exits)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_pnl: Option<f64>,
+    /// How position was closed: "resolution" | "take_profit" | "manual" | "phantom"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_type: Option<String>,
 
     /// Strategy version tag from autoresearch deployment (Fix #7)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -53,6 +63,9 @@ pub struct TradeLogger {
     /// Prevents conflicting moneyline/draw bets on same event.
     /// Spread and O/U don't conflict with moneyline.
     open_event_types: Mutex<HashMap<String, String>>,
+    /// event_dedup_key → copy_wallet for open positions.
+    /// Used to detect contradictions: different wallets betting on the same event.
+    open_event_wallets: Mutex<HashMap<String, String>>,
 }
 
 impl TradeLogger {
@@ -68,20 +81,21 @@ impl TradeLogger {
             .expect("failed to open trade log file");
 
         // Bootstrap caches from existing data
-        let (open_positions, open_event_types) = Self::load_open_caches_from_file(&path);
+        let (open_positions, open_event_types, open_event_wallets) = Self::load_open_caches_from_file(&path);
 
         Self {
             path,
             file: Mutex::new(file),
             open_positions: Mutex::new(open_positions),
             open_event_types: Mutex::new(open_event_types),
+            open_event_wallets: Mutex::new(open_event_wallets),
         }
     }
 
-    fn load_open_caches_from_file(path: &PathBuf) -> (HashSet<String>, HashMap<String, String>) {
+    fn load_open_caches_from_file(path: &PathBuf) -> (HashSet<String>, HashMap<String, String>, HashMap<String, String>) {
         let contents = match std::fs::read_to_string(path) {
             Ok(c) => c,
-            Err(_) => return (HashSet::new(), HashMap::new()),
+            Err(_) => return (HashSet::new(), HashMap::new(), HashMap::new()),
         };
         let open: Vec<TradeLog> = contents
             .lines()
@@ -92,6 +106,7 @@ impl TradeLogger {
             .map(|t| format!("{}:{}", t.condition_id, t.outcome.to_lowercase()))
             .collect();
         let mut event_types = HashMap::new();
+        let mut event_wallets = HashMap::new();
         for t in &open {
             let dedup_key = Self::event_dedup_key(
                 t.event_slug.as_deref().unwrap_or(""),
@@ -99,10 +114,13 @@ impl TradeLogger {
             );
             if !dedup_key.is_empty() {
                 let mtype = Self::market_type(&t.market_title);
-                event_types.insert(dedup_key, mtype);
+                event_types.insert(dedup_key.clone(), mtype);
+                if let Some(wallet) = &t.copy_wallet {
+                    event_wallets.insert(dedup_key, wallet.clone());
+                }
             }
         }
-        (positions, event_types)
+        (positions, event_types, event_wallets)
     }
 
     /// Classify market type from title.
@@ -135,7 +153,10 @@ impl TradeLogger {
             );
             if !dedup_key.is_empty() {
                 let mtype = Self::market_type(&trade.market_title);
-                self.open_event_types.lock().unwrap().insert(dedup_key, mtype);
+                self.open_event_types.lock().unwrap().insert(dedup_key.clone(), mtype);
+                if let Some(wallet) = &trade.copy_wallet {
+                    self.open_event_wallets.lock().unwrap().insert(dedup_key, wallet.clone());
+                }
             }
         }
 
@@ -207,6 +228,23 @@ impl TradeLogger {
         }
     }
 
+    /// Check if there is an open position on this event from a DIFFERENT wallet.
+    /// Prevents contradictions: e.g. Cannae bets "win" while sovereign bets "O/U" on the same event.
+    /// Returns Some(existing_wallet) if contradiction detected, None if clear.
+    pub fn has_conflicting_wallet_on_event(&self, event_slug: &str, market_title: &str, new_wallet: &str) -> Option<String> {
+        let dedup_key = Self::event_dedup_key(event_slug, market_title);
+        if dedup_key.is_empty() {
+            return None;
+        }
+        let event_wallets = self.open_event_wallets.lock().unwrap();
+        if let Some(existing_wallet) = event_wallets.get(&dedup_key) {
+            if existing_wallet != new_wallet {
+                return Some(existing_wallet.clone());
+            }
+        }
+        None
+    }
+
     /// Check if there is ANY open position on this event.
     /// With consensus strategy: 1 trade per event, regardless of market type.
     /// Uses event_dedup_key to also match trades that had empty event_slug.
@@ -232,6 +270,7 @@ impl TradeLogger {
             .map(|t| Self::position_key(&t.condition_id, &t.outcome))
             .collect();
         let mut new_event_types = HashMap::new();
+        let mut new_event_wallets = HashMap::new();
         for t in &open {
             let dedup_key = Self::event_dedup_key(
                 t.event_slug.as_deref().unwrap_or(""),
@@ -239,11 +278,15 @@ impl TradeLogger {
             );
             if !dedup_key.is_empty() {
                 let mtype = Self::market_type(&t.market_title);
-                new_event_types.insert(dedup_key, mtype);
+                new_event_types.insert(dedup_key.clone(), mtype);
+                if let Some(wallet) = &t.copy_wallet {
+                    new_event_wallets.insert(dedup_key, wallet.clone());
+                }
             }
         }
         *self.open_positions.lock().unwrap() = new_positions;
         *self.open_event_types.lock().unwrap() = new_event_types;
+        *self.open_event_wallets.lock().unwrap() = new_event_wallets;
 
         let mut file = self.file.lock().unwrap();
         if let Err(e) = file.set_len(0) {

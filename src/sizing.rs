@@ -58,23 +58,27 @@ pub fn kelly_size(
     shares
 }
 
-/// Size specifically for copy trades — Fixed-to-Win sizing.
+/// Size specifically for copy trades — Tiered bet sizing based on price.
 ///
-/// Instead of risking a flat dollar amount regardless of odds, we size so the
-/// potential PAYOUT is constant. This equalizes win/loss ratio to ~1:1, dropping
-/// break-even WR from ~61% to ~50%.
+/// Bet = portfolio_pct × portfolio_reference_usdc
 ///
-/// Example with $1.00 target win:
-///   90ct favorite: risk $0.11, win $0.11 (instead of flat $3.50 risk, $0.39 win)
-///   50ct:          risk $1.00, win $1.00
-///   30ct:          risk $0.43, win $1.00
+/// Price tiers:
+///   0.30–0.45 → 1% of portfolio  (uncertain, small bet)
+///   0.45–0.58 → 2% of portfolio
+///   0.58–0.83 → 3% of portfolio
+///   0.83–0.95 → 4% of portfolio  (high confidence, bigger bet)
+///
+/// portfolio_reference_usdc = configured total portfolio value (cash + positions).
+/// Falls back to live bankroll if 0.
 pub fn copy_trade_size(
     bankroll: f64,
     signal: &AggregatedSignal,
     config: &SizingConfig,
 ) -> f64 {
-    // Skip invalid prices
-    if signal.price < config.min_price || signal.price >= 1.0 || signal.price <= 0.0 {
+    let price = signal.price;
+
+    // Skip out-of-range prices (min_price/max_price set the tradeable window)
+    if price < config.min_price || price > config.max_price || price <= 0.0 || price >= 1.0 {
         return 0.0;
     }
 
@@ -82,30 +86,38 @@ pub fn copy_trade_size(
         return 0.0;
     }
 
-    // Fixed-to-Win: target a constant win amount, then size the risk accordingly.
-    // target_win = bankroll * copy_base_size_pct / 100
-    // size_usdc = target_win / (1 - price)  [because win payout = shares * (1-price)]
-    // size_usdc = target_win * price / (1-price) ... wait, let me think:
-    //   shares = size_usdc / price
-    //   win_payout = shares * (1 - price) = size_usdc * (1 - price) / price
-    //   So: size_usdc = target_win * price / (1 - price)
-    let target_win = bankroll * config.copy_base_size_pct / 100.0;
-    let size_usdc = target_win * signal.price / (1.0 - signal.price);
+    // Reference portfolio for percentage calculation
+    let portfolio = if config.portfolio_reference_usdc > 0.0 {
+        config.portfolio_reference_usdc
+    } else {
+        bankroll
+    };
 
-    // Cap at max bet percentage of bankroll
-    let max_bet = bankroll * config.max_bet_pct / 100.0;
-    let mut final_usdc = size_usdc.min(max_bet).min(bankroll);
+    // Tiered bet percentage based on price confidence
+    let pct = if price < 0.45 {
+        0.01 // 1%
+    } else if price < 0.58 {
+        0.02 // 2%
+    } else if price < 0.83 {
+        0.03 // 3%
+    } else {
+        0.04 // 4%
+    };
 
-    // Guarantee minimum bet of $2.50 if bankroll allows it
-    if final_usdc < 2.50 && bankroll >= 2.50 {
-        final_usdc = 2.50;
+    let mut size_usdc = portfolio * pct;
+
+    // Never bet more than available cash
+    size_usdc = size_usdc.min(bankroll);
+
+    // Enforce PM minimum: 5 shares
+    let min_cost = 5.0 * price;
+    if size_usdc < min_cost && bankroll >= min_cost {
+        size_usdc = min_cost;
     }
 
-    // Enforce Polymarket minimum
-    let shares = final_usdc / signal.price;
-    if final_usdc < MIN_ORDER_VALUE {
+    if size_usdc < MIN_ORDER_VALUE {
         return 0.0;
     }
 
-    shares
+    size_usdc / price
 }

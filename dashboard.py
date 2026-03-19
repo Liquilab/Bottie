@@ -15,7 +15,7 @@ CONFIG_FILE    = BASE_DIR / "config.yaml"
 PM_CACHE_FILE  = BASE_DIR / "data" / "pm_cache.json"
 CONSENSUS_BULK = BASE_DIR / "data" / "consensus_bulk.json"
 CONSENSUS_RESULTS = BASE_DIR / "data" / "consensus_results.json"
-INITIAL_BANKROLL = 377.0  # total deposited
+INITIAL_BANKROLL = 300.0  # total deposited (updated 2026-03-17)
 
 # Polymarket Data API — source of truth
 PM_DATA_API = "https://data-api.polymarket.com"
@@ -216,7 +216,14 @@ def parse_config_wallets():
             name = w.get("name", addr[:10])
             weight = w.get("weight", 0.5)
             tier = "T1" if weight >= 0.85 else "T2" if weight >= 0.65 else "T3"
-            wallets[addr] = {"name": name, "weight": weight, "tier": tier}
+            market_types = w.get("market_types", [])
+            min_price = w.get("min_price", 0)
+            max_price = w.get("max_price", 1)
+            wallets[addr] = {
+                "name": name, "weight": weight, "tier": tier,
+                "market_types": market_types,
+                "min_price": min_price, "max_price": max_price,
+            }
         return wallets
     except Exception:
         return {}
@@ -306,7 +313,8 @@ def compute_wallet_stats(trades, wallet_map):
         by_wallet[addr].append(t)
 
     stats = []
-    all_addrs = set(wallet_map.keys()) | set(by_wallet.keys())
+    # Only show currently configured wallets + manual — hide removed/old wallets
+    all_addrs = set(wallet_map.keys()) | {"_manual"}
     for addr in all_addrs:
         group = by_wallet.get(addr, [])
         resolved = [t for t in group if t.get("result") in ("win", "loss", "take_profit", "sold")]
@@ -422,19 +430,32 @@ def compute_source_stats(trades):
 
     return {"copy": stats(copy_t), "arb": stats(arb_t)}
 
-def compute_daily_pnl(trades):
+def compute_4h_pnl(trades):
+    """Group resolved trades by 4-hour UTC buckets — last 5 days (30 buckets)."""
     filled = [t for t in trades if t.get("filled") and not t.get("dry_run") and t.get("result") in ("win", "loss", "take_profit", "sold")]
-    by_day = {}
+    by_bucket = {}
     for t in filled:
-        day = (t.get("resolved_at") or t.get("timestamp") or "")[:10]
-        if day:
-            by_day[day] = by_day.get(day, 0) + (t.get("pnl") or 0)
-    # Last 14 days
-    today = datetime.now(timezone.utc).date()
+        ts_str = t.get("resolved_at") or t.get("timestamp") or ""
+        if not ts_str:
+            continue
+        try:
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            bucket_hour = (ts.hour // 4) * 4
+            bucket = ts.replace(hour=bucket_hour, minute=0, second=0, microsecond=0)
+            key = bucket.strftime("%Y-%m-%dT%H:%M")
+            by_bucket[key] = by_bucket.get(key, 0) + (t.get("pnl") or 0)
+        except Exception:
+            pass
+    # Last 5 days = 30 buckets of 4h
+    now = datetime.now(timezone.utc)
+    bucket_hour = (now.hour // 4) * 4
+    current = now.replace(hour=bucket_hour, minute=0, second=0, microsecond=0)
     result = []
-    for i in range(13, -1, -1):
-        d = str(today - timedelta(days=i))
-        result.append({"date": d, "pnl": by_day.get(d, 0)})
+    for i in range(29, -1, -1):
+        b = current - timedelta(hours=i * 4)
+        key = b.strftime("%Y-%m-%dT%H:%M")
+        label = b.strftime("%d/%H")  # "19/08" = day 19, hour 08
+        result.append({"label": label, "key": key, "pnl": by_bucket.get(key, 0)})
     return result
 
 
@@ -480,14 +501,11 @@ def render_why(trade, wallet_map):
         addr = (trade.get("copy_wallet") or "").lower()
         info = wallet_map.get(addr, {})
         name = info.get("name", addr[:8] + "…" if addr else "?")
-        tier = info.get("tier", "?")
-        consensus = trade.get("consensus_count") or 1
         delay_s = (trade.get("signal_delay_ms") or 0) / 1000
-        tier_color = {"T1": "#388bfd", "T2": "#3fb950", "T3": "#8b949e"}.get(tier, "#8b949e")
-        html = f'<span class="badge" style="background:{tier_color};color:#fff">{tier}</span> '
-        html += f'<strong>{name}</strong>'
-        if consensus > 1:
-            html += f' <span class="badge" style="background:#d29922;color:#000">+{consensus-1} wallets</span>'
+        # Color by wallet name
+        wallet_colors = {"cannae": "#388bfd", "sovereign2013": "#3fb950"}
+        name_color = wallet_colors.get(name.lower(), "#8b949e")
+        html = f'<span class="badge" style="background:{name_color};color:#fff">{name}</span>'
         html += f' <span class="muted" style="font-size:0.75rem">{delay_s:.1f}s</span>'
         return html
     elif src.startswith("odds_arb:"):
@@ -677,12 +695,18 @@ def render_wallet_table(stats, wallet_map, compact=False):
             else:
                 form_dots += '<span style="color:#f85149">&#9679;</span>'
 
+        # Get per-wallet filter info
+        addr = w.get("addr", "")
+        winfo = wallet_map.get(addr, {})
+        mtypes = ", ".join(winfo.get("market_types", [])) or "all"
+        price_range = f'{winfo.get("min_price",0):.0%}-{winfo.get("max_price",1):.0%}' if winfo.get("min_price") else ""
+
         if compact:
             rows += f"""
         <tr{dim}>
           <td class="muted">{i}</td>
           <td><strong>{w['name']}</strong></td>
-          <td>{w['weight']:.2f}</td>
+          <td class="muted" style="font-size:0.75em">{mtypes}</td>
           <td>{record}</td>
           <td>{wr_html}</td>
           <td>{pnl_html}</td>
@@ -694,9 +718,9 @@ def render_wallet_table(stats, wallet_map, compact=False):
             rows += f"""
         <tr{dim}>
           <td class="muted">{i}</td>
-          <td><span class="badge" style="background:{'#388bfd' if w['tier']=='T1' else '#3fb950' if w['tier']=='T2' else '#8b949e'};color:{'#fff' if w['tier']!='T2' else '#000'}">{w['tier']}</span></td>
           <td><strong>{w['name']}</strong></td>
-          <td>{w['weight']:.2f}</td>
+          <td class="muted" style="font-size:0.8em">{mtypes}</td>
+          <td>{price_range}</td>
           <td>{w['trades']}</td>
           <td>{record}</td>
           <td>{wr_html}</td>
@@ -714,7 +738,7 @@ def render_wallet_table(stats, wallet_map, compact=False):
     <div class="table-wrap">
     <table>
       <thead><tr>
-        <th>#</th><th>Wallet</th><th>Wt</th><th>Record</th>
+        <th>#</th><th>Wallet</th><th>Markets</th><th>Record</th>
         <th>Win%</th><th>P&L</th><th>Totaal</th>
       </tr></thead>
       <tbody>{rows}</tbody>
@@ -725,7 +749,7 @@ def render_wallet_table(stats, wallet_map, compact=False):
     <div class="table-wrap">
     <table>
       <thead><tr>
-        <th>#</th><th>Tier</th><th>Wallet</th><th>Wt</th>
+        <th>#</th><th>Wallet</th><th>Markets</th><th>Entry Range</th>
         <th>Signals</th><th>Record</th><th>Win%</th><th>Avg Size</th>
         <th>P&L</th><th>ROI</th><th>Vorm</th>
         <th>Open</th><th>Unreal.</th><th>Totaal</th>
@@ -780,16 +804,17 @@ def render_source_comparison(src_stats):
       {box("Odds Arb", src_stats["arb"], "#f0883e")}
     </div>"""
 
-def render_pnl_chart(daily):
-    max_abs = max((abs(d["pnl"]) for d in daily), default=1) or 1
+def render_pnl_chart(buckets):
+    max_abs = max((abs(d["pnl"]) for d in buckets), default=1) or 1
     bars = ""
-    for d in daily:
+    for d in buckets:
         pnl = d["pnl"]
         h = max(2, abs(pnl) / max_abs * 60)
-        color = "#3fb950" if pnl >= 0 else "#f85149"
-        label = d["date"][5:]  # MM-DD
+        color = "#3fb950" if pnl >= 0 else ("#f85149" if pnl < 0 else "#30363d")
+        label = d.get("label", d.get("key", "")[-5:])
+        tooltip = f'{d.get("key","")}: {"+"if pnl>=0 else ""}${pnl:.2f}'
         bars += f"""
-        <div class="chart-bar-wrap" title="{d['date']}: {'+'if pnl>=0 else ''}${pnl:.2f}">
+        <div class="chart-bar-wrap" title="{tooltip}">
           <div class="chart-bar" style="height:{h:.0f}px;background:{color}"></div>
           <div class="chart-label">{label}</div>
         </div>"""
@@ -1219,8 +1244,7 @@ def page_wrap(active_page, body_html):
         ("Overview", "/"),
         ("Trades", "/trades"),
         ("Wallets", "/wallets"),
-        ("Consensus", "/consensus"),
-        ("Research", "/research"),
+        ("Strategy", "/strategy"),
     ]
     nav = ""
     for label, href in pages:
@@ -1255,17 +1279,56 @@ if (el) setInterval(() => {{ el.textContent = --t; if(t<=0) location.reload(); }
 </html>"""
 
 
+def render_strategy_summary(wallet_map):
+    """Show current strategy info: wallets, filters, sizing."""
+    cards = ""
+    wallet_colors = {"cannae": "#388bfd", "sovereign2013": "#3fb950"}
+    for addr, info in wallet_map.items():
+        name = info.get("name", addr[:10])
+        mtypes = ", ".join(info.get("market_types", [])) or "all"
+        min_p = info.get("min_price", 0)
+        max_p = info.get("max_price", 1)
+        color = wallet_colors.get(name.lower(), "#8b949e")
+        cards += f"""
+        <div class="source-box" style="border-top:3px solid {color}">
+          <div class="source-title">{name}</div>
+          <div class="stat-row"><span>Markets</span><span>{mtypes}</span></div>
+          <div class="stat-row"><span>Entry range</span><span>{min_p:.0%} - {max_p:.0%}</span></div>
+          <div class="stat-row"><span>Adres</span><span class="muted" style="font-size:0.75em">{addr[:10]}...{addr[-6:]}</span></div>
+        </div>"""
+
+    sizing_info = """
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:12px">
+      <div style="font-weight:700;margin-bottom:8px">Sizing (tiered, gebaseerd op prijs)</div>
+      <div style="font-family:monospace;font-size:0.85rem;color:var(--purple)">
+        30-45ct → 1% portfolio ($3.50)<br>
+        45-58ct → 2% portfolio ($7.00)<br>
+        58-83ct → 3% portfolio ($10.50)<br>
+        83-95ct → 4% portfolio ($14.00)
+      </div>
+      <div class="muted" style="font-size:0.8rem;margin-top:4px">Hoofdbet only (largest per conditionId) | GTC | max 50 open bets</div>
+    </div>"""
+
+    return f"""
+    <div class="source-row">{cards}</div>
+    {sizing_info}"""
+
+
 def render_overview(trades, wallet_map):
     kpis = compute_kpis(trades)
     wallet_stats = compute_wallet_stats(trades, wallet_map)
     sport_stats = compute_sport_stats(trades)
-    daily_pnl = compute_daily_pnl(trades)
+    pnl_4h = compute_4h_pnl(trades)
 
     body = render_kpi_row(kpis, wallet_map, trades)
     body += f"""
     <div class="section">
-      <div class="section-title">Dagelijkse P&L (14d)</div>
-      {render_pnl_chart(daily_pnl)}
+      <div class="section-title">Strategie — Whale Copy Trading</div>
+      {render_strategy_summary(wallet_map)}
+    </div>
+    <div class="section">
+      <div class="section-title">P&L per 4 uur (5d)</div>
+      {render_pnl_chart(pnl_4h)}
     </div>
     <div class="section">
       <div class="section-title">Trade Log (laatste 30)</div>
@@ -1273,7 +1336,7 @@ def render_overview(trades, wallet_map):
     </div>
     <div class="two-col">
       <div class="section">
-        <div class="section-title">Wallet Leaderboard</div>
+        <div class="section-title">Wallet Performance</div>
         {render_wallet_table(wallet_stats, wallet_map, compact=True)}
       </div>
       <div class="section">
@@ -1349,13 +1412,17 @@ def render_wallet_detail(trades, wallet_map, stats):
             color = "#3fb950" if ch == "W" else "#f85149"
             form_html += f'<span style="color:{color};font-size:1.1em">&#9679;</span>'
 
+        # Get per-wallet filter info for detail card
+        winfo = wallet_map.get(addr, {})
+        mtypes_str = ", ".join(winfo.get("market_types", [])) or "all"
+        price_range_str = f'{winfo.get("min_price",0):.0%}-{winfo.get("max_price",1):.0%}' if winfo.get("min_price") else ""
+
         cards += f"""
         <div class="wallet-detail-card">
           <div class="wallet-detail-header">
             <div>
-              <span class="badge" style="background:{'#388bfd' if w['tier']=='T1' else '#3fb950' if w['tier']=='T2' else '#8b949e'};color:{'#fff' if w['tier']!='T2' else '#000'}">{w['tier']}</span>
-              <strong style="font-size:1.05em;margin-left:6px">{w['name']}</strong>
-              <span class="muted" style="margin-left:8px">wt {w['weight']:.2f}</span>
+              <strong style="font-size:1.05em">{w['name']}</strong>
+              <span class="muted" style="margin-left:8px;font-size:0.8em">{mtypes_str} | {price_range_str}</span>
             </div>
             <div style="display:flex;gap:16px;align-items:center">
               <span>{form_html}</span>
@@ -1378,19 +1445,14 @@ def render_wallet_detail(trades, wallet_map, stats):
 
 def render_wallets_page(trades, wallet_map):
     wallet_stats = compute_wallet_stats(trades, wallet_map)
-    scout = load_scout_report()
     body = f"""
     <div class="section">
-      <div class="section-title">Wallet Ranking</div>
+      <div class="section-title">Wallet Performance</div>
       {render_wallet_table(wallet_stats, wallet_map)}
     </div>
     <div class="section">
       <div class="section-title">Per Wallet Detail</div>
       {render_wallet_detail(trades, wallet_map, wallet_stats)}
-    </div>
-    <div class="section">
-      <div class="section-title">Wallet Scout Rapport</div>
-      {render_scout_report(scout)}
     </div>"""
     return page_wrap("/wallets", body)
 
@@ -1792,52 +1854,44 @@ def render_consensus_portfolios(results):
     return f'<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px">{cards}</div>'
 
 
-def render_consensus_page(trades, wallet_map):
-    cfg = load_consensus_config()
-    split = compute_consensus_split(trades)
-    bulk = load_consensus_bulk()
-    results = load_consensus_results()
+def render_strategy_page(trades, wallet_map):
+    """Strategy overview page: wallet config, performance, sizing."""
+    wallet_stats = compute_wallet_stats(trades, wallet_map)
+    src_stats = compute_source_stats(trades)
+    sport_stats = compute_sport_stats(trades)
 
-    body = render_consensus_config_tiles(cfg)
-
-    body += f"""
+    body = f"""
     <div class="section">
-      <div class="section-title">Solo vs Consensus Performance</div>
-      {render_consensus_vs_solo(split)}
+      <div class="section-title">Whale Copy Trading — 2 Wallets</div>
+      {render_strategy_summary(wallet_map)}
     </div>
     <div class="section">
-      <div class="section-title">Consensus Trades</div>
-      {render_consensus_signals(trades, wallet_map)}
-    </div>"""
-
-    portfolios_html = render_consensus_portfolios(results)
-    if portfolios_html:
-        body += f"""
+      <div class="section-title">Wallet Performance</div>
+      {render_wallet_table(wallet_stats, wallet_map)}
+    </div>
     <div class="section">
-      <div class="section-title">Aanbevolen Portfolios</div>
-      {portfolios_html}
-    </div>"""
-
-    body += f"""
+      <div class="section-title">Per Wallet Detail</div>
+      {render_wallet_detail(trades, wallet_map, wallet_stats)}
+    </div>
     <div class="two-col">
       <div class="section">
-        <div class="section-title">Top Wallet Pairs</div>
-        {render_consensus_pairs(results)}
+        <div class="section-title">Signal Source</div>
+        {render_source_comparison(src_stats)}
       </div>
       <div class="section">
-        <div class="section-title">Discovery Pool</div>
-        {render_consensus_pool(bulk)}
+        <div class="section-title">Per Sport</div>
+        {render_sport_grid(sport_stats)}
       </div>
     </div>"""
 
-    return page_wrap("/consensus", body)
+    return page_wrap("/strategy", body)
 
 
 # ── HTTP Server ───────────────────────────────────────────────────────────────
 
 class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path in ("/", "/index.html", "/trades", "/wallets", "/consensus", "/research"):
+        if self.path in ("/", "/index.html", "/trades", "/wallets", "/strategy"):
             try:
                 trades     = load_trades()
                 wallet_map = parse_config_wallets()
@@ -1845,10 +1899,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     html = render_trades_page(trades, wallet_map)
                 elif self.path == "/wallets":
                     html = render_wallets_page(trades, wallet_map)
-                elif self.path == "/consensus":
-                    html = render_consensus_page(trades, wallet_map)
-                elif self.path == "/research":
-                    html = render_research_page()
+                elif self.path == "/strategy":
+                    html = render_strategy_page(trades, wallet_map)
                 else:
                     html = render_overview(trades, wallet_map)
                 body = html.encode("utf-8")

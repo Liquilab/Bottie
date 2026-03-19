@@ -123,6 +123,9 @@ pub async fn sync_own_trades(
             result: None,
             pnl: None,
             resolved_at: None,
+            sell_price: None,
+            actual_pnl: None,
+            exit_type: None,
             strategy_version: None,
         });
 
