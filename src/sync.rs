@@ -141,10 +141,22 @@ pub async fn sync_own_trades(
     Ok(imported)
 }
 
-/// Sync bankroll with on-chain USDC balance.
-/// Returns the live balance if successful.
+/// Sync bankroll with on-chain USDC balance + positions value.
+/// Returns the total portfolio value (cash + open positions).
 pub async fn sync_bankroll(client: &ClobClient) -> Result<f64> {
-    let balance = client.get_usdc_balance().await?;
-    info!("SYNC: on-chain USDC balance = ${:.2}", balance);
-    Ok(balance)
+    let cash = client.get_usdc_balance().await?;
+
+    // Get positions value from data-api /value endpoint
+    let funder = client.funder_address();
+    let positions_value = match client.get_positions_value(&funder).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("positions value sync failed, using cash only: {e}");
+            0.0
+        }
+    };
+
+    let total = cash + positions_value;
+    info!("SYNC: cash=${:.2} + positions=${:.2} = portfolio=${:.2}", cash, positions_value, total);
+    Ok(total)
 }

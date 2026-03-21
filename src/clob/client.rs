@@ -394,11 +394,73 @@ impl ClobClient {
     // --- Per-wallet Positions (reliable, snapshot-diff for copy trading) ---
 
     pub async fn get_wallet_positions(&self, address: &str, limit: u32) -> Result<Vec<WalletPosition>> {
-        let url = format!(
-            "{DATA_API}/positions?user={address}&limit={limit}&sortBy=CURRENT&sortOrder=desc"
-        );
-        let resp = self.http.get(&url).send().await?.error_for_status()?.json().await?;
-        Ok(resp)
+        // Paginate to get ALL positions above threshold (not just first page)
+        let mut all: Vec<WalletPosition> = Vec::new();
+        let mut offset: u32 = 0;
+        let page_size = limit.min(500);
+
+        loop {
+            let url = format!(
+                "{DATA_API}/positions?user={address}&limit={page_size}&sizeThreshold=0.01&sortBy=CURRENT&sortOrder=desc&offset={offset}"
+            );
+            let page: Vec<WalletPosition> = self.http.get(&url).send().await?.error_for_status()?.json().await?;
+            let count = page.len() as u32;
+            all.extend(page);
+
+            if count < page_size {
+                break; // last page
+            }
+            offset += page_size;
+
+            // Safety: max 20 pages (10,000 positions)
+            if offset >= 10_000 {
+                break;
+            }
+        }
+
+        Ok(all)
+    }
+
+    // --- Portfolio Value ---
+
+    /// Get total value of open positions from data-api /value endpoint.
+    /// Returns positions value in USDC (does NOT include cash).
+    pub async fn get_positions_value(&self, address: &str) -> Result<f64> {
+        let url = format!("{DATA_API}/value?user={address}");
+        let resp: serde_json::Value = self.http.get(&url).send().await?.error_for_status()?.json().await?;
+        // Response: [{"user": "0x...", "value": 123.45}]
+        let value = resp.as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|obj| obj.get("value"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        Ok(value)
+    }
+
+    // --- Order Status ---
+
+    /// Get order status from CLOB API.
+    /// Returns (status, size_matched) where status is one of:
+    /// ORDER_STATUS_LIVE, ORDER_STATUS_MATCHED, ORDER_STATUS_CANCELED,
+    /// ORDER_STATUS_INVALID, ORDER_STATUS_CANCELED_MARKET_RESOLVED
+    pub async fn get_order_status(&self, order_id: &str) -> Result<(String, f64)> {
+        let path = format!("/order/{order_id}");
+        let req = self.l2_request(
+            self.http.get(format!("{CLOB_API}{path}")),
+            "GET",
+            &path,
+            None,
+        )?;
+        let resp: serde_json::Value = req.send().await?.error_for_status()?.json().await?;
+        let status = resp.get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("UNKNOWN")
+            .to_string();
+        let size_matched = resp.get("size_matched")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        Ok((status, size_matched))
     }
 
     // --- Current best ask price ---

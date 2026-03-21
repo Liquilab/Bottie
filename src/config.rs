@@ -97,10 +97,40 @@ pub struct AppConfig {
     pub odds_arb: OddsArbConfig,
     pub sizing: SizingConfig,
     pub risk: RiskConfig,
+    #[serde(default)]
+    pub take_profit: TakeProfitConfig,
     pub autoresearch: AutoresearchConfig,
     #[serde(default)]
     pub autoresearch_params: AutoresearchParams,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TakeProfitConfig {
+    #[serde(default = "tp_default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "tp_default_min_delta")]
+    pub min_delta: f64,
+    #[serde(default = "tp_default_safety_threshold")]
+    pub safety_threshold: f64,
+    #[serde(default = "tp_default_cancel_timeout")]
+    pub cancel_timeout_secs: u64,
+}
+
+impl Default for TakeProfitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_delta: 0.05,
+            safety_threshold: 0.95,
+            cancel_timeout_secs: 60,
+        }
+    }
+}
+
+fn tp_default_enabled() -> bool { true }
+fn tp_default_min_delta() -> f64 { 0.05 }
+fn tp_default_safety_threshold() -> f64 { 0.95 }
+fn tp_default_cancel_timeout() -> u64 { 60 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CopyTradingConfig {
@@ -118,6 +148,14 @@ pub struct CopyTradingConfig {
     /// Batch size for parallel wallet fetches (higher = faster but more API pressure)
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
+    /// Wait for Cannae's GTC orders to fill before copying.
+    /// When enabled, positions must be stable (< threshold% change) for
+    /// window_minutes before the bot copies them.
+    #[serde(default = "default_stability_window")]
+    pub stability_window_minutes: u32,
+    /// Maximum % change in shares per leg to consider positions stable
+    #[serde(default = "default_stability_threshold")]
+    pub stability_threshold_pct: f64,
 }
 
 fn default_warm_poll_interval() -> u64 {
@@ -126,6 +164,14 @@ fn default_warm_poll_interval() -> u64 {
 
 fn default_batch_size() -> usize {
     8
+}
+
+fn default_stability_window() -> u32 {
+    30 // 30 minutes: wait for Cannae's GTC orders to fill
+}
+
+fn default_stability_threshold() -> f64 {
+    5.0 // 5% change threshold
 }
 
 fn default_max_resolution_days() -> u32 {
@@ -142,6 +188,13 @@ pub struct WatchlistEntry {
     /// Empty = all types allowed.
     #[serde(default)]
     pub market_types: Vec<String>,
+    /// Allowed league prefixes from event_slug (e.g. ["epl", "bun", "lal"]).
+    /// Empty = all leagues allowed.
+    #[serde(default)]
+    pub leagues: Vec<String>,
+    /// Max legs per event to copy. 0 = unlimited.
+    #[serde(default)]
+    pub max_legs_per_event: usize,
     /// Per-wallet min price override (falls back to global sizing.min_price)
     #[serde(default)]
     pub min_price: Option<f64>,

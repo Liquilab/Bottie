@@ -20,8 +20,8 @@ pub enum RiskDecision {
     Rejected(String),
 }
 
-// Per-wallet concentration limit — prevent blindly following one wallet
-const MAX_OPEN_PER_WALLET: u32 = 30;
+// Per-wallet concentration limit — with single-wallet strategy this equals max_open_bets
+const MAX_OPEN_PER_WALLET: u32 = 100;
 
 impl RiskManager {
     pub fn new(config: RiskConfig, bankroll: f64) -> Self {

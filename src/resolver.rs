@@ -28,14 +28,21 @@ pub async fn resolver_loop(
     logger: Arc<TradeLogger>,
     risk: Arc<RwLock<RiskManager>>,
     tracker: Arc<RwLock<WalletTracker>>,
+    config: crate::config::SharedConfig,
 ) {
     let mut check_state: HashMap<String, MarketCheckState> = HashMap::new();
+    // Track recent failed sell attempts to avoid retrying every cycle
+    let mut tp_cooldown: HashMap<String, DateTime<Utc>> = HashMap::new();
 
     loop {
         // Phantom sync FIRST — catch false fills before resolution resolves them as win/loss
         sync_phantoms(&client, &logger, &risk).await;
 
         check_resolutions(&client, &logger, &risk, &tracker, &mut check_state).await;
+
+        // Take-profit DISABLED — need data lake analysis first (RUS-234)
+        // let tp_config = config.read().await.take_profit.clone();
+        // take_profit_check(&client, &logger, &risk, &tp_config, &mut tp_cooldown).await;
 
         // Base tick: every 60 seconds. Individual markets are skipped if not due.
         tokio::time::sleep(Duration::from_secs(60)).await;
@@ -269,15 +276,96 @@ async fn check_resolutions(
     }
 }
 
-/// Take-profit: sell open positions where best bid > 95ct.
-/// At 95ct+ the risk/reward of holding is terrible: risk full investment for 5ct extra.
-const TAKE_PROFIT_THRESHOLD: f64 = 0.95;
+/// Determine take-profit threshold based on entry price and market type.
+///
+/// Bootstrapping rules (before decision table exists):
+/// - Entry < 0.30: sell at 90ct+ (longshot that hit, take the money)
+/// - Entry 0.30-0.50: sell at 85ct+ (medium confidence, good profit)
+/// - Entry 0.50-0.70: sell at 88ct+ (higher confidence, still good R:R)
+/// - Entry 0.70-0.83: sell at 93ct+ (high confidence, only sell near-certain)
+/// - Any entry: ALWAYS sell at safety_threshold (default 95ct+)
+///
+/// Additional rule: sell if delta > 0.30 AND current_price > 0.80
+/// (locked in 30ct+ profit and price is high enough)
+fn should_take_profit(entry_price: f64, best_bid: f64, market_type: &str, safety_threshold: f64, min_delta: f64) -> bool {
+    let delta = best_bid - entry_price;
+
+    // Safety net: always sell at safety threshold
+    if best_bid >= safety_threshold {
+        return true;
+    }
+
+    // Must have minimum positive delta
+    if delta < min_delta {
+        return false;
+    }
+
+    // Big profit + high price = take it
+    if delta > 0.30 && best_bid >= 0.80 {
+        return true;
+    }
+
+    // Tiered thresholds based on entry
+    let threshold = if entry_price < 0.30 {
+        0.90
+    } else if entry_price < 0.50 {
+        0.85
+    } else if entry_price < 0.70 {
+        0.88
+    } else {
+        0.93
+    };
+
+    // Draw markets: slightly tighter thresholds (draws are more volatile)
+    let threshold = if market_type == "draw" {
+        (threshold - 0.03_f64).max(0.80)
+    } else {
+        threshold
+    };
+
+    best_bid >= threshold
+}
+
+/// Log take-profit decision to separate JSONL file for self-improvement loop.
+fn log_tp_decision(
+    condition_id: &str, title: &str, market_type: &str,
+    entry_price: f64, best_bid: f64, delta: f64,
+    decision: &str, sell_price: Option<f64>, profit_usdc: Option<f64>, roi_pct: Option<f64>,
+) {
+    use std::io::Write;
+    let path = std::path::Path::new("/opt/bottie/data/take_profit_log.jsonl");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let entry = serde_json::json!({
+        "timestamp": Utc::now().to_rfc3339(),
+        "condition_id": condition_id,
+        "market_title": title,
+        "market_type": market_type,
+        "entry_price": entry_price,
+        "best_bid": best_bid,
+        "delta": delta,
+        "decision": decision,
+        "sell_price": sell_price,
+        "profit_usdc": profit_usdc,
+        "roi_pct": roi_pct,
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{}", entry);
+    }
+}
 
 async fn take_profit_check(
     client: &ClobClient,
     logger: &TradeLogger,
     risk: &Arc<RwLock<RiskManager>>,
+    config: &crate::config::TakeProfitConfig,
+    cooldown: &mut HashMap<String, DateTime<Utc>>,
 ) {
+    if !config.enabled {
+        return;
+    }
+
     let mut trades = logger.load_all();
 
     // Find open live positions
@@ -299,6 +387,21 @@ async fn take_profit_check(
         let entry_price = trades[idx].price;
         let shares = trades[idx].size_shares;
         let title = trades[idx].market_title.clone();
+        let condition_id = trades[idx].condition_id.clone();
+
+        // Skip if we recently failed a sell on this token (5 min cooldown)
+        if let Some(last_attempt) = cooldown.get(&token_id) {
+            if Utc::now().signed_duration_since(*last_attempt) < chrono::Duration::minutes(5) {
+                continue;
+            }
+        }
+
+        // Detect market type from title
+        let market_type = if title.to_lowercase().contains("draw") {
+            "draw"
+        } else {
+            "moneyline"
+        };
 
         // Check best bid
         let best_bid = match client.get_best_bid(&token_id).await {
@@ -306,39 +409,44 @@ async fn take_profit_check(
             Err(_) => continue,
         };
 
-        if best_bid < TAKE_PROFIT_THRESHOLD {
+        let delta = best_bid - entry_price;
+
+        if !should_take_profit(entry_price, best_bid, market_type, config.safety_threshold, config.min_delta) {
             continue;
         }
 
-        // Sell at best bid via FOK
+        // Place GTC sell at best_bid for maker rebate
+        let sell_price = best_bid;
+
         info!(
-            "TAKE PROFIT: {} | bid={:.0}ct (entry {:.0}ct) | selling {:.1} shares",
-            &title[..title.len().min(50)], best_bid * 100.0, entry_price * 100.0, shares
+            "TAKE PROFIT: {} | bid={:.0}ct (entry {:.0}ct, delta={:.0}ct) | selling {:.1} shares @ {:.1}ct",
+            &title[..title.len().min(50)], best_bid * 100.0, entry_price * 100.0,
+            delta * 100.0, shares, sell_price * 100.0
         );
 
-        // Get fee rate (don't assume 0 — fee markets would fail silently)
         let fee_bps = client.get_fee_rate_bps(&token_id).await.unwrap_or(0);
 
         match client.create_and_post_order(
             &token_id,
-            best_bid,
+            sell_price,
             shares,
             crate::clob::client::Side::Sell,
-            crate::clob::client::OrderType::FOK,
+            crate::clob::client::OrderType::GTC,
             fee_bps,
         ).await {
             Ok(resp) => {
                 if resp.is_filled() {
                     let actual_shares = { let fs = resp.filled_size(); if fs > 0.0 { fs } else { shares } };
-                    let sell_usdc = actual_shares * best_bid;
+                    let sell_usdc = actual_shares * sell_price;
                     let fee_cost = sell_usdc * (fee_bps as f64 / 10000.0);
                     let profit = sell_usdc - fee_cost - trades[idx].size_usdc;
+                    let roi = profit / trades[idx].size_usdc * 100.0;
                     let wallet = trades[idx].copy_wallet.clone().unwrap_or_default();
                     let sport = trades[idx].sport.clone();
                     trades[idx].result = Some("take_profit".to_string());
                     trades[idx].pnl = Some(profit);
                     trades[idx].actual_pnl = Some(profit);
-                    trades[idx].sell_price = Some(best_bid);
+                    trades[idx].sell_price = Some(sell_price);
                     trades[idx].exit_type = Some("take_profit".to_string());
                     trades[idx].resolved_at = Some(Utc::now());
                     sold_count += 1;
@@ -346,11 +454,23 @@ async fn take_profit_check(
                     sold_meta.push((wallet, sport, profit));
 
                     info!(
-                        "TAKE PROFIT FILLED: {} | profit=${:.2} | bid={:.0}ct",
-                        &title[..title.len().min(40)], profit, best_bid * 100.0
+                        "TAKE PROFIT FILLED: {} | profit=${:.2} ({:.0}%) | sell={:.0}ct",
+                        &title[..title.len().min(40)], profit, roi, sell_price * 100.0
+                    );
+
+                    log_tp_decision(
+                        &condition_id, &title, market_type,
+                        entry_price, best_bid, delta,
+                        "SELL", Some(sell_price), Some(profit), Some(roi),
                     );
                 } else {
                     warn!("TAKE PROFIT NOT FILLED: {} (bid may have moved)", &title[..title.len().min(40)]);
+                    cooldown.insert(token_id.clone(), Utc::now());
+                    log_tp_decision(
+                        &condition_id, &title, market_type,
+                        entry_price, best_bid, delta,
+                        "SELL_MISSED", None, None, None,
+                    );
                 }
             }
             Err(e) => {
@@ -376,88 +496,118 @@ async fn take_profit_check(
     }
 }
 
-/// Sync trade log with on-chain positions. Mark trades as "phantom" if
-/// we no longer hold them on Polymarket (manually sold or never filled).
+/// Sync trade log with CLOB order status. Uses the order status API
+/// instead of positions API timing heuristics.
+///
+/// ORDER_STATUS_LIVE → order still in book, wait
+/// ORDER_STATUS_MATCHED → truly filled, verify on PM positions
+/// ORDER_STATUS_CANCELED / INVALID / CANCELED_MARKET_RESOLVED → phantom
 async fn sync_phantoms(
     client: &ClobClient,
     logger: &TradeLogger,
     risk: &Arc<RwLock<RiskManager>>,
 ) {
-    let funder = client.funder_address();
-
-    let our_positions = match client.get_wallet_positions(&funder, 500).await {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-
-    let mut held = std::collections::HashSet::new();
-    for pos in &our_positions {
-        if pos.size_f64() > 0.01 {
-            held.insert(pos.position_key());
-        }
-    }
-
     let mut trades = logger.load_all();
     let mut phantom_count = 0u32;
-
     let mut sold_count = 0u32;
+    let mut live_count = 0u32;
 
     for trade in trades.iter_mut() {
         if trade.result.is_some() || !trade.filled || trade.dry_run {
             continue;
         }
-        let key = format!("{}:{}", trade.condition_id, trade.outcome);
-        if !held.contains(&key) {
-            let trade_age_mins = Utc::now()
-                .signed_duration_since(trade.timestamp)
-                .num_minutes();
 
-            // Skip trades younger than 10 min — PM positions API has propagation delay.
-            if trade_age_mins < 10 {
-                continue;
+        let trade_age_mins = Utc::now()
+            .signed_duration_since(trade.timestamp)
+            .num_minutes();
+
+        // Skip very fresh trades — give CLOB time to process
+        if trade_age_mins < 2 {
+            continue;
+        }
+
+        // Check order status via CLOB API
+        let order_id = match &trade.order_id {
+            Some(id) if !id.is_empty() => id.clone(),
+            _ => continue, // no order_id, can't check
+        };
+
+        let (status, _size_matched) = match client.get_order_status(&order_id).await {
+            Ok(s) => s,
+            Err(_) => continue, // API error, skip this cycle
+        };
+
+        match status.as_str() {
+            "ORDER_STATUS_LIVE" => {
+                // Order still in the book, waiting to fill. Not a phantom.
+                live_count += 1;
+
+                // But if it's been >6h and still live, cancel it — market has moved on
+                if trade_age_mins > 360 {
+                    info!("STALE ORDER: {} | {}min old, still LIVE — marking phantom",
+                        &trade.market_title[..trade.market_title.len().min(40)], trade_age_mins);
+                    trade.result = Some("phantom".to_string());
+                    trade.pnl = Some(0.0);
+                    trade.actual_pnl = Some(0.0);
+                    trade.exit_type = Some("phantom".to_string());
+                    trade.resolved_at = Some(Utc::now());
+                    phantom_count += 1;
+                    // TODO: cancel the order via CLOB API
+                }
             }
+            "ORDER_STATUS_MATCHED" => {
+                // Truly filled. But if not on PM positions after >2h, user manually sold.
+                if trade_age_mins > 120 {
+                    let funder = client.funder_address();
+                    let our_positions = client.get_wallet_positions(&funder, 500).await.unwrap_or_default();
+                    let key = format!("{}:{}", trade.condition_id, trade.outcome);
+                    let held = our_positions.iter().any(|p| p.position_key() == key && p.size_f64() > 0.01);
 
-            if trade_age_mins > 120 {
-                // >2h old, not on PM → manually sold or resolved elsewhere.
-                // First check if market has officially resolved — if so use resolution PnL.
-                // This handles the case where user sold at 100ct just before/after resolution.
-                let winner = client.get_market_info(&trade.condition_id).await
-                    .ok()
-                    .flatten()
-                    .and_then(|m| m.winning_outcome());
+                    if !held {
+                        // Matched but not on PM → resolved or manually sold
+                        let winner = client.get_market_info(&trade.condition_id).await
+                            .ok()
+                            .flatten()
+                            .and_then(|m| m.winning_outcome());
 
-                let (result, pnl, sell_price, exit_type) = if let Some(w) = winner {
-                    let won = trade.outcome.to_lowercase() == w.to_lowercase();
-                    if won {
-                        let p = trade.size_shares * (1.0 - trade.price);
-                        ("win".to_string(), p, 1.0f64, "resolution".to_string())
-                    } else {
-                        ("loss".to_string(), -trade.size_usdc, 0.0f64, "resolution".to_string())
-                    }
-                } else {
-                    // Market not resolved — try current bid as best estimate
-                    let (p, sp) = if !trade.token_id.is_empty() {
-                        match client.get_best_bid(&trade.token_id).await {
-                            Ok(bid) if bid > 0.0 => {
-                                (bid * trade.size_shares - trade.size_usdc, bid)
+                        let (result, pnl, sell_price, exit_type) = if let Some(w) = winner {
+                            let won = trade.outcome.to_lowercase() == w.to_lowercase();
+                            if won {
+                                let p = trade.size_shares * (1.0 - trade.price);
+                                ("win".to_string(), p, 1.0f64, "resolution".to_string())
+                            } else {
+                                ("loss".to_string(), -trade.size_usdc, 0.0f64, "resolution".to_string())
                             }
-                            _ => (0.0, 0.0),
-                        }
-                    } else {
-                        (0.0, 0.0)
-                    };
-                    ("sold".to_string(), p, sp, "manual".to_string())
-                };
+                        } else {
+                            let (p, sp) = if !trade.token_id.is_empty() {
+                                match client.get_best_bid(&trade.token_id).await {
+                                    Ok(bid) if bid > 0.0 => {
+                                        (bid * trade.size_shares - trade.size_usdc, bid)
+                                    }
+                                    _ => (0.0, 0.0),
+                                }
+                            } else {
+                                (0.0, 0.0)
+                            };
+                            ("sold".to_string(), p, sp, "manual".to_string())
+                        };
 
-                trade.sell_price = Some(sell_price);
-                trade.result = Some(result);
-                trade.pnl = Some(pnl);
-                trade.actual_pnl = Some(pnl);
-                trade.exit_type = Some(exit_type);
-                trade.resolved_at = Some(Utc::now());
-                sold_count += 1;
-            } else {
-                // 10min-2h old, not on PM → likely phantom (never actually filled)
+                        trade.sell_price = Some(sell_price);
+                        trade.result = Some(result);
+                        trade.pnl = Some(pnl);
+                        trade.actual_pnl = Some(pnl);
+                        trade.exit_type = Some(exit_type);
+                        trade.resolved_at = Some(Utc::now());
+                        sold_count += 1;
+                    }
+                }
+            }
+            _ => {
+                // CANCELED, INVALID, CANCELED_MARKET_RESOLVED → phantom
+                info!("PHANTOM (order {}): {} | status={}",
+                    &order_id[..order_id.len().min(12)],
+                    &trade.market_title[..trade.market_title.len().min(40)],
+                    status);
                 trade.result = Some("phantom".to_string());
                 trade.pnl = Some(0.0);
                 trade.actual_pnl = Some(0.0);
@@ -466,6 +616,9 @@ async fn sync_phantoms(
                 phantom_count += 1;
             }
         }
+
+        // Rate limit: don't hammer the CLOB API
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
     if phantom_count > 0 || sold_count > 0 {
@@ -475,10 +628,13 @@ async fn sync_phantoms(
             r.record_trade_closed_with_context(0.0, None, "");
         }
         if phantom_count > 0 {
-            info!("phantom-sync: marked {} positions as phantom (not held on PM)", phantom_count);
+            info!("phantom-sync: marked {} orders as phantom (CANCELED/INVALID)", phantom_count);
         }
         if sold_count > 0 {
-            info!("phantom-sync: marked {} positions as sold (manually closed)", sold_count);
+            info!("phantom-sync: marked {} orders as sold (MATCHED but not held)", sold_count);
+        }
+        if live_count > 0 {
+            info!("phantom-sync: {} orders still LIVE in orderbook", live_count);
         }
     }
 }

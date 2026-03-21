@@ -61,7 +61,9 @@ impl CopyTrader {
     /// Uses tiered polling:
     /// - Hot tier (signal in last 30 min): polled every cycle
     /// - Warm tier (rest): polled every warm_poll_interval / poll_interval cycles
-    pub async fn poll(&mut self) -> Vec<CopySignal> {
+    /// Returns (signals, fetched_positions_per_wallet)
+    /// The second element contains raw wallet positions for the stability tracker.
+    pub async fn poll(&mut self) -> (Vec<CopySignal>, Vec<(String, String, Vec<WalletPosition>)>) {
         self.poll_count += 1;
 
         let config = self.config.read().await;
@@ -78,7 +80,7 @@ impl CopyTrader {
         let global_min_price = config.sizing.min_price;
         let global_max_price = config.sizing.max_price;
 
-        let watchlist: Vec<(String, String, f64, Vec<String>, f64, f64)> = config
+        let watchlist: Vec<(String, String, f64, Vec<String>, Vec<String>, usize, f64, f64)> = config
             .copy_trading
             .watchlist
             .iter()
@@ -87,9 +89,11 @@ impl CopyTrader {
                 let base_weight = e.weight;
                 let weight = wallet_overrides.get(&addr).copied().unwrap_or(base_weight);
                 let market_types = e.market_types.clone();
+                let leagues = e.leagues.clone();
+                let max_legs = e.max_legs_per_event;
                 let min_price = e.min_price.unwrap_or(global_min_price);
                 let max_price = e.max_price.unwrap_or(global_max_price);
-                (addr, e.name.clone(), weight, market_types, min_price, max_price)
+                (addr, e.name.clone(), weight, market_types, leagues, max_legs, min_price, max_price)
             })
             .collect();
         drop(config);
@@ -109,8 +113,8 @@ impl CopyTrader {
 
         let active_wallets: Vec<_> = watchlist
             .iter()
-            .filter(|(_, _, w, _, _, _)| *w > 0.0)
-            .filter(|(addr, _, _, _, _, _)| {
+            .filter(|(_, _, w, _, _, _, _, _)| *w > 0.0)
+            .filter(|(addr, _, _, _, _, _, _, _)| {
                 Self::should_poll_wallet(
                     addr,
                     self.poll_count,
@@ -125,30 +129,32 @@ impl CopyTrader {
 
         // Phase 1: Fetch wallet positions in parallel (configurable batch size)
         let fetch_start = Instant::now();
-        let mut fetched: Vec<(String, String, f64, Vec<String>, f64, f64, Vec<WalletPosition>)> = Vec::new();
+        let mut fetched: Vec<(String, String, f64, Vec<String>, Vec<String>, usize, f64, f64, Vec<WalletPosition>)> = Vec::new();
 
         for chunk in active_wallets.chunks(batch_size) {
             let futures: Vec<_> = chunk
                 .iter()
-                .map(|(addr, name, weight, market_types, min_price, max_price)| {
+                .map(|(addr, name, weight, market_types, leagues, max_legs, min_price, max_price)| {
                     let client = self.client.clone();
                     let addr = addr.clone();
                     let name = name.clone();
                     let weight = *weight;
                     let market_types = market_types.clone();
+                    let leagues = leagues.clone();
+                    let max_legs = *max_legs;
                     let min_price = *min_price;
                     let max_price = *max_price;
                     async move {
                         let result = client.get_wallet_positions(&addr, 100).await;
-                        (addr, name, weight, market_types, min_price, max_price, result)
+                        (addr, name, weight, market_types, leagues, max_legs, min_price, max_price, result)
                     }
                 })
                 .collect();
 
             let results = join_all(futures).await;
-            for (addr, name, weight, market_types, min_price, max_price, result) in results {
+            for (addr, name, weight, market_types, leagues, max_legs, min_price, max_price, result) in results {
                 match result {
-                    Ok(positions) => fetched.push((addr, name, weight, market_types, min_price, max_price, positions)),
+                    Ok(positions) => fetched.push((addr, name, weight, market_types, leagues, max_legs, min_price, max_price, positions)),
                     Err(e) => warn!("positions fetch failed for {name}: {e}"),
                 }
             }
@@ -157,7 +163,7 @@ impl CopyTrader {
         }
 
         let fetch_ms = fetch_start.elapsed().as_millis();
-        let total_wallets = watchlist.iter().filter(|(_, _, w, _, _, _)| *w > 0.0).count();
+        let total_wallets = watchlist.iter().filter(|(_, _, w, _, _, _, _, _)| *w > 0.0).count();
         if fetched.len() > 1 {
             info!(
                 "POLL FETCH: {}/{} wallets in {}ms (batches of {})",
@@ -166,7 +172,7 @@ impl CopyTrader {
         }
 
         // Phase 2: Process results sequentially (diff, consensus, signals)
-        for (address, name, weight, wallet_market_types, wallet_min_price, wallet_max_price, positions) in &fetched {
+        for (address, name, weight, wallet_market_types, wallet_leagues, wallet_max_legs, wallet_min_price, wallet_max_price, positions) in &fetched {
             let weight = *weight;
             // Build current snapshot: position_key → size
             // Only include open (unresolved) positions: 0.01 < curPrice < 0.99
@@ -251,6 +257,12 @@ impl CopyTrader {
                     }
                 }
 
+                // Dedup: the executor's `attempted` HashSet (seeded from PM positions)
+                // prevents duplicate orders. We do NOT block signals here because:
+                // 1. First poll seeds all Cannae conditionIds, blocking future signals
+                // 2. Signals that fail the 3-leg filter still block the conditionId
+                // The executor is the right place for dedup, not the signal generator.
+
                 // Delay = time since we first detected this position change.
                 // Since we poll every ~15s with parallel batches (~1.7s), the max detection
                 // delay is one poll cycle. For positions that were already there in the
@@ -286,6 +298,18 @@ impl CopyTrader {
                 // Per-wallet price filter
                 if price < *wallet_min_price || price > *wallet_max_price {
                     continue;
+                }
+
+                // Per-wallet league filter: check event_slug prefix
+                let raw_slug_for_league = pos.event_slug.clone()
+                    .or_else(|| pos.slug.clone())
+                    .unwrap_or_default();
+                let slug_for_league = raw_slug_for_league.trim_end_matches("-more-markets");
+                if !wallet_leagues.is_empty() {
+                    let league_prefix = slug_for_league.split('-').next().unwrap_or("");
+                    if !wallet_leagues.iter().any(|l| l == league_prefix) {
+                        continue;
+                    }
                 }
 
                 // Use eventSlug (event-level) for consensus grouping.
@@ -332,10 +356,11 @@ impl CopyTrader {
                     weight,
                 );
 
-                // Seeding phase: skip solo positions but allow consensus trades.
-                if is_seeding && consensus_wallets < 2 {
-                    continue;
-                }
+                // Seeding: allow all signals through. The game-level filter in main.rs
+                // ensures only 3-leg games are traded. The attempted map (seeded from
+                // trades.jsonl at startup) prevents duplicate orders.
+                // Previously this blocked all first-poll signals, but that prevented
+                // the inhaalslag on 3-leg games.
 
                 // Only trade the majority side. If this signal's outcome is NOT
                 // the majority outcome for this event → skip (prevents trading
@@ -429,7 +454,13 @@ impl CopyTrader {
             );
         }
 
-        signals
+        // Collect raw positions per wallet for stability tracker
+        let raw_positions: Vec<(String, String, Vec<WalletPosition>)> = fetched
+            .into_iter()
+            .map(|(addr, name, _, _, _, _, _, _, positions)| (addr, name, positions))
+            .collect();
+
+        (signals, raw_positions)
     }
 
     /// Detect sport from title/slug. Public static version for use by sync module.

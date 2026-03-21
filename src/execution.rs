@@ -15,8 +15,10 @@ pub struct Executor {
     config: SharedConfig,
     fee_cache: std::collections::HashMap<String, u32>,
     /// Tracks condition_id:outcome pairs we've already attempted this session.
-    /// Prevents retrying failed/unfilled orders on every poll cycle.
-    attempted: std::collections::HashMap<String, std::time::Instant>,
+    /// Once a conditionId+outcome+side is attempted, it is NEVER retried.
+    /// This prevents duplicate orders from repeated signals (Cannae bijkopen,
+    /// bot restarts, etc).
+    attempted: std::collections::HashSet<String>,
 }
 
 impl Executor {
@@ -25,12 +27,47 @@ impl Executor {
             client,
             config,
             fee_cache: std::collections::HashMap::new(),
-            attempted: std::collections::HashMap::new(),
+            attempted: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Seed attempted map from live PM positions (source of truth).
+    /// Only positions we actually HOLD block new orders.
+    /// trades.jsonl is NOT used — sold/resolved positions must not block new entries.
+    pub fn seed_from_positions(&mut self, positions: &[crate::clob::types::WalletPosition]) {
+        let mut count = 0;
+        for pos in positions {
+            if pos.size_f64() < 0.01 {
+                continue;
+            }
+            let cid = pos.condition_id.as_deref().unwrap_or("");
+            let outcome = pos.outcome.as_deref().unwrap_or("");
+            if cid.is_empty() {
+                continue;
+            }
+            let key = Self::attempt_key(cid, outcome, "BUY");
+            if self.attempted.insert(key) {
+                count += 1;
+            }
+        }
+        if count > 0 {
+            tracing::info!("seeded {} PM positions into attempted map (total: {})", count, self.attempted.len());
         }
     }
 
     fn attempt_key(condition_id: &str, outcome: &str, side: &str) -> String {
         format!("{}:{}:{}", condition_id, outcome.to_lowercase(), side)
+    }
+
+    /// Execute with game context: proportional shares sizing using Cannae's game total
+    pub async fn execute_with_game_context(
+        &mut self,
+        signal: &AggregatedSignal,
+        risk: &mut RiskManager,
+        logger: &TradeLogger,
+        cannae_game_total_usdc: f64,
+    ) -> Result<bool> {
+        self.execute_inner(signal, risk, logger, cannae_game_total_usdc).await
     }
 
     /// Execute a signal: size it, risk-check it, place the order
@@ -39,6 +76,16 @@ impl Executor {
         signal: &AggregatedSignal,
         risk: &mut RiskManager,
         logger: &TradeLogger,
+    ) -> Result<bool> {
+        self.execute_inner(signal, risk, logger, 0.0).await
+    }
+
+    async fn execute_inner(
+        &mut self,
+        signal: &AggregatedSignal,
+        risk: &mut RiskManager,
+        logger: &TradeLogger,
+        cannae_game_total_usdc: f64,
     ) -> Result<bool> {
         // Read config values we need, then drop the lock immediately (N6: avoid holding
         // RwLock across HTTP await points which blocks config hot-reload)
@@ -119,14 +166,12 @@ impl Executor {
             }
         }
 
-        // Skip if we already attempted this market+outcome this session (5 min cooldown)
+        // Skip if we already attempted this market+outcome this session (permanent, never retries)
         let attempt_key = Self::attempt_key(&signal.condition_id, &signal.outcome, &signal.side);
-        if let Some(last) = self.attempted.get(&attempt_key) {
-            if last.elapsed() < std::time::Duration::from_secs(300) {
-                return Ok(false);
-            }
+        if !self.attempted.insert(attempt_key) {
+            // Already in the set → we've attempted this before → skip
+            return Ok(false);
         }
-        self.attempted.insert(attempt_key, std::time::Instant::now());
 
         // Fetch current market price from orderbook.
         // Skip if price moved >25% against us since the wallet bought.
@@ -142,7 +187,8 @@ impl Executor {
                         );
                         return Ok(false);
                     }
-                    ask
+                    // Buy at ask - 1ct for maker rebate (GTC sits in book)
+                    (ask - 0.01_f64).max(0.02)
                 }
                 _ => signal.price, // fall back to signal price if orderbook unavailable or invalid
             }
@@ -204,8 +250,11 @@ impl Executor {
         };
 
         let is_copy = signal.sources.iter().any(|s| matches!(s, SignalSource::Copy(_)));
-        let size = if is_copy {
-            sizing::copy_trade_size(risk.bankroll(), &signal_at_exec, &sizing_config)
+        let size = if is_copy && cannae_game_total_usdc > 0.0 {
+            sizing::copy_trade_size(risk.bankroll(), &signal_at_exec, &sizing_config, cannae_game_total_usdc)
+        } else if is_copy {
+            // Fallback: no game context, use old kelly sizing
+            sizing::kelly_size(risk.bankroll(), &signal_at_exec, &sizing_config)
         } else {
             sizing::kelly_size(risk.bankroll(), &signal_at_exec, &sizing_config)
         };

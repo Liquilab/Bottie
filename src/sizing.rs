@@ -58,66 +58,82 @@ pub fn kelly_size(
     shares
 }
 
-/// Size specifically for copy trades — Tiered bet sizing based on price.
+/// Size for copy trades — Proportional shares sizing.
 ///
-/// Bet = portfolio_pct × portfolio_reference_usdc
+/// Copies Cannae's exact shares distribution within a game, scaled to our budget.
 ///
-/// Price tiers:
-///   0.30–0.45 → 1% of portfolio  (uncertain, small bet)
-///   0.45–0.58 → 2% of portfolio
-///   0.58–0.83 → 3% of portfolio
-///   0.83–0.95 → 4% of portfolio  (high confidence, bigger bet)
+/// Logic:
+///   factor = game_budget / cannae_game_total_usdc
+///   our_shares = cannae_shares × factor
+///   our_usdc = our_shares × price
 ///
-/// portfolio_reference_usdc = configured total portfolio value (cash + positions).
-/// Falls back to live bankroll if 0.
+/// Game budget: $50 (normal) or $100 (if Cannae's game total > $100K)
+///
+/// Returns shares (not USDC).
 pub fn copy_trade_size(
     bankroll: f64,
     signal: &AggregatedSignal,
     config: &SizingConfig,
+    cannae_game_total_usdc: f64,
 ) -> f64 {
     let price = signal.price;
 
-    // Skip out-of-range prices (min_price/max_price set the tradeable window)
-    if price < config.min_price || price > config.max_price || price <= 0.0 || price >= 1.0 {
+    if price <= 0.0 || price >= 1.0 || bankroll < 1.0 {
         return 0.0;
     }
 
-    if bankroll < 1.0 {
+    if cannae_game_total_usdc <= 0.0 || signal.source_shares <= 0.0 {
         return 0.0;
     }
 
-    // Reference portfolio for percentage calculation
-    let portfolio = if config.portfolio_reference_usdc > 0.0 {
-        config.portfolio_reference_usdc
+    // Tiered sizing: scale with Cannae's conviction (game size).
+    // Cannae bets more on games he's more confident about — follow that signal.
+    //   < $15K  → 1% of bankroll (base, testing tier)
+    //   $15-50K → 1.5%
+    //   $50-100K → 2%
+    //   > $100K → 3% (max conviction)
+    let game_budget_pct = if cannae_game_total_usdc >= 100_000.0 {
+        0.03
+    } else if cannae_game_total_usdc >= 50_000.0 {
+        0.02
+    } else if cannae_game_total_usdc >= 15_000.0 {
+        0.015
     } else {
-        bankroll
+        0.01
     };
+    let game_budget = bankroll * game_budget_pct;
 
-    // Tiered bet percentage based on price confidence
-    let pct = if price < 0.45 {
-        0.01 // 1%
-    } else if price < 0.58 {
-        0.02 // 2%
-    } else if price < 0.83 {
-        0.03 // 3%
+    // Factor: scale Cannae's position to our budget
+    let factor = game_budget / cannae_game_total_usdc;
+
+    // Our shares = Cannae's shares × factor
+    let our_shares = signal.source_shares * factor;
+    let our_usdc = our_shares * price;
+
+    // Floor at $2.50 minimum bet
+    let (final_shares, final_usdc) = if our_usdc < 2.50 {
+        let min_shares = 2.50 / price;
+        (min_shares, 2.50)
     } else {
-        0.04 // 4%
+        (our_shares, our_usdc)
     };
-
-    let mut size_usdc = portfolio * pct;
 
     // Never bet more than available cash
-    size_usdc = size_usdc.min(bankroll);
-
-    // Enforce PM minimum: 5 shares
-    let min_cost = 5.0 * price;
-    if size_usdc < min_cost && bankroll >= min_cost {
-        size_usdc = min_cost;
-    }
-
-    if size_usdc < MIN_ORDER_VALUE {
+    if final_usdc > bankroll {
         return 0.0;
     }
 
-    size_usdc / price
+    // Enforce PM minimum: 5 shares
+    if final_shares < 5.0 {
+        if bankroll >= 5.0 * price {
+            return 5.0;
+        }
+        return 0.0;
+    }
+
+    if final_usdc < MIN_ORDER_VALUE {
+        return 0.0;
+    }
+
+    final_shares
 }

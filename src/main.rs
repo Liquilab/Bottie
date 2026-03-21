@@ -11,6 +11,7 @@ mod signal;
 mod signing;
 mod sizing;
 mod sports;
+mod stability;
 mod sync;
 mod wallet_tracker;
 mod watchlist_refresh;
@@ -182,10 +183,11 @@ async fn main() -> Result<()> {
         let logger = logger.clone();
         let risk = risk.clone();
         let tracker = tracker.clone();
+        let config = shared_config.clone();
         tokio::spawn(async move {
             // Wait 60s for the bot to place initial trades before first check
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            resolver::resolver_loop(client, logger, risk, tracker).await;
+            resolver::resolver_loop(client, logger, risk, tracker, config).await;
         })
     };
 
@@ -291,7 +293,33 @@ async fn copy_trading_loop(
 ) {
     let mut copy_trader = CopyTrader::new(client.clone(), tracker.clone(), config.clone());
     let mut executor = Executor::new(client.clone(), config.clone());
+    let mut stability_tracker = stability::StabilityTracker::new();
+
+    // Seed attempted map from live PM positions (source of truth).
+    // Also seed stability tracker with events we already hold.
+    {
+        let funder = client.funder_address();
+        match client.get_wallet_positions(&funder, 500).await {
+            Ok(positions) => {
+                executor.seed_from_positions(&positions);
+                // Seed stability tracker: events we already hold should never re-enter
+                let our_events = positions
+                    .iter()
+                    .filter(|p| p.size_f64() > 0.01)
+                    .filter_map(|p| {
+                        p.event_slug
+                            .clone()
+                            .or_else(|| p.slug.clone())
+                            .map(|s| s.trim_end_matches("-more-markets").to_string())
+                    })
+                    .filter(|s| !s.is_empty());
+                stability_tracker.seed_emitted(our_events);
+            }
+            Err(e) => tracing::warn!("could not seed from PM positions: {e}"),
+        }
+    }
     let mut polls_since_sync: u32 = 0;
+    let mut polls_since_stability_log: u32 = 0;
 
     loop {
         let poll_interval = {
@@ -325,63 +353,253 @@ async fn copy_trading_loop(
             }
         }
 
-        // Poll for new copy signals
-        let copy_signals = copy_trader.poll().await;
+        // Read stability config
+        let (stability_window, stability_threshold) = {
+            let c = config.read().await;
+            (
+                c.copy_trading.stability_window_minutes,
+                c.copy_trading.stability_threshold_pct,
+            )
+        };
 
-        if !copy_signals.is_empty() {
-            // Fix #1: Enforce min_consensus at runtime
-            let min_traders = {
-                config.read().await.copy_trading.consensus.min_traders
-            };
+        // Poll for new copy signals + raw wallet positions
+        let (_copy_signals, raw_positions) = copy_trader.poll().await;
 
-            let mut filtered_signals: Vec<_> = copy_signals
-                .into_iter()
-                .filter(|s| {
-                    if s.consensus_count < min_traders {
-                        info!(
-                            "SKIP: consensus {} < min {} for {}",
-                            s.consensus_count, min_traders, s.market_title
-                        );
-                        false
-                    } else {
-                        true
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            // Sort by consensus count descending, then soonest resolve date first.
-            // Extract date from title (e.g. "2026-03-16") for sorting.
-            fn extract_date(title: &str) -> String {
-                if let Some(pos) = title.find("2026-") {
-                    title[pos..pos+10.min(title.len())].to_string()
-                } else {
-                    "9999-99-99".to_string()
-                }
+        // Build our current event_slugs (from PM positions already seeded at startup
+        // + any events the stability tracker has already emitted)
+        // We use the executor's attempted set indirectly through seed_from_positions.
+        // For stability: get our own current positions to know which events to skip.
+        let our_event_slugs: std::collections::HashSet<String> = {
+            let funder = client.funder_address();
+            match client.get_wallet_positions(&funder, 500).await {
+                Ok(positions) => positions
+                    .iter()
+                    .filter(|p| p.size_f64() > 0.01)
+                    .filter_map(|p| {
+                        p.event_slug
+                            .clone()
+                            .or_else(|| p.slug.clone())
+                            .map(|s| s.trim_end_matches("-more-markets").to_string())
+                    })
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+                Err(_) => std::collections::HashSet::new(),
             }
-            filtered_signals.sort_by(|a, b| {
-                b.consensus_count.cmp(&a.consensus_count)
-                    .then_with(|| extract_date(&a.market_title).cmp(&extract_date(&b.market_title)))
-            });
+        };
 
-            // Aggregate (no arb signals in this loop)
-            let aggregated = SignalAggregator::aggregate(&filtered_signals, &[]);
+        // Feed Cannae positions into stability tracker
+        for (addr, name, positions) in &raw_positions {
+            stability_tracker.update(
+                addr,
+                name,
+                positions,
+                &our_event_slugs,
+                stability_threshold,
+            );
+        }
 
-            for signal in &aggregated {
-                let mut risk_guard = risk.write().await;
-                match executor.execute(signal, &mut risk_guard, &logger).await {
-                    Ok(filled) => {
-                        if filled {
-                            info!("trade executed: {}", signal.market_title);
-                        }
-                    }
-                    Err(e) => {
-                        warn!("execution error: {e}");
-                    }
+        // Collect ALL fetched positions for drain_stable (to get current data)
+        let all_cannae_positions: Vec<crate::clob::types::WalletPosition> = raw_positions
+            .iter()
+            .flat_map(|(_, _, positions)| positions.clone())
+            .collect();
+
+        // Check for newly stable games
+        let stable_games = stability_tracker.drain_stable(
+            stability_window,
+            &all_cannae_positions,
+        );
+
+        // Process stable games: build signals, apply 3-leg filter, execute
+        for game in &stable_games {
+            execute_stable_game(
+                &game,
+                &mut executor,
+                &risk,
+                &logger,
+                &config,
+            )
+            .await;
+        }
+
+        // Log pending stability status periodically (every 20 polls = ~5 min)
+        polls_since_stability_log += 1;
+        if polls_since_stability_log >= 20 {
+            polls_since_stability_log = 0;
+            let pending = stability_tracker.pending_count();
+            if pending > 0 {
+                let summary = stability_tracker.pending_summary();
+                for (slug, wait_mins, is_stable) in &summary {
+                    let state = if *is_stable { "stable" } else { "filling" };
+                    info!("STABILITY PENDING: {} ({}min, {})", slug, wait_mins, state);
                 }
             }
         }
 
         tokio::time::sleep(Duration::from_secs(poll_interval)).await;
+    }
+}
+
+/// Build AggregatedSignals from a stable game's Cannae positions,
+/// select legs based on config (max_legs_per_event), and execute.
+async fn execute_stable_game(
+    game: &stability::StableGame,
+    executor: &mut Executor,
+    risk: &Arc<RwLock<RiskManager>>,
+    logger: &Arc<TradeLogger>,
+    config: &SharedConfig,
+) {
+    use crate::copy_trader::CopyTrader;
+
+    let cfg = config.read().await;
+    let max_legs = cfg.copy_trading.watchlist.first()
+        .map(|w| w.max_legs_per_event)
+        .unwrap_or(0);
+    let allowed_market_types = cfg.copy_trading.watchlist.first()
+        .map(|w| w.market_types.clone())
+        .unwrap_or_default();
+    drop(cfg);
+
+    // Group positions by conditionId, keep largest per condition
+    let mut best_per_condition: std::collections::HashMap<
+        String,
+        &crate::clob::types::WalletPosition,
+    > = std::collections::HashMap::new();
+
+    for pos in &game.positions {
+        let cid = pos.condition_id.as_deref().unwrap_or("");
+        if cid.is_empty() {
+            continue;
+        }
+        let existing = best_per_condition.get(cid);
+        if existing.is_none() || pos.size_f64() > existing.unwrap().size_f64() {
+            best_per_condition.insert(cid.to_string(), pos);
+        }
+    }
+
+    // Filter by allowed market types and collect legs
+    let mut game_legs: Vec<&crate::clob::types::WalletPosition> = Vec::new();
+    for pos in best_per_condition.values() {
+        let title = pos.title.as_deref().unwrap_or("");
+        let market_type = CopyTrader::detect_market_type(title);
+        if !allowed_market_types.is_empty()
+            && !allowed_market_types.iter().any(|mt| mt == &market_type)
+        {
+            continue;
+        }
+        game_legs.push(pos);
+    }
+
+    // Sort by USDC size descending, apply max_legs limit
+    game_legs.sort_by(|a, b| {
+        b.initial_value_f64()
+            .partial_cmp(&a.initial_value_f64())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if max_legs > 0 {
+        game_legs.truncate(max_legs);
+    }
+
+    // Need at least 1 leg
+    if game_legs.is_empty() {
+        info!(
+            "STABILITY SKIP: {} has no matching legs",
+            game.event_slug,
+        );
+        return;
+    }
+
+    // Calculate Cannae's total USDC for ALL positions in this game
+    let cannae_game_total: f64 = game.positions.iter().map(|p| p.initial_value_f64()).sum();
+    if cannae_game_total <= 0.0 {
+        return;
+    }
+
+    info!(
+        "STABILITY EXECUTE: {} — {} legs, Cannae total ${:.0}",
+        game.event_slug,
+        game_legs.len(),
+        cannae_game_total
+    );
+
+    // Build AggregatedSignal for each leg and execute
+    for pos in &game_legs {
+        let title = pos.title.as_deref().unwrap_or("").to_string();
+        let condition_id = pos.condition_id.as_deref().unwrap_or("").to_string();
+        let outcome = pos.outcome.as_deref().unwrap_or("").to_string();
+        let token_id = pos.asset.as_deref().unwrap_or("").to_string();
+        let event_slug = pos
+            .event_slug
+            .clone()
+            .or_else(|| pos.slug.clone())
+            .unwrap_or_default()
+            .trim_end_matches("-more-markets")
+            .to_string();
+        let price = pos.avg_price_f64();
+        let sport = CopyTrader::detect_sport_static(&title, &event_slug);
+        let market_type = CopyTrader::detect_market_type(&title);
+        let source_size_usdc = pos.initial_value_f64();
+        let source_shares = pos.size_f64();
+
+        // Market-anchored confidence: assume 10% edge over market
+        let confidence = (price * 1.10).min(0.95);
+
+        let agg_signal = signal::AggregatedSignal {
+            token_id,
+            condition_id,
+            side: "BUY".to_string(),
+            price,
+            market_title: title.clone(),
+            market_type,
+            sport,
+            outcome,
+            event_slug,
+            sources: vec![signal::SignalSource::Copy(signal::CopySignal {
+                source_wallet: game.source_wallet.clone(),
+                source_name: game.source_name.clone(),
+                token_id: pos.asset.as_deref().unwrap_or("").to_string(),
+                condition_id: pos.condition_id.as_deref().unwrap_or("").to_string(),
+                side: "BUY".to_string(),
+                price,
+                size: source_size_usdc,
+                market_title: title,
+                sport: CopyTrader::detect_sport_static(
+                    pos.title.as_deref().unwrap_or(""),
+                    &pos.event_slug.as_deref().unwrap_or(""),
+                ),
+                outcome: pos.outcome.as_deref().unwrap_or("").to_string(),
+                event_slug: pos
+                    .event_slug
+                    .clone()
+                    .unwrap_or_default()
+                    .trim_end_matches("-more-markets")
+                    .to_string(),
+                confidence,
+                consensus_count: 1,
+                consensus_wallets: vec![game.source_name.clone()],
+                timestamp: chrono::Utc::now(),
+                signal_delay_ms: 0,
+            })],
+            combined_confidence: confidence,
+            edge_pct: 0.0,
+            source_size_usdc,
+            source_shares,
+        };
+
+        let mut risk_guard = risk.write().await;
+        match executor
+            .execute_with_game_context(&agg_signal, &mut risk_guard, &logger, cannae_game_total)
+            .await
+        {
+            Ok(filled) => {
+                if filled {
+                    info!("STABILITY FILLED: {}", agg_signal.market_title);
+                }
+            }
+            Err(e) => {
+                warn!("STABILITY ERROR: {}: {e}", agg_signal.market_title);
+            }
+        }
     }
 }
 
