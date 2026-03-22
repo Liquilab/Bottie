@@ -162,7 +162,7 @@ impl ClobClient {
 
         let resp: FeeRateResponse = builder.send().await?.error_for_status()?.json().await?;
 
-        let bps = match resp.fee_rate_bps {
+        let bps = match resp.base_fee {
             Some(serde_json::Value::Number(n)) => n.as_u64().unwrap_or(0) as u32,
             Some(serde_json::Value::String(s)) => s.parse().unwrap_or(0),
             _ => 0,

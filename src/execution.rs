@@ -284,17 +284,21 @@ impl Executor {
             }
         }
 
-        // Get fee rate (cached)
+        // Get fee rate (cached). Don't cache failures — 0 from error would
+        // permanently block markets that require non-zero fees.
         let fee_bps = match self.fee_cache.get(&signal.token_id) {
             Some(bps) => *bps,
             None => {
-                let bps = self
-                    .client
-                    .get_fee_rate_bps(&signal.token_id)
-                    .await
-                    .unwrap_or(0);
-                self.fee_cache.insert(signal.token_id.clone(), bps);
-                bps
+                match self.client.get_fee_rate_bps(&signal.token_id).await {
+                    Ok(bps) => {
+                        self.fee_cache.insert(signal.token_id.clone(), bps);
+                        bps
+                    }
+                    Err(e) => {
+                        warn!("fee-rate lookup failed for {}: {} — using 0, will retry on error", signal.market_title, e);
+                        0 // Don't cache — next attempt will retry the API
+                    }
+                }
             }
         };
 
@@ -369,8 +373,11 @@ impl Executor {
             Err(e) => {
                 let err_str = e.to_string();
                 // Retry with correct fee if market rejects our fee rate
-                if let Some(idx) = err_str.find("current market's taker fee: ") {
-                    let fee_str = &err_str[idx + 28..];
+                // Use short pattern to avoid ASCII vs Unicode apostrophe mismatch
+                if let Some(idx) = err_str.find("taker fee: ")
+                    .or_else(|| err_str.find("maker fee: "))
+                {
+                    let fee_str = &err_str[idx + 11..];
                     if let Some(end) = fee_str.find(|c: char| !c.is_ascii_digit()) {
                         if let Ok(correct_fee) = fee_str[..end].parse::<u32>() {
                             info!("retrying with fee={} (was {})", correct_fee, fee_bps);

@@ -95,8 +95,9 @@ pub struct CancelOrderRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FeeRateResponse {
-    #[serde(rename = "fee_rate_bps")]
-    pub fee_rate_bps: Option<serde_json::Value>,
+    /// API returns "base_fee" (not "fee_rate_bps")
+    #[serde(alias = "fee_rate_bps", alias = "base_fee")]
+    pub base_fee: Option<serde_json::Value>,
 }
 
 /// Trade from the data-api (public trades feed)
