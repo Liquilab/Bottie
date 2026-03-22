@@ -71,6 +71,16 @@ pub async fn sync_own_trades(
             continue;
         }
 
+        // Skip very recent trades (< 10 min old) — these are likely trades the bot
+        // just placed itself. Execution.rs already logged them with proper consensus_count.
+        // Importing them again as "manual" would lose the consensus metadata.
+        if let Some(secs) = act.timestamp_secs() {
+            let age_mins = (chrono::Utc::now().timestamp() - secs) / 60;
+            if age_mins < 10 {
+                continue;
+            }
+        }
+
         let trade_time = match act.timestamp_secs() {
             Some(secs) => DateTime::from_timestamp(secs, 0).unwrap_or(chrono::Utc::now()),
             None => chrono::Utc::now(),
@@ -103,6 +113,7 @@ pub async fn sync_own_trades(
             signal_source: "manual".to_string(),
             copy_wallet: None,
             consensus_count: None,
+            consensus_wallets: None,
             edge_pct: 0.0,
             confidence: 0.0,
             signal_delay_ms: 0,
@@ -112,6 +123,9 @@ pub async fn sync_own_trades(
             result: None,
             pnl: None,
             resolved_at: None,
+            sell_price: None,
+            actual_pnl: None,
+            exit_type: None,
             strategy_version: None,
         });
 
@@ -127,10 +141,22 @@ pub async fn sync_own_trades(
     Ok(imported)
 }
 
-/// Sync bankroll with on-chain USDC balance.
-/// Returns the live balance if successful.
+/// Sync bankroll with on-chain USDC balance + positions value.
+/// Returns the total portfolio value (cash + open positions).
 pub async fn sync_bankroll(client: &ClobClient) -> Result<f64> {
-    let balance = client.get_usdc_balance().await?;
-    info!("SYNC: on-chain USDC balance = ${:.2}", balance);
-    Ok(balance)
+    let cash = client.get_usdc_balance().await?;
+
+    // Get positions value from data-api /value endpoint
+    let funder = client.funder_address();
+    let positions_value = match client.get_positions_value(&funder).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("positions value sync failed, using cash only: {e}");
+            0.0
+        }
+    };
+
+    let total = cash + positions_value;
+    info!("SYNC: cash=${:.2} + positions=${:.2} = portfolio=${:.2}", cash, positions_value, total);
+    Ok(total)
 }

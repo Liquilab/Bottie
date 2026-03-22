@@ -16,6 +16,7 @@ pub struct CopySignal {
     pub event_slug: String,
     pub confidence: f64,
     pub consensus_count: u32,
+    pub consensus_wallets: Vec<String>,
     pub timestamp: DateTime<Utc>,
     pub signal_delay_ms: u64,
 }
@@ -50,12 +51,17 @@ pub struct AggregatedSignal {
     pub side: String,
     pub price: f64,
     pub market_title: String,
+    pub market_type: String,
     pub sport: String,
     pub outcome: String,
     pub event_slug: String,
     pub sources: Vec<SignalSource>,
     pub combined_confidence: f64,
     pub edge_pct: f64,
+    /// Cannae's USDC size on this position (for proportional shares sizing)
+    pub source_size_usdc: f64,
+    /// Cannae's shares on this position (= source_size_usdc / price)
+    pub source_shares: f64,
 }
 
 pub struct SignalAggregator;
@@ -121,18 +127,24 @@ impl SignalAggregator {
                 0.0
             };
 
+            let source_size = first.size;
+            let source_shares = if first.price > 0.0 { source_size / first.price } else { 0.0 };
+
             result.push(AggregatedSignal {
                 token_id: first.token_id.clone(),
                 condition_id: first.condition_id.clone(),
                 side: first.side.clone(),
                 price: first.price,
                 market_title: first.market_title.clone(),
+                market_type: crate::copy_trader::CopyTrader::detect_market_type(&first.market_title),
                 sport: first.sport.clone(),
                 outcome: first.outcome.clone(),
                 event_slug: first.event_slug.clone(),
                 sources,
                 combined_confidence,
                 edge_pct: edge,
+                source_size_usdc: source_size,
+                source_shares,
             });
         }
 
@@ -148,12 +160,15 @@ impl SignalAggregator {
                     side: arb.side.clone(),
                     price: arb.pm_price,
                     market_title: arb.market_title.clone(),
+                    market_type: crate::copy_trader::CopyTrader::detect_market_type(&arb.market_title),
                     sport: arb.sport.clone(),
                     outcome: String::new(),
                     event_slug: String::new(),
                     sources: vec![SignalSource::OddsArb(arb.clone())],
                     combined_confidence: arb.bookmaker_prob,
                     edge_pct: arb.edge_pct,
+                    source_size_usdc: 0.0,
+                    source_shares: 0.0,
                 });
             }
         }

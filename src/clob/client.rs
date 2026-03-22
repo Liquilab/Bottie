@@ -78,6 +78,10 @@ impl ClobClient {
         format!("{}", self.signer.address())
     }
 
+    pub fn funder_address(&self) -> String {
+        format!("{}", self.config.funder)
+    }
+
     fn timestamp() -> String {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -158,7 +162,7 @@ impl ClobClient {
 
         let resp: FeeRateResponse = builder.send().await?.error_for_status()?.json().await?;
 
-        let bps = match resp.fee_rate_bps {
+        let bps = match resp.base_fee {
             Some(serde_json::Value::Number(n)) => n.as_u64().unwrap_or(0) as u32,
             Some(serde_json::Value::String(s)) => s.parse().unwrap_or(0),
             _ => 0,
@@ -180,26 +184,23 @@ impl ClobClient {
     ) -> Result<PostOrderResponse> {
         let sig_type: u8 = 2; // Gnosis Safe
 
-        // Round price/size to 2 decimal places first to avoid floating-point drift
-        // when computing micro-amounts for EIP712 and the JSON body.
-        // Both JSON and EIP712 use raw integer micro-amounts (e.g. "5450000" for 5.45 USDC).
+        // Round price to tick size (0.01) and size to 2 decimals.
+        // Micro-amounts are computed directly without intermediate rounding
+        // to match the CLOB API's expected precision (6 decimal places).
         let price = (price * 100.0).round() / 100.0;
         let size = (size * 100.0).round() / 100.0;
 
         let (maker_amount, taker_amount) = match side {
             Side::Buy => {
-                let maker_usdc = (price * size * 100.0).round() / 100.0;
-                (
-                    Self::to_token_decimals(maker_usdc),
-                    Self::to_token_decimals(size),
-                )
+                // maker_amount = price * size, rounded at micro-amount level (6 decimals)
+                let maker_raw = (price * size * CTF_DECIMAL_FACTOR).round() as u128;
+                let taker_raw = (size * CTF_DECIMAL_FACTOR).round() as u128;
+                (U256::from(maker_raw), U256::from(taker_raw))
             }
             Side::Sell => {
-                let taker_usdc = (price * size * 100.0).round() / 100.0;
-                (
-                    Self::to_token_decimals(size),
-                    Self::to_token_decimals(taker_usdc),
-                )
+                let maker_raw = (size * CTF_DECIMAL_FACTOR).round() as u128;
+                let taker_raw = (price * size * CTF_DECIMAL_FACTOR).round() as u128;
+                (U256::from(maker_raw), U256::from(taker_raw))
             }
         };
 
@@ -226,10 +227,9 @@ impl ClobClient {
             signature_type: sig_type,
         };
 
-        // Try signing with neg_risk=false first (standard exchange, covers most markets).
-        // If the API returns "invalid signature", retry with neg_risk=true (neg-risk exchange).
-        // This handles both market types without needing to fetch market metadata upfront.
-        let signature = sign_order(&self.signer, &order_data, false).await?;
+        // Try signing with neg_risk=true first (sports/neg-risk markets are the common case).
+        // If the API returns "invalid signature", retry with neg_risk=false (standard exchange).
+        let signature = sign_order(&self.signer, &order_data, true).await?;
 
         let make_clob_order = |sig: String, _neg_risk_flag: bool| ClobOrder {
             salt,
@@ -276,10 +276,10 @@ impl ClobClient {
         let status = resp.status();
         let text = resp.text().await?;
 
-        // If invalid signature, retry with neg_risk exchange (some markets use it)
+        // If invalid signature, retry with opposite neg_risk setting (standard exchange)
         if !status.is_success() && text.contains("invalid signature") {
-            debug!("retrying order with neg_risk exchange");
-            let sig2 = sign_order(&self.signer, &order_data, true).await?;
+            debug!("retrying order with standard exchange (neg_risk=false)");
+            let sig2 = sign_order(&self.signer, &order_data, false).await?;
             let body2 = post_order(make_clob_order(sig2, true))?;
             let builder2 = self.http.post(format!("{CLOB_API}{path}"));
             let builder2 = self.l2_request(builder2, "POST", path, Some(&body2))?;
@@ -314,6 +314,10 @@ impl ClobClient {
             warn!("Order rejected: {}", parsed.skipped.as_deref().unwrap_or("unknown"));
         }
 
+        // Log raw response to diagnose size_matched availability
+        debug!("CLOB response: size_matched={:?} order_id={:?} status={:?}",
+               parsed.size_matched, parsed.effective_id(), parsed.status);
+
         Ok(parsed)
     }
 
@@ -346,16 +350,37 @@ impl ClobClient {
     }
 
     pub async fn get_trades_for_wallet(&self, wallet: &str, limit: u32) -> Result<Vec<DataApiTrade>> {
+        // Query both maker and taker — wallets can be either depending on order type
+        let mut all_trades = Vec::new();
+
+        // Maker trades
         let url = format!("{DATA_API}/trades?maker={wallet}&limit={limit}");
-        let trades: Vec<DataApiTrade> = self
-            .http
-            .get(&url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        Ok(trades)
+        if let Ok(resp) = self.http.get(&url).send().await {
+            if let Ok(trades) = resp.json::<Vec<DataApiTrade>>().await {
+                all_trades.extend(trades);
+            }
+        }
+
+        // Taker trades (critical: FOK orders make the wallet a taker)
+        let url = format!("{DATA_API}/trades?taker={wallet}&limit={limit}");
+        if let Ok(resp) = self.http.get(&url).send().await {
+            if let Ok(trades) = resp.json::<Vec<DataApiTrade>>().await {
+                all_trades.extend(trades);
+            }
+        }
+
+        // Sort by timestamp descending (most recent first)
+        all_trades.sort_by(|a, b| {
+            b.timestamp_secs().unwrap_or(0).cmp(&a.timestamp_secs().unwrap_or(0))
+        });
+
+        // Dedup by trade ID
+        let mut seen = std::collections::HashSet::new();
+        all_trades.retain(|t| {
+            t.trade_id().map_or(true, |id| seen.insert(id))
+        });
+
+        Ok(all_trades)
     }
 
     // --- Per-wallet Activity (DEPRECATED: unreliable, use get_wallet_positions instead) ---
@@ -369,11 +394,73 @@ impl ClobClient {
     // --- Per-wallet Positions (reliable, snapshot-diff for copy trading) ---
 
     pub async fn get_wallet_positions(&self, address: &str, limit: u32) -> Result<Vec<WalletPosition>> {
-        let url = format!(
-            "{DATA_API}/positions?user={address}&limit={limit}&sortBy=CURRENT&sortOrder=desc"
-        );
-        let resp = self.http.get(&url).send().await?.error_for_status()?.json().await?;
-        Ok(resp)
+        // Paginate to get ALL positions above threshold (not just first page)
+        let mut all: Vec<WalletPosition> = Vec::new();
+        let mut offset: u32 = 0;
+        let page_size = limit.min(500);
+
+        loop {
+            let url = format!(
+                "{DATA_API}/positions?user={address}&limit={page_size}&sizeThreshold=0.01&sortBy=CURRENT&sortOrder=desc&offset={offset}"
+            );
+            let page: Vec<WalletPosition> = self.http.get(&url).send().await?.error_for_status()?.json().await?;
+            let count = page.len() as u32;
+            all.extend(page);
+
+            if count < page_size {
+                break; // last page
+            }
+            offset += page_size;
+
+            // Safety: max 20 pages (10,000 positions)
+            if offset >= 10_000 {
+                break;
+            }
+        }
+
+        Ok(all)
+    }
+
+    // --- Portfolio Value ---
+
+    /// Get total value of open positions from data-api /value endpoint.
+    /// Returns positions value in USDC (does NOT include cash).
+    pub async fn get_positions_value(&self, address: &str) -> Result<f64> {
+        let url = format!("{DATA_API}/value?user={address}");
+        let resp: serde_json::Value = self.http.get(&url).send().await?.error_for_status()?.json().await?;
+        // Response: [{"user": "0x...", "value": 123.45}]
+        let value = resp.as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|obj| obj.get("value"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        Ok(value)
+    }
+
+    // --- Order Status ---
+
+    /// Get order status from CLOB API.
+    /// Returns (status, size_matched) where status is one of:
+    /// ORDER_STATUS_LIVE, ORDER_STATUS_MATCHED, ORDER_STATUS_CANCELED,
+    /// ORDER_STATUS_INVALID, ORDER_STATUS_CANCELED_MARKET_RESOLVED
+    pub async fn get_order_status(&self, order_id: &str) -> Result<(String, f64)> {
+        let path = format!("/order/{order_id}");
+        let req = self.l2_request(
+            self.http.get(format!("{CLOB_API}{path}")),
+            "GET",
+            &path,
+            None,
+        )?;
+        let resp: serde_json::Value = req.send().await?.error_for_status()?.json().await?;
+        let status = resp.get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("UNKNOWN")
+            .to_string();
+        let size_matched = resp.get("size_matched")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        Ok((status, size_matched))
     }
 
     // --- Current best ask price ---
@@ -384,6 +471,12 @@ impl ClobClient {
         let url = format!("{CLOB_API}/book?token_id={token_id}");
         let book: OrderBook = self.http.get(&url).send().await?.error_for_status()?.json().await?;
         book.best_ask().ok_or_else(|| anyhow::anyhow!("no asks in orderbook for {token_id}"))
+    }
+
+    pub async fn get_best_bid(&self, token_id: &str) -> Result<f64> {
+        let url = format!("{CLOB_API}/book?token_id={token_id}");
+        let book: OrderBook = self.http.get(&url).send().await?.error_for_status()?.json().await?;
+        book.best_bid().ok_or_else(|| anyhow::anyhow!("no bids in orderbook for {token_id}"))
     }
 
     // --- Market resolution status ---

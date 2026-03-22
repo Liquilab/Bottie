@@ -97,10 +97,40 @@ pub struct AppConfig {
     pub odds_arb: OddsArbConfig,
     pub sizing: SizingConfig,
     pub risk: RiskConfig,
+    #[serde(default)]
+    pub take_profit: TakeProfitConfig,
     pub autoresearch: AutoresearchConfig,
     #[serde(default)]
     pub autoresearch_params: AutoresearchParams,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TakeProfitConfig {
+    #[serde(default = "tp_default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "tp_default_min_delta")]
+    pub min_delta: f64,
+    #[serde(default = "tp_default_safety_threshold")]
+    pub safety_threshold: f64,
+    #[serde(default = "tp_default_cancel_timeout")]
+    pub cancel_timeout_secs: u64,
+}
+
+impl Default for TakeProfitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_delta: 0.05,
+            safety_threshold: 0.95,
+            cancel_timeout_secs: 60,
+        }
+    }
+}
+
+fn tp_default_enabled() -> bool { true }
+fn tp_default_min_delta() -> f64 { 0.05 }
+fn tp_default_safety_threshold() -> f64 { 0.95 }
+fn tp_default_cancel_timeout() -> u64 { 60 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CopyTradingConfig {
@@ -112,6 +142,36 @@ pub struct CopyTradingConfig {
     /// Max days until market resolution — skip markets that resolve further out (capital efficiency)
     #[serde(default = "default_max_resolution_days")]
     pub max_resolution_days: u32,
+    /// Poll interval for warm-tier wallets (no recent signal). Hot wallets use poll_interval_seconds.
+    #[serde(default = "default_warm_poll_interval")]
+    pub warm_poll_interval_seconds: u64,
+    /// Batch size for parallel wallet fetches (higher = faster but more API pressure)
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+    /// Wait for Cannae's GTC orders to fill before copying.
+    /// When enabled, positions must be stable (< threshold% change) for
+    /// window_minutes before the bot copies them.
+    #[serde(default = "default_stability_window")]
+    pub stability_window_minutes: u32,
+    /// Maximum % change in shares per leg to consider positions stable
+    #[serde(default = "default_stability_threshold")]
+    pub stability_threshold_pct: f64,
+}
+
+fn default_warm_poll_interval() -> u64 {
+    60
+}
+
+fn default_batch_size() -> usize {
+    8
+}
+
+fn default_stability_window() -> u32 {
+    30 // 30 minutes: wait for Cannae's GTC orders to fill
+}
+
+fn default_stability_threshold() -> f64 {
+    5.0 // 5% change threshold
 }
 
 fn default_max_resolution_days() -> u32 {
@@ -124,13 +184,37 @@ pub struct WatchlistEntry {
     pub name: String,
     pub weight: f64,
     pub sports: Vec<String>,
+    /// Allowed market types for this wallet (e.g. ["win", "ou", "spread", "ml", "draw"]).
+    /// Empty = all types allowed.
+    #[serde(default)]
+    pub market_types: Vec<String>,
+    /// Allowed league prefixes from event_slug (e.g. ["epl", "bun", "lal"]).
+    /// Empty = all leagues allowed.
+    #[serde(default)]
+    pub leagues: Vec<String>,
+    /// Max legs per event to copy. 0 = unlimited.
+    #[serde(default)]
+    pub max_legs_per_event: usize,
+    /// Per-wallet min price override (falls back to global sizing.min_price)
+    #[serde(default)]
+    pub min_price: Option<f64>,
+    /// Per-wallet max price override (falls back to global sizing.max_price)
+    #[serde(default)]
+    pub max_price: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConsensusConfig {
     pub min_traders: u32,
+    /// Consensus window in minutes — bets older than this are pruned
+    #[serde(default = "default_consensus_window")]
+    pub window_minutes: u32,
     pub multiplier_2: f64,
     pub multiplier_3plus: f64,
+}
+
+fn default_consensus_window() -> u32 {
+    30
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -149,10 +233,20 @@ pub struct SizingConfig {
     pub copy_base_size_pct: f64,
     #[serde(default = "default_min_price")]
     pub min_price: f64,
+    #[serde(default = "default_max_price")]
+    pub max_price: f64,
+    /// Reference portfolio value for tiered copy-trade sizing (cash + positions).
+    /// If 0, falls back to live bankroll (cash only).
+    #[serde(default)]
+    pub portfolio_reference_usdc: f64,
 }
 
 fn default_min_price() -> f64 {
     0.05
+}
+
+fn default_max_price() -> f64 {
+    0.95
 }
 
 #[derive(Debug, Clone, Deserialize)]

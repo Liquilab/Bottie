@@ -6,132 +6,50 @@ copy_trading:
   enabled: true
   poll_interval_seconds: 15
   watchlist:
-  - address: '0x17559efac103ac7f361be37ec0b93888d4c55aac'
-    name: moisturizer
-    weight: 1.0
-    sports:
-    - all
-  - address: '0x8c80d213c0cbad777d06ee3f58f6ca4bc03102c3'
-    name: SecondWindCapital
-    weight: 0.4
-    sports:
-    - all
-  - address: '0xc65ca4755436f82d8eb461e65781584b8cadea39'
-    name: UAEVALORANTFAN
-    weight: 0.7
-    sports:
-    - all
-  - address: '0x02227b8f5a9636e895607edd3185ed6ee5598ff7'
-    name: HorizonSplendidView
-    weight: 0.6
-    sports:
-    - all
-  - address: '0xdb2223cc5202a4718c3069f577ec971f71c96478'
-    name: FTWUTB
-    weight: 0.7
-    sports:
-    - all
-  - address: '0x507e52ef684ca2dd91f90a9d26d149dd3288beae'
-    name: GamblingIsAllYouNeed
-    weight: 1.0
-    sports:
-    - all
-  - address: '0xee613b3fc183ee44f9da9c05f53e2da107e3debf'
-    name: sovereign2013
-    weight: 1.0
-    sports:
-    - all
-  - address: '0x2005d16a84ceefa912d4e380cd32e7ff827875ea'
-    name: RN1
-    weight: 1.0
-    sports:
-    - all
-  - address: '0xb90494d9a5d8f71f1930b2aa4b599f95c344c255'
-    name: Avonmore
-    weight: 0.6
-    sports:
-    - all
-  - address: '0xbddf61af533ff524d27154e589d2d7a81510c684'
-    name: Countryside
-    weight: 0.7
-    sports:
-    - all
-  - address: '0x036c159d5a348058a81066a76b89f35926d4178d'
-    name: HedgeMaster88
-    weight: 0.7
-    sports:
-    - all
-  - address: '0x63d43bbb87f85af03b8f2f9e2fad7b54334fa2f1'
-    name: wokerjoesleeper
-    weight: 0.35
-    sports:
-    - all
-  - address: '0xe8dd7741ccb12350957ec71e9ee332e0d1e6ec86'
-    name: influenz.eth
-    weight: 0.35
-    sports:
-    - all
-  - address: '0x7ea571c40408f340c1c8fc8eaacebab53c1bde7b'
+  - address: "0x7ea571c40408f340c1c8fc8eaacebab53c1bde7b"
     name: Cannae
-    weight: 0.3
-    sports:
-    - all
-  - address: '0x07921379f7b31ef93da634b688b2fe36897db778'
-    name: ewelmealt
-    weight: 0.6
-    sports:
-    - all
-  - address: '0x39aaed185b92e99a78249610cc14a589b764583c'
-    name: '0x39AaEd'
-    weight: 0.1
-    sports:
-    - all
-  - address: '0xd0d6053c3c37e727402d84c14069780d360993aa'
-    name: k9Q2mX4L8A7ZP3R
-    weight: 0.6
-    sports:
-    - all
-  - address: '0x1f0ebc543b2d411f66947041625c0aa1ce61cf86'
-    name: 0x1f0ebc543B2d411f66947041625c0Aa1ce61CF86-1772205597930
-    weight: 0.6
-    sports:
-    - all
-  - address: '0x63ce342161250d705dc0b16df89036c8e5f9ba9a'
-    name: 0x8dxd
-    weight: 0.6
-    sports:
-    - all
+    weight: 1.0
+    sports: [all]
+    leagues: ["epl", "bun", "lal", "fl1", "uel", "arg", "mls", "rou1", "efa", "por", "bra", "itc", "ere", "es2", "bl2", "sea", "elc", "mex", "fr2", "aus", "spl", "efl", "tur"]
+    market_types: ["win"]
+    max_legs_per_event: 1
+    min_price: 0.05
+    max_price: 0.95
   consensus:
     min_traders: 1
-    multiplier_2: 1.5
-    multiplier_3plus: 2.0
-  max_delay_seconds: 120
+    window_minutes: 60
+    multiplier_2: 1.0
+    multiplier_3plus: 1.0
+  max_delay_seconds: 60
   max_resolution_days: 7
+  warm_poll_interval_seconds: 60
+  batch_size: 8
+  stability_window_minutes: 30
+  stability_threshold_pct: 5.0
 odds_arb:
   enabled: false
   poll_interval_seconds: 300
   base_url: https://api.the-odds-api.com/v4
-  sports:
-  - basketball_nba
-  - icehockey_nhl
-  - soccer_epl
-  - soccer_uefa_champs_league
-  - soccer_uefa_europa_league
-  - tennis_atp_indian_wells
-  - tennis_wta_indian_wells
-  - mma_mixed_martial_arts
+  sports: [basketball_nba]
   min_edge_pct: 3.0
 sizing:
   kelly_fraction: 0.25
-  max_bet_pct: 5.0
-  copy_base_size_pct: 3.0
+  max_bet_pct: 3.0
+  copy_base_size_pct: 20.0
   min_price: 0.05
+  max_price: 0.95
+  portfolio_reference_usdc: 800
+take_profit:
+  enabled: true
+  min_delta: 0.05
+  safety_threshold: 0.95
+  cancel_timeout_secs: 60
 risk:
   max_daily_loss_pct: 15.0
-  min_bankroll: 5.0
+  min_bankroll: 50.0
   max_open_bets: 200
 autoresearch:
-  interval_hours: 2
+  interval_hours: 24
   min_backtest_trades: 20
   min_improvement_pct: 5.0
   claude_model: claude-sonnet-4-20250514

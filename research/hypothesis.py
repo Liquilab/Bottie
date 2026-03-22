@@ -136,6 +136,17 @@ GELDIGE config_changes KEYS (gebruik alleen deze, anders heeft de hypothese geen
 - "min_consensus": int — minimum wallets voor signaalbevestiging (1 – 5)
 - "max_delay_seconds": int — max seconden na originele trade om te kopiëren (30 – 300)
 - "min_edge_pct": float — minimum edge % voor odds-arb trades (1.0 – 10.0)
+- "min_price": float — minimum entry price (0.10 – 0.40). Longshots <0.20 hebben 0% WR in onze data
+- "max_price": float — maximum entry price (0.80 – 0.95). Hoge favorites hebben slechte payout ratio
+- "max_open_bets": int — max gelijktijdige open posities (10 – 200). Bij kleine bankroll: minder is beter
+- "max_resolution_days": int — max dagen tot markt resolveert (1 – 14). Snellere turnover bij kleine bankroll
+
+BELANGRIJKE CONTEXT:
+- Bankroll is ~$25 cash, ~$336 portfolio (veel in open posities)
+- Sommige wallets zijn arb-traders (kopen beide kanten <$1) — hun edge is NIET kopieerbaar
+- Wallets met >15% both-sides posities: sovereign2013 (78%), RN1 (12%), GamblingIsAllYouNeed (19%)
+- Clean directional: Cannae (1%), HedgeMaster88 (0%) — meest kopieerbaar
+- Huidige min_price=0.20, max_delay=60s (maar delay wordt niet enforced in code)
 
 TIPS VOOR ROBUUSTE HYPOTHESES:
 - Eenvoudige changes (1-2 parameters) zijn beter dan complexe (parsimony)

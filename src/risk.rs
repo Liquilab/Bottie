@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::config::RiskConfig;
-use tracing::warn;
+use tracing::{info, warn};
 
 pub struct RiskManager {
     config: RiskConfig,
@@ -20,8 +20,8 @@ pub enum RiskDecision {
     Rejected(String),
 }
 
-// Per-wallet concentration limit — prevent blindly following one wallet
-const MAX_OPEN_PER_WALLET: u32 = 30;
+// Per-wallet concentration limit — with single-wallet strategy this equals max_open_bets
+const MAX_OPEN_PER_WALLET: u32 = 100;
 
 impl RiskManager {
     pub fn new(config: RiskConfig, bankroll: f64) -> Self {
@@ -170,8 +170,8 @@ impl RiskManager {
 
     pub fn update_bankroll(&mut self, new_bankroll: f64) {
         self.bankroll = new_bankroll;
-        self.initial_bankroll = new_bankroll;
-        self.daily_pnl = 0.0; // reset — on-chain balance is truth
+        // Do NOT reset daily_pnl or initial_bankroll here — that defeats the daily loss limit.
+        // Those should only reset in reset_daily().
     }
 
     pub fn add_daily_pnl(&mut self, pnl: f64) {
@@ -184,5 +184,40 @@ impl RiskManager {
 
     pub fn open_bets(&self) -> u32 {
         self.open_bets
+    }
+
+    /// Sync open_bets with actual count from trade log.
+    /// Fixes drift when positions are manually sold via UI.
+    pub fn sync_open_bets(&mut self, actual_count: u32) {
+        if self.open_bets != actual_count {
+            info!(
+                "risk: open_bets drift corrected {} → {}",
+                self.open_bets, actual_count
+            );
+            self.open_bets = actual_count;
+        }
+    }
+
+    /// Full sync: rebuilds open_bets, open_per_wallet, and open_per_sport from trade log.
+    /// Fixes drift in per-wallet counters (e.g. after manual sells or phantom resets).
+    pub fn sync_full(&mut self, open_trades: &[(Option<String>, String)]) {
+        let actual_count = open_trades.len() as u32;
+        let mut per_wallet: HashMap<String, u32> = HashMap::new();
+        let mut per_sport: HashMap<String, u32> = HashMap::new();
+        for (wallet, sport) in open_trades {
+            if let Some(w) = wallet {
+                *per_wallet.entry(w.clone()).or_insert(0) += 1;
+            }
+            *per_sport.entry(sport.clone()).or_insert(0) += 1;
+        }
+        if self.open_bets != actual_count || self.open_per_wallet != per_wallet {
+            info!(
+                "risk: sync_full corrected open_bets {} → {}, per_wallet {:?} → {:?}",
+                self.open_bets, actual_count, self.open_per_wallet, per_wallet
+            );
+        }
+        self.open_bets = actual_count;
+        self.open_per_wallet = per_wallet;
+        self.open_per_sport = per_sport;
     }
 }

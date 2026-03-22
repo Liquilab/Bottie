@@ -55,6 +55,33 @@ impl PostOrderResponse {
             || self.success == Some(false)
     }
 
+    /// Check if the order was actually filled (size_matched > 0).
+    /// An order can be accepted (has order_id) but not filled (FOK killed).
+    /// PM is source of truth — if size_matched is "0", we did NOT get filled.
+    pub fn is_filled(&self) -> bool {
+        if self.is_rejected() {
+            return false;
+        }
+        // If size_matched is present and "0", explicitly not filled.
+        // If size_matched is absent, assume filled if we have an order_id.
+        // The phantom sync (every 5 min) catches false positives by checking PM.
+        match &self.size_matched {
+            Some(s) => {
+                let matched: f64 = s.parse().unwrap_or(0.0);
+                matched > 0.0
+            }
+            None => self.effective_id().is_some(),
+        }
+    }
+
+    /// The actual filled size (shares), or 0 if not filled.
+    pub fn filled_size(&self) -> f64 {
+        self.size_matched
+            .as_ref()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0)
+    }
+
     pub fn effective_id(&self) -> Option<&str> {
         self.order_id.as_deref().or(self.id.as_deref())
     }
@@ -68,8 +95,9 @@ pub struct CancelOrderRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FeeRateResponse {
-    #[serde(rename = "fee_rate_bps")]
-    pub fee_rate_bps: Option<serde_json::Value>,
+    /// API returns "base_fee" (not "fee_rate_bps")
+    #[serde(alias = "fee_rate_bps", alias = "base_fee")]
+    pub base_fee: Option<serde_json::Value>,
 }
 
 /// Trade from the data-api (public trades feed)
@@ -220,6 +248,15 @@ impl OrderBook {
             .reduce(f64::min)?;
         Some(ask)
     }
+
+    pub fn best_bid(&self) -> Option<f64> {
+        let bid = self.bids.as_ref()?
+            .iter()
+            .map(|l| l.price_f64())
+            .filter(|&p| p > 0.0 && p < 1.0)
+            .reduce(f64::max)?;
+        Some(bid)
+    }
 }
 
 /// Gamma API market status for resolution checking
@@ -319,6 +356,8 @@ pub struct WalletPosition {
     pub cash_pnl: Option<serde_json::Value>,
     #[serde(rename = "proxyWallet")]
     pub proxy_wallet: Option<String>,
+    #[serde(rename = "eventSlug")]
+    pub event_slug: Option<String>,
     #[serde(rename = "curPrice")]
     pub cur_price: Option<serde_json::Value>,
     #[serde(rename = "initialValue")]

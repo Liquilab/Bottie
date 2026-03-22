@@ -15,8 +15,10 @@ pub struct Executor {
     config: SharedConfig,
     fee_cache: std::collections::HashMap<String, u32>,
     /// Tracks condition_id:outcome pairs we've already attempted this session.
-    /// Prevents retrying failed/unfilled orders on every poll cycle.
-    attempted: std::collections::HashMap<String, std::time::Instant>,
+    /// Once a conditionId+outcome+side is attempted, it is NEVER retried.
+    /// This prevents duplicate orders from repeated signals (Cannae bijkopen,
+    /// bot restarts, etc).
+    attempted: std::collections::HashSet<String>,
 }
 
 impl Executor {
@@ -25,12 +27,47 @@ impl Executor {
             client,
             config,
             fee_cache: std::collections::HashMap::new(),
-            attempted: std::collections::HashMap::new(),
+            attempted: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Seed attempted map from live PM positions (source of truth).
+    /// Only positions we actually HOLD block new orders.
+    /// trades.jsonl is NOT used — sold/resolved positions must not block new entries.
+    pub fn seed_from_positions(&mut self, positions: &[crate::clob::types::WalletPosition]) {
+        let mut count = 0;
+        for pos in positions {
+            if pos.size_f64() < 0.01 {
+                continue;
+            }
+            let cid = pos.condition_id.as_deref().unwrap_or("");
+            let outcome = pos.outcome.as_deref().unwrap_or("");
+            if cid.is_empty() {
+                continue;
+            }
+            let key = Self::attempt_key(cid, outcome, "BUY");
+            if self.attempted.insert(key) {
+                count += 1;
+            }
+        }
+        if count > 0 {
+            tracing::info!("seeded {} PM positions into attempted map (total: {})", count, self.attempted.len());
         }
     }
 
     fn attempt_key(condition_id: &str, outcome: &str, side: &str) -> String {
         format!("{}:{}:{}", condition_id, outcome.to_lowercase(), side)
+    }
+
+    /// Execute with game context: proportional shares sizing using Cannae's game total
+    pub async fn execute_with_game_context(
+        &mut self,
+        signal: &AggregatedSignal,
+        risk: &mut RiskManager,
+        logger: &TradeLogger,
+        cannae_game_total_usdc: f64,
+    ) -> Result<bool> {
+        self.execute_inner(signal, risk, logger, cannae_game_total_usdc).await
     }
 
     /// Execute a signal: size it, risk-check it, place the order
@@ -39,6 +76,16 @@ impl Executor {
         signal: &AggregatedSignal,
         risk: &mut RiskManager,
         logger: &TradeLogger,
+    ) -> Result<bool> {
+        self.execute_inner(signal, risk, logger, 0.0).await
+    }
+
+    async fn execute_inner(
+        &mut self,
+        signal: &AggregatedSignal,
+        risk: &mut RiskManager,
+        logger: &TradeLogger,
+        cannae_game_total_usdc: f64,
     ) -> Result<bool> {
         // Read config values we need, then drop the lock immediately (N6: avoid holding
         // RwLock across HTTP await points which blocks config hot-reload)
@@ -67,35 +114,64 @@ impl Executor {
             }
         }
 
-        // Position deduplication: skip if we already have this exact position
-        if !signal.outcome.is_empty()
-            && logger.has_open_position(&signal.condition_id, &signal.outcome)
+        // Price boundary filter — Cannae's sweet spot is 25-65ct
         {
-            info!(
-                "SKIP: already open position on {} {}",
-                signal.market_title, signal.outcome
-            );
-            return Ok(false);
-        }
-
-        // Event deduplication: skip if we already have ANY position on this event
-        // Prevents conflicting bets (e.g. HSV No + KOE Yes on same match)
-        if !signal.event_slug.is_empty() && logger.has_open_event(&signal.event_slug) {
-            info!(
-                "SKIP: already have position on event {} ({})",
-                signal.event_slug, signal.market_title
-            );
-            return Ok(false);
-        }
-
-        // Skip if we already attempted this market+outcome this session (5 min cooldown)
-        let attempt_key = Self::attempt_key(&signal.condition_id, &signal.outcome, &signal.side);
-        if let Some(last) = self.attempted.get(&attempt_key) {
-            if last.elapsed() < std::time::Duration::from_secs(300) {
+            let sizing_config = &self.config.read().await.sizing;
+            if signal.price > sizing_config.max_price {
+                info!(
+                    "SKIP: price {:.0}ct > max {:.0}ct for {}",
+                    signal.price * 100.0, sizing_config.max_price * 100.0, signal.market_title
+                );
                 return Ok(false);
             }
         }
-        self.attempted.insert(attempt_key, std::time::Instant::now());
+
+        // Dedup against LIVE PM positions (source of truth, not trade log).
+        // Checks per condition_id (same market). This:
+        // - Blocks duplicates (same condition+outcome)
+        // - Blocks contradictions (same condition, opposite outcome)
+        // - Allows different market types on same event (different condition_id)
+        //   e.g. Cannae "Will X win? No" + sovereign "X O/U 233.5" = OK
+        {
+            let funder = self.client.funder_address();
+            match self.client.get_wallet_positions(&funder, 500).await {
+                Ok(positions) => {
+                    for pos in &positions {
+                        if pos.size_f64() < 0.01 {
+                            continue;
+                        }
+                        let pos_cid = pos.condition_id.as_deref().unwrap_or("");
+
+                        if pos_cid == signal.condition_id {
+                            let pos_outcome = pos.outcome.as_deref().unwrap_or("");
+                            if pos_outcome.to_lowercase() == signal.outcome.to_lowercase() {
+                                info!(
+                                    "SKIP: already open position on {} {}",
+                                    signal.market_title, signal.outcome
+                                );
+                            } else {
+                                info!(
+                                    "SKIP: contradictory bet on {} (have {}, signal {})",
+                                    signal.market_title, pos_outcome, signal.outcome
+                                );
+                            }
+                            return Ok(false);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("PM position check failed ({}), skipping trade for safety", e);
+                    return Ok(false);
+                }
+            }
+        }
+
+        // Skip if we already attempted this market+outcome this session (permanent, never retries)
+        let attempt_key = Self::attempt_key(&signal.condition_id, &signal.outcome, &signal.side);
+        if !self.attempted.insert(attempt_key) {
+            // Already in the set → we've attempted this before → skip
+            return Ok(false);
+        }
 
         // Fetch current market price from orderbook.
         // Skip if price moved >25% against us since the wallet bought.
@@ -111,7 +187,8 @@ impl Executor {
                         );
                         return Ok(false);
                     }
-                    ask
+                    // Buy at ask - 1ct for maker rebate (GTC sits in book)
+                    (ask - 0.01_f64).max(0.02)
                 }
                 _ => signal.price, // fall back to signal price if orderbook unavailable or invalid
             }
@@ -127,12 +204,30 @@ impl Executor {
                         if let Ok(end_date) = chrono::DateTime::parse_from_rfc3339(end_date_str)
                             .or_else(|_| chrono::DateTime::parse_from_str(end_date_str, "%Y-%m-%dT%H:%M:%S%.fZ"))
                         {
-                            let days_until = (end_date.signed_duration_since(chrono::Utc::now())).num_days();
+                            let until_end = end_date.signed_duration_since(chrono::Utc::now());
+                            let days_until = until_end.num_days();
                             if days_until > max_resolution_days as i64 {
                                 info!(
                                     "SKIP: {} resolves in {} days (max {})",
                                     signal.market_title, days_until, max_resolution_days
                                 );
+                                return Ok(false);
+                            }
+                            // Don't enter markets ending within 30 minutes — edge is gone,
+                            // risk of last-minute reversal is highest
+                            if until_end.num_minutes() < 30 {
+                                let mins = until_end.num_minutes();
+                                if mins < 0 {
+                                    info!(
+                                        "SKIP: {} already ended {}min ago — market resolved",
+                                        signal.market_title, mins.abs()
+                                    );
+                                } else {
+                                    info!(
+                                        "SKIP: {} ends in {}min — too close to resolution",
+                                        signal.market_title, mins
+                                    );
+                                }
                                 return Ok(false);
                             }
                         }
@@ -155,8 +250,11 @@ impl Executor {
         };
 
         let is_copy = signal.sources.iter().any(|s| matches!(s, SignalSource::Copy(_)));
-        let size = if is_copy {
-            sizing::copy_trade_size(risk.bankroll(), &signal_at_exec, &sizing_config)
+        let size = if is_copy && cannae_game_total_usdc > 0.0 {
+            sizing::copy_trade_size(risk.bankroll(), &signal_at_exec, &sizing_config, cannae_game_total_usdc)
+        } else if is_copy {
+            // Fallback: no game context, use old kelly sizing
+            sizing::kelly_size(risk.bankroll(), &signal_at_exec, &sizing_config)
         } else {
             sizing::kelly_size(risk.bankroll(), &signal_at_exec, &sizing_config)
         };
@@ -172,7 +270,7 @@ impl Executor {
         let size_usdc = size * exec_price;
 
         // Risk check (with wallet/sport concentration limits)
-        let (signal_source_str, copy_wallet_val, consensus_count_val, signal_delay_ms_val) =
+        let (signal_source_str, copy_wallet_val, consensus_count_val, consensus_wallets_val, signal_delay_ms_val) =
             extract_signal_meta(&signal.sources);
         match risk.check_trade_with_context(
             size_usdc,
@@ -186,17 +284,21 @@ impl Executor {
             }
         }
 
-        // Get fee rate (cached)
+        // Get fee rate (cached). Don't cache failures — 0 from error would
+        // permanently block markets that require non-zero fees.
         let fee_bps = match self.fee_cache.get(&signal.token_id) {
             Some(bps) => *bps,
             None => {
-                let bps = self
-                    .client
-                    .get_fee_rate_bps(&signal.token_id)
-                    .await
-                    .unwrap_or(0);
-                self.fee_cache.insert(signal.token_id.clone(), bps);
-                bps
+                match self.client.get_fee_rate_bps(&signal.token_id).await {
+                    Ok(bps) => {
+                        self.fee_cache.insert(signal.token_id.clone(), bps);
+                        bps
+                    }
+                    Err(e) => {
+                        warn!("fee-rate lookup failed for {}: {} — using 0, will retry on error", signal.market_title, e);
+                        0 // Don't cache — next attempt will retry the API
+                    }
+                }
             }
         };
 
@@ -204,6 +306,7 @@ impl Executor {
         let signal_source = signal_source_str;
         let copy_wallet = copy_wallet_val;
         let consensus_count = consensus_count_val;
+        let consensus_wallets = consensus_wallets_val;
         let signal_delay_ms = signal_delay_ms_val;
 
         // Dry run check
@@ -235,6 +338,7 @@ impl Executor {
                 signal_source: signal_source.clone(),
                 copy_wallet,
                 consensus_count,
+                consensus_wallets: consensus_wallets.clone(),
                 edge_pct: exec_edge_pct,
                 confidence: signal.combined_confidence,
                 signal_delay_ms,
@@ -244,13 +348,16 @@ impl Executor {
                 result: None,
                 pnl: None,
                 resolved_at: None,
+                sell_price: None,
+                actual_pnl: None,
+                exit_type: None,
                 strategy_version: strategy_version.clone(),
             });
 
             return Ok(true);
         }
 
-        // Place FOK order (immediate fill or reject — no hanging orders)
+        // Place GTC order (sits in orderbook until filled — avoids FOK kills on low liquidity)
         info!(
             "EXECUTE: {} {} {:.0} shares @ {:.3} = ${:.2} | edge={:.1}% | {}",
             side, signal.market_title, size, exec_price, size_usdc, signal.edge_pct, signal_source
@@ -259,22 +366,25 @@ impl Executor {
         let mut actual_fee = fee_bps;
         let resp = match self
             .client
-            .create_and_post_order(&signal.token_id, exec_price, size, side, OrderType::FOK, fee_bps)
+            .create_and_post_order(&signal.token_id, exec_price, size, side, OrderType::GTC, fee_bps)
             .await
         {
             Ok(r) => r,
             Err(e) => {
                 let err_str = e.to_string();
                 // Retry with correct fee if market rejects our fee rate
-                if let Some(idx) = err_str.find("current market's taker fee: ") {
-                    let fee_str = &err_str[idx + 28..];
+                // Use short pattern to avoid ASCII vs Unicode apostrophe mismatch
+                if let Some(idx) = err_str.find("taker fee: ")
+                    .or_else(|| err_str.find("maker fee: "))
+                {
+                    let fee_str = &err_str[idx + 11..];
                     if let Some(end) = fee_str.find(|c: char| !c.is_ascii_digit()) {
                         if let Ok(correct_fee) = fee_str[..end].parse::<u32>() {
                             info!("retrying with fee={} (was {})", correct_fee, fee_bps);
                             actual_fee = correct_fee;
                             self.fee_cache.insert(signal.token_id.clone(), correct_fee);
                             self.client
-                                .create_and_post_order(&signal.token_id, exec_price, size, side, OrderType::FOK, correct_fee)
+                                .create_and_post_order(&signal.token_id, exec_price, size, side, OrderType::GTC, correct_fee)
                                 .await?
                         } else {
                             return Err(e);
@@ -284,7 +394,7 @@ impl Executor {
                         actual_fee = correct_fee;
                         self.fee_cache.insert(signal.token_id.clone(), correct_fee);
                         self.client
-                            .create_and_post_order(&signal.token_id, exec_price, size, side, OrderType::FOK, correct_fee)
+                            .create_and_post_order(&signal.token_id, exec_price, size, side, OrderType::GTC, correct_fee)
                             .await?
                     } else {
                         return Err(e);
@@ -297,70 +407,96 @@ impl Executor {
         let _ = actual_fee; // used for cache update above
 
         let order_id = resp.effective_id().map(|s| s.to_string());
-        let filled = !resp.is_rejected();
+        let mut filled = resp.is_filled();
+        // Use actual filled size from exchange, not requested size
+        let actual_shares = if filled { let fs = resp.filled_size(); if fs > 0.0 { fs } else { size } } else { 0.0 };
+        let actual_usdc = if filled { actual_shares * exec_price } else { 0.0 };
+
+        // GTC orders sit in the orderbook and may not fill instantly.
+        // Trust the CLOB response (is_filled checks size_matched > 0).
+        // The resolver phantom-sync (every 5 min) catches false positives
+        // by checking actual PM positions.
 
         if filled {
             risk.record_trade_opened_with_context(
-                size_usdc,
+                actual_usdc,
                 copy_wallet.as_deref(),
                 &signal.sport,
             );
             info!(
-                "FILLED: {} | order_id={}",
+                "FILLED: {} | order_id={} | {:.1} shares @ {:.2}ct = ${:.2}",
                 signal.market_title,
-                order_id.as_deref().unwrap_or("?")
+                order_id.as_deref().unwrap_or("?"),
+                actual_shares,
+                exec_price * 100.0,
+                actual_usdc,
             );
         } else {
-            let reason = resp.skipped.as_deref().unwrap_or("unknown");
+            let reason = resp.skipped.as_deref().unwrap_or(
+                resp.error_msg.as_deref().unwrap_or("unknown")
+            );
             warn!("NOT FILLED: {} | reason={}", signal.market_title, reason);
         }
 
-        logger.log(TradeLog {
-            timestamp: chrono::Utc::now(),
-            token_id: signal.token_id.clone(),
-            condition_id: signal.condition_id.clone(),
-            market_title: signal.market_title.clone(),
-            sport: signal.sport.clone(),
-            side: signal.side.clone(),
-            outcome: signal.outcome.clone(),
-            event_slug: Some(signal.event_slug.clone()).filter(|s| !s.is_empty()),
-            price: exec_price,
-            size_usdc,
-            size_shares: size,
-            signal_source,
-            copy_wallet,
-            consensus_count,
-            edge_pct: exec_edge_pct,
-            confidence: signal.combined_confidence,
-            signal_delay_ms,
-            order_id,
-            filled,
-            dry_run: false,
-            result: None,
-            pnl: None,
-            resolved_at: None,
-            strategy_version,
-        });
+        // Only log filled trades (don't pollute log with unfilled attempts)
+        if filled {
+            logger.log(TradeLog {
+                timestamp: chrono::Utc::now(),
+                token_id: signal.token_id.clone(),
+                condition_id: signal.condition_id.clone(),
+                market_title: signal.market_title.clone(),
+                sport: signal.sport.clone(),
+                side: signal.side.clone(),
+                outcome: signal.outcome.clone(),
+                event_slug: Some(signal.event_slug.clone()).filter(|s| !s.is_empty()),
+                price: exec_price,
+                size_usdc: actual_usdc,
+                size_shares: actual_shares,
+                signal_source,
+                copy_wallet,
+                consensus_count,
+                consensus_wallets: consensus_wallets.clone(),
+                edge_pct: exec_edge_pct,
+                confidence: signal.combined_confidence,
+                signal_delay_ms,
+                order_id,
+                filled: true,
+                dry_run: false,
+                result: None,
+                pnl: None,
+                resolved_at: None,
+                sell_price: None,
+                actual_pnl: None,
+                exit_type: None,
+                strategy_version,
+            });
+        }
 
         Ok(filled)
     }
 }
 
-fn extract_signal_meta(sources: &[SignalSource]) -> (String, Option<String>, Option<u32>, u64) {
+fn extract_signal_meta(sources: &[SignalSource]) -> (String, Option<String>, Option<u32>, Option<Vec<String>>, u64) {
     for source in sources {
         if let SignalSource::Copy(copy) = source {
+            let wallets = if copy.consensus_wallets.is_empty() {
+                None
+            } else {
+                Some(copy.consensus_wallets.clone())
+            };
             return (
                 "copy".to_string(),
                 Some(copy.source_wallet.clone()),
                 Some(copy.consensus_count),
+                wallets,
                 copy.signal_delay_ms,
             );
         }
     }
     for source in sources {
         if let SignalSource::OddsArb(arb) = source {
-            return (format!("odds_arb:{}", arb.bookmaker), None, None, 0);
+            return (format!("odds_arb:{}", arb.bookmaker), None, None, None, 0);
         }
     }
-    ("unknown".to_string(), None, None, 0)
+    ("unknown".to_string(), None, None, None, 0)
 }

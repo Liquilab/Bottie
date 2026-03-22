@@ -1,4 +1,4 @@
-use crate::config::SizingConfig;
+use crate::config::{SizingConfig, MIN_ORDER_VALUE};
 use crate::signal::AggregatedSignal;
 
 /// Kelly Criterion position sizing
@@ -50,36 +50,90 @@ pub fn kelly_size(
     // Convert to shares: size_usdc / price
     let shares = size_usdc / price;
 
-    // Enforce minimums
-    if size_usdc < 1.0 {
+    // Enforce Polymarket minimum
+    if size_usdc < MIN_ORDER_VALUE {
         return 0.0;
     }
 
     shares
 }
 
-/// Size specifically for copy trades — we trust the wallet, not Kelly
+/// Size for copy trades — Proportional shares sizing.
+///
+/// Copies Cannae's exact shares distribution within a game, scaled to our budget.
+///
+/// Logic:
+///   factor = game_budget / cannae_game_total_usdc
+///   our_shares = cannae_shares × factor
+///   our_usdc = our_shares × price
+///
+/// Game budget: $50 (normal) or $100 (if Cannae's game total > $100K)
+///
+/// Returns shares (not USDC).
 pub fn copy_trade_size(
     bankroll: f64,
     signal: &AggregatedSignal,
     config: &SizingConfig,
+    cannae_game_total_usdc: f64,
 ) -> f64 {
-    // Skip penny markets and invalid prices
-    if signal.price < config.min_price || signal.price >= 1.0 || signal.price <= 0.0 {
+    let price = signal.price;
+
+    if price <= 0.0 || price >= 1.0 || bankroll < 1.0 {
         return 0.0;
     }
 
-    if bankroll < 3.5 {
+    if cannae_game_total_usdc <= 0.0 || signal.source_shares <= 0.0 {
         return 0.0;
     }
 
-    // Base size: percentage of bankroll, but always at least $3.50 per trade
-    let base_usdc = (bankroll * config.copy_base_size_pct / 100.0).max(3.5);
+    // Tiered sizing: scale with Cannae's conviction (game size).
+    // Cannae bets more on games he's more confident about — follow that signal.
+    //   < $15K  → 1% of bankroll (base, testing tier)
+    //   $15-50K → 1.5%
+    //   $50-100K → 2%
+    //   > $100K → 3% (max conviction)
+    let game_budget_pct = if cannae_game_total_usdc >= 100_000.0 {
+        0.03
+    } else if cannae_game_total_usdc >= 50_000.0 {
+        0.02
+    } else if cannae_game_total_usdc >= 15_000.0 {
+        0.015
+    } else {
+        0.01
+    };
+    let game_budget = bankroll * game_budget_pct;
 
-    // Cap at max bet, but never below $3.50 minimum
-    let max_bet = (bankroll * config.max_bet_pct / 100.0).max(3.5);
-    let final_usdc = base_usdc.min(max_bet).min(bankroll);
+    // Factor: scale Cannae's position to our budget
+    let factor = game_budget / cannae_game_total_usdc;
 
-    // Convert to shares
-    final_usdc / signal.price
+    // Our shares = Cannae's shares × factor
+    let our_shares = signal.source_shares * factor;
+    let our_usdc = our_shares * price;
+
+    // Floor at $2.50 minimum bet
+    let (final_shares, final_usdc) = if our_usdc < 2.50 {
+        let min_shares = 2.50 / price;
+        (min_shares, 2.50)
+    } else {
+        (our_shares, our_usdc)
+    };
+
+    // Never bet more than available cash
+    if final_usdc > bankroll {
+        return 0.0;
+    }
+
+    // Enforce PM minimum: 5 shares
+    if final_shares < 5.0 {
+        if bankroll >= 5.0 * price {
+            return 5.0;
+        }
+        return 0.0;
+    }
+
+    if final_usdc < MIN_ORDER_VALUE {
+        return 0.0;
+    }
+
+    final_shares
 }

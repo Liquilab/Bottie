@@ -155,6 +155,7 @@ pub async fn watchlist_refresh_loop(
                             name: w.name.clone(),
                             overall_win_rate: 0.50, // neutral default, not optimistic
                             sport_win_rates: HashMap::new(),
+                            sport_trade_counts: HashMap::new(),
                             avg_roi: 0.0,
                             total_tracked_trades: 0,
                             total_wins: 0,
