@@ -15,7 +15,8 @@ CONFIG_FILE    = BASE_DIR / "config.yaml"
 PM_CACHE_FILE  = BASE_DIR / "data" / "pm_cache.json"
 CONSENSUS_BULK = BASE_DIR / "data" / "consensus_bulk.json"
 CONSENSUS_RESULTS = BASE_DIR / "data" / "consensus_results.json"
-INITIAL_BANKROLL = 300.0  # total deposited (updated 2026-03-17)
+INITIAL_BANKROLL = 1840.0  # total deposited (updated 2026-03-22, +$485 bijstorting)
+EDGE_REPORT_FILE = BASE_DIR / "data" / "edge_analysis_report.md"
 
 # Polymarket Data API — source of truth
 PM_DATA_API = "https://data-api.polymarket.com"
@@ -1244,7 +1245,8 @@ def page_wrap(active_page, body_html):
         ("Overview", "/"),
         ("Trades", "/trades"),
         ("Wallets", "/wallets"),
-        ("Strategy", "/strategy"),
+        ("Edge", "/edge"),
+        ("Ops", "/ops"),
     ]
     nav = ""
     for label, href in pages:
@@ -1264,6 +1266,7 @@ def page_wrap(active_page, body_html):
 <div class="header">
   <h1>BOTTIE</h1>
   <div class="header-right">
+    <button onclick="location.reload()" style="background:var(--blue);color:#fff;border:none;border-radius:6px;padding:6px 14px;font-size:0.8rem;font-weight:600;cursor:pointer;margin-right:8px">&#x21BB; Refresh</button>
     <span>{now_str}</span>
     <span id="countdown">30</span>s
   </div>
@@ -1299,14 +1302,14 @@ def render_strategy_summary(wallet_map):
 
     sizing_info = """
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:12px">
-      <div style="font-weight:700;margin-bottom:8px">Sizing (tiered, gebaseerd op prijs)</div>
+      <div style="font-weight:700;margin-bottom:8px">Sizing (tiered, gebaseerd op Cannae game total)</div>
       <div style="font-family:monospace;font-size:0.85rem;color:var(--purple)">
-        30-45ct → 1% portfolio ($3.50)<br>
-        45-58ct → 2% portfolio ($7.00)<br>
-        58-83ct → 3% portfolio ($10.50)<br>
-        83-95ct → 4% portfolio ($14.00)
+        Game total &lt; $1.3K → 1% bankroll<br>
+        Game total $1.3K-$5K → 1.5% bankroll<br>
+        Game total $5K-$15K → 2% bankroll<br>
+        Game total &gt; $15K → 3% bankroll
       </div>
-      <div class="muted" style="font-size:0.8rem;margin-top:4px">Hoofdbet only (largest per conditionId) | GTC | max 50 open bets</div>
+      <div class="muted" style="font-size:0.8rem;margin-top:4px">Hoofdbet only (largest per conditionId) | GTC maker @ ask-1ct | max 50 open bets</div>
     </div>"""
 
     return f"""
@@ -1316,15 +1319,14 @@ def render_strategy_summary(wallet_map):
 
 def render_overview(trades, wallet_map):
     kpis = compute_kpis(trades)
-    wallet_stats = compute_wallet_stats(trades, wallet_map)
     sport_stats = compute_sport_stats(trades)
     pnl_4h = compute_4h_pnl(trades)
 
     body = render_kpi_row(kpis, wallet_map, trades)
     body += f"""
     <div class="section">
-      <div class="section-title">Strategie — Whale Copy Trading</div>
-      {render_strategy_summary(wallet_map)}
+      <div class="section-title">Open Bets ({count_real_open_bets(trades)})</div>
+      {render_open_bets(trades, wallet_map)}
     </div>
     <div class="section">
       <div class="section-title">P&L per 4 uur (5d)</div>
@@ -1334,15 +1336,9 @@ def render_overview(trades, wallet_map):
       <div class="section-title">Trade Log (laatste 30)</div>
       {render_resolved_trades(trades, wallet_map, limit=30)}
     </div>
-    <div class="two-col">
-      <div class="section">
-        <div class="section-title">Wallet Performance</div>
-        {render_wallet_table(wallet_stats, wallet_map, compact=True)}
-      </div>
-      <div class="section">
-        <div class="section-title">Per Sport</div>
-        {render_sport_grid(sport_stats)}
-      </div>
+    <div class="section">
+      <div class="section-title">Per Sport</div>
+      {render_sport_grid(sport_stats)}
     </div>"""
     return page_wrap("/", body)
 
@@ -1854,44 +1850,385 @@ def render_consensus_portfolios(results):
     return f'<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px">{cards}</div>'
 
 
-def render_strategy_page(trades, wallet_map):
-    """Strategy overview page: wallet config, performance, sizing."""
-    wallet_stats = compute_wallet_stats(trades, wallet_map)
-    src_stats = compute_source_stats(trades)
-    sport_stats = compute_sport_stats(trades)
+def compute_edge_by_bracket(trades):
+    """Compute edge per price bracket from trades.jsonl (self-calculated PnL)."""
+    filled = [t for t in trades if t.get("filled") and not t.get("dry_run")]
+    # Filter: result != phantom, timestamp >= 2026-03-17
+    resolved = [t for t in filled if t.get("result") in ("win", "loss")
+                and (t.get("timestamp") or "") >= "2026-03-17"]
+
+    brackets = [
+        ("0-20ct", 0.0, 0.20),
+        ("20-40ct", 0.20, 0.40),
+        ("40-60ct", 0.40, 0.60),
+        ("60-80ct", 0.60, 0.80),
+        ("80-100ct", 0.80, 1.01),
+    ]
+    results = []
+    for label, lo, hi in brackets:
+        group = [t for t in resolved if lo <= (t.get("price") or 0) < hi]
+        if not group:
+            results.append({"label": label, "count": 0, "wins": 0, "wr": 0, "edge": 0, "pnl": 0, "avg_price": 0})
+            continue
+        wins = [t for t in group if t.get("result") == "win"]
+        # Self-calculated PnL
+        pnl = 0.0
+        for t in group:
+            price = t.get("price") or 0
+            shares = t.get("shares") or (t.get("size_usdc", 0) / price if price > 0 else 0)
+            if t.get("result") == "win":
+                pnl += shares * (1.0 - price)
+            else:
+                pnl -= t.get("size_usdc") or (shares * price)
+        wr = len(wins) / len(group) if group else 0
+        avg_price = sum(t.get("price") or 0 for t in group) / len(group)
+        edge = wr - avg_price  # edge = actual WR - implied probability
+        results.append({
+            "label": label, "count": len(group), "wins": len(wins),
+            "wr": wr, "edge": edge, "pnl": pnl, "avg_price": avg_price,
+        })
+    return results
+
+
+def compute_edge_by_market_type(trades):
+    """Compute edge per market type (win/ml/draw/ou/spread)."""
+    filled = [t for t in trades if t.get("filled") and not t.get("dry_run")]
+    resolved = [t for t in filled if t.get("result") in ("win", "loss")
+                and (t.get("timestamp") or "") >= "2026-03-17"]
+
+    by_type = {}
+    for t in resolved:
+        title = (t.get("market_title") or "").lower()
+        if "draw" in title:
+            mtype = "draw"
+        elif "over" in title or "under" in title:
+            mtype = "over/under"
+        elif "spread" in title or "handicap" in title:
+            mtype = "spread"
+        elif "moneyline" in title or " ml " in title:
+            mtype = "moneyline"
+        else:
+            mtype = "win"
+        by_type.setdefault(mtype, []).append(t)
+
+    results = []
+    for mtype, group in sorted(by_type.items()):
+        wins = [t for t in group if t.get("result") == "win"]
+        pnl = 0.0
+        for t in group:
+            price = t.get("price") or 0
+            shares = t.get("shares") or (t.get("size_usdc", 0) / price if price > 0 else 0)
+            if t.get("result") == "win":
+                pnl += shares * (1.0 - price)
+            else:
+                pnl -= t.get("size_usdc") or (shares * price)
+        wr = len(wins) / len(group) if group else 0
+        avg_price = sum(t.get("price") or 0 for t in group) / len(group)
+        results.append({
+            "type": mtype, "count": len(group), "wins": len(wins),
+            "wr": wr, "edge": wr - avg_price, "pnl": pnl,
+        })
+    return results
+
+
+def compute_edge_by_league(trades):
+    """Compute edge per league/sport."""
+    filled = [t for t in trades if t.get("filled") and not t.get("dry_run")]
+    resolved = [t for t in filled if t.get("result") in ("win", "loss")
+                and (t.get("timestamp") or "") >= "2026-03-17"]
+
+    by_league = {}
+    for t in resolved:
+        league = t.get("sport") or "unknown"
+        by_league.setdefault(league, []).append(t)
+
+    results = []
+    for league, group in sorted(by_league.items()):
+        wins = [t for t in group if t.get("result") == "win"]
+        pnl = 0.0
+        for t in group:
+            price = t.get("price") or 0
+            shares = t.get("shares") or (t.get("size_usdc", 0) / price if price > 0 else 0)
+            if t.get("result") == "win":
+                pnl += shares * (1.0 - price)
+            else:
+                pnl -= t.get("size_usdc") or (shares * price)
+        wr = len(wins) / len(group) if group else 0
+        avg_price = sum(t.get("price") or 0 for t in group) / len(group)
+        results.append({
+            "league": league, "count": len(group), "wins": len(wins),
+            "wr": wr, "edge": wr - avg_price, "pnl": pnl,
+        })
+    results.sort(key=lambda x: x["pnl"], reverse=True)
+    return results
+
+
+def render_edge_table(bracket_data, col_name="Bracket"):
+    """Generic edge table renderer."""
+    rows = ""
+    total_trades = sum(b["count"] for b in bracket_data)
+    total_pnl = sum(b["pnl"] for b in bracket_data)
+    for b in bracket_data:
+        key = b.get("label") or b.get("type") or b.get("league") or "?"
+        cnt = b["count"]
+        if cnt == 0:
+            rows += f'<tr><td>{key}</td><td class="muted">0</td><td colspan="5" class="muted">geen data</td></tr>'
+            continue
+        wr = b["wr"]
+        edge = b["edge"]
+        pnl = b["pnl"]
+        wr_color = "#3fb950" if wr >= 0.55 else "#f85149" if wr < 0.45 else "#d29922"
+        edge_color = "#3fb950" if edge > 0.02 else "#f85149" if edge < -0.02 else "#d29922"
+        pnl_color = "#3fb950" if pnl >= 0 else "#f85149"
+        ci_note = "&#10003;" if cnt >= 30 else "&#9888;" if cnt >= 10 else "&#10007;"
+        ci_color = "#3fb950" if cnt >= 30 else "#d29922" if cnt >= 10 else "#f85149"
+        rows += f"""
+        <tr>
+          <td><strong>{key}</strong></td>
+          <td>{cnt}</td>
+          <td>{b['wins']}-{cnt - b['wins']}</td>
+          <td style="color:{wr_color}">{wr:.1%}</td>
+          <td style="color:{edge_color}">{edge:+.1%}</td>
+          <td style="color:{pnl_color}">{"+" if pnl >= 0 else ""}${pnl:.2f}</td>
+          <td style="color:{ci_color}">{ci_note}</td>
+        </tr>"""
+    # Total row
+    total_wr = sum(b["wins"] for b in bracket_data) / total_trades if total_trades else 0
+    total_avg_price = sum(b.get("avg_price", 0) * b["count"] for b in bracket_data) / total_trades if total_trades else 0
+    pnl_color = "#3fb950" if total_pnl >= 0 else "#f85149"
+    rows += f"""
+    <tr style="border-top:2px solid var(--border);font-weight:700">
+      <td>TOTAAL</td><td>{total_trades}</td>
+      <td>{sum(b['wins'] for b in bracket_data)}-{total_trades - sum(b['wins'] for b in bracket_data)}</td>
+      <td>{total_wr:.1%}</td><td></td>
+      <td style="color:{pnl_color}">{"+" if total_pnl >= 0 else ""}${total_pnl:.2f}</td><td></td>
+    </tr>"""
+
+    return f"""
+    <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>{col_name}</th><th>Trades</th><th>Record</th><th>Win Rate</th>
+        <th>Edge</th><th>P&L (calc)</th><th>CI</th>
+      </tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+    </div>
+    <div class="muted" style="font-size:0.75rem;margin-top:6px">
+      &#10003; = 30+ trades (betrouwbaar) | &#9888; = 10-29 (indicatief) | &#10007; = &lt;10 (onbetrouwbaar)
+      &nbsp;|&nbsp; P&L = zelf berekend (shares × price), niet het pnl-veld
+      &nbsp;|&nbsp; Edge = WR − gemiddelde entry price
+      &nbsp;|&nbsp; Filter: result=win/loss, timestamp ≥ 2026-03-17
+    </div>"""
+
+
+def render_edge_report_summary():
+    """Show last edge_analysis_report.md summary if available."""
+    if not EDGE_REPORT_FILE.exists():
+        return '<div class="empty">Geen edge_analysis_report.md gevonden. Draai scripts/edge_analysis.py op de VPS.</div>'
+    try:
+        text = EDGE_REPORT_FILE.read_text()
+        # Show first 60 lines max
+        lines = text.strip().split("\n")[:60]
+        preview = "\n".join(lines)
+        return f"""
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;font-size:0.82rem;line-height:1.6;max-height:400px;overflow-y:auto">
+          <pre style="white-space:pre-wrap;color:var(--text);margin:0">{preview}</pre>
+        </div>"""
+    except Exception:
+        return '<div class="empty">Kon edge rapport niet laden.</div>'
+
+
+def render_edge_page(trades, wallet_map):
+    """Edge analytics page — price brackets, market types, leagues."""
+    bracket_data = compute_edge_by_bracket(trades)
+    type_data = compute_edge_by_market_type(trades)
+    league_data = compute_edge_by_league(trades)
 
     body = f"""
     <div class="section">
-      <div class="section-title">Whale Copy Trading — 2 Wallets</div>
+      <div class="section-title">Strategie Config</div>
       {render_strategy_summary(wallet_map)}
     </div>
     <div class="section">
-      <div class="section-title">Wallet Performance</div>
-      {render_wallet_table(wallet_stats, wallet_map)}
-    </div>
-    <div class="section">
-      <div class="section-title">Per Wallet Detail</div>
-      {render_wallet_detail(trades, wallet_map, wallet_stats)}
+      <div class="section-title">Edge per Price Bracket</div>
+      {render_edge_table(bracket_data, "Bracket")}
     </div>
     <div class="two-col">
       <div class="section">
-        <div class="section-title">Signal Source</div>
-        {render_source_comparison(src_stats)}
+        <div class="section-title">Edge per Market Type</div>
+        {render_edge_table(type_data, "Type")}
       </div>
       <div class="section">
-        <div class="section-title">Per Sport</div>
-        {render_sport_grid(sport_stats)}
+        <div class="section-title">Edge per League/Sport</div>
+        {render_edge_table(league_data, "League")}
       </div>
+    </div>
+    <div class="section">
+      <div class="section-title">Edge Analysis Report (VPS script output)</div>
+      {render_edge_report_summary()}
     </div>"""
 
-    return page_wrap("/strategy", body)
+    return page_wrap("/edge", body)
+
+
+def render_ops_page(trades, wallet_map):
+    """Operations health page — data freshness, anomalies, PnL validation."""
+    import os
+
+    # Data freshness
+    freshness_items = []
+    trades_file = BASE_DIR / "data" / "trades.jsonl"
+    if trades_file.exists():
+        mtime = os.path.getmtime(trades_file)
+        age_h = (time.time() - mtime) / 3600
+        color = "#3fb950" if age_h < 1 else "#d29922" if age_h < 24 else "#f85149"
+        freshness_items.append(("trades.jsonl", f"{age_h:.1f}h oud", color))
+    else:
+        freshness_items.append(("trades.jsonl", "NIET GEVONDEN", "#f85149"))
+
+    cannae_dir = BASE_DIR / "research" / "cannae_trades"
+    if cannae_dir.exists():
+        csvs = list(cannae_dir.glob("*.csv"))
+        if csvs:
+            newest = max(os.path.getmtime(str(f)) for f in csvs)
+            age_h = (time.time() - newest) / 3600
+            color = "#3fb950" if age_h < 6 else "#d29922" if age_h < 24 else "#f85149"
+            freshness_items.append(("cannae_trades/*.csv", f"{age_h:.1f}h oud ({len(csvs)} bestanden)", color))
+        else:
+            freshness_items.append(("cannae_trades/*.csv", "GEEN CSVs", "#f85149"))
+    else:
+        freshness_items.append(("cannae_trades/", "DIR NIET GEVONDEN", "#f85149"))
+
+    edge_report = BASE_DIR / "data" / "edge_analysis_report.md"
+    if edge_report.exists():
+        age_h = (time.time() - os.path.getmtime(str(edge_report))) / 3600
+        color = "#3fb950" if age_h < 12 else "#d29922" if age_h < 48 else "#f85149"
+        freshness_items.append(("edge_analysis_report.md", f"{age_h:.1f}h oud", color))
+
+    freshness_html = ""
+    for fname, status, color in freshness_items:
+        freshness_html += f"""
+        <div class="stat-row">
+          <span>{fname}</span>
+          <span style="color:{color};font-weight:600">{status}</span>
+        </div>"""
+    freshness_section = f"""
+    <div class="source-box" style="border-top:3px solid #388bfd">
+      <div class="source-title">Data Versheid</div>
+      {freshness_html}
+    </div>"""
+
+    # Anomaly detection from trades
+    filled = [t for t in trades if t.get("filled") and not t.get("dry_run")]
+    resolved = [t for t in filled if t.get("result") in ("win", "loss", "take_profit", "sold")]
+
+    # Filter recent (last 7 days)
+    now = datetime.now(timezone.utc)
+    cutoff_7d = (now - timedelta(days=7)).isoformat()
+    recent = [t for t in filled if (t.get("timestamp") or "") >= cutoff_7d]
+    recent_resolved = [t for t in resolved if (t.get("resolved_at") or t.get("timestamp") or "") >= cutoff_7d]
+
+    # Large trades (>$30)
+    large_trades = [t for t in recent if (t.get("size_usdc") or 0) > 30]
+
+    # Phantom fills (last 7d)
+    phantoms = [t for t in trades if t.get("result") == "phantom" and (t.get("timestamp") or "") >= cutoff_7d]
+
+    # Draw trades (title contains "draw")
+    draw_trades = [t for t in recent if "draw" in (t.get("market_title") or "").lower()]
+
+    anomaly_items = []
+    if large_trades:
+        anomaly_items.append((f"{len(large_trades)} trades &gt;$30", "#f85149", "overschrijding sizing"))
+    if len(phantoms) > 3:
+        anomaly_items.append((f"{len(phantoms)} phantom fills (7d)", "#f85149", "spike in phantom detectie"))
+    elif phantoms:
+        anomaly_items.append((f"{len(phantoms)} phantom fills (7d)", "#d29922", "normaal"))
+    if draw_trades:
+        draw_pnl = sum(t.get("pnl") or 0 for t in draw_trades if t.get("result") in ("win", "loss"))
+        anomaly_items.append((f"{len(draw_trades)} draw trades (7d)", "#f85149", f"P&L: ${draw_pnl:.2f}"))
+    if not anomaly_items:
+        anomaly_items.append(("Geen anomalieën gedetecteerd", "#3fb950", "alles normaal"))
+
+    anomaly_html = ""
+    for msg, color, detail in anomaly_items:
+        anomaly_html += f"""
+        <div class="stat-row">
+          <span style="color:{color}">{msg}</span>
+          <span class="muted">{detail}</span>
+        </div>"""
+    anomaly_section = f"""
+    <div class="source-box" style="border-top:3px solid #f0883e">
+      <div class="source-title">Anomalieën (7d)</div>
+      {anomaly_html}
+    </div>"""
+
+    # PnL self-calculated vs reported
+    cutoff_17 = "2026-03-17"
+    valid = [t for t in resolved if (t.get("timestamp") or "") >= cutoff_17 and t.get("result") in ("win", "loss")]
+    calc_pnl = 0.0
+    reported_pnl = 0.0
+    for t in valid:
+        price = t.get("price") or 0
+        shares = t.get("shares") or (t.get("size_usdc", 0) / price if price > 0 else 0)
+        if t.get("result") == "win":
+            calc_pnl += shares * (1.0 - price)
+        else:
+            calc_pnl -= t.get("size_usdc") or (shares * price)
+        reported_pnl += t.get("pnl") or 0
+
+    diff = abs(calc_pnl - reported_pnl)
+    diff_color = "#3fb950" if diff < 1 else "#d29922" if diff < 5 else "#f85149"
+
+    pnl_section = f"""
+    <div class="source-box" style="border-top:3px solid #bc8cff">
+      <div class="source-title">PnL Validatie (vanaf 2026-03-17)</div>
+      <div class="stat-row"><span>Trades gevalideerd</span><span>{len(valid)}</span></div>
+      <div class="stat-row"><span>Zelf berekend</span><span style="color:{"#3fb950" if calc_pnl >= 0 else "#f85149"}">{"+" if calc_pnl >= 0 else ""}${calc_pnl:.2f}</span></div>
+      <div class="stat-row"><span>Gerapporteerd (pnl veld)</span><span style="color:{"#3fb950" if reported_pnl >= 0 else "#f85149"}">{"+" if reported_pnl >= 0 else ""}${reported_pnl:.2f}</span></div>
+      <div class="stat-row"><span>Verschil</span><span style="color:{diff_color}">${diff:.2f}</span></div>
+    </div>"""
+
+    # Quick stats tiles
+    wins_7d = [t for t in recent_resolved if t.get("result") in ("win", "take_profit")]
+    wr_7d = len(wins_7d) / len(recent_resolved) * 100 if recent_resolved else 0
+    pnl_7d = sum(t.get("pnl") or 0 for t in recent_resolved)
+    trades_per_day = len(recent) / 7.0 if recent else 0
+
+    tiles_html = ""
+    tiles = [
+        ("Trades (7d)", str(len(recent)), "#388bfd", f"{trades_per_day:.1f}/dag"),
+        ("Resolved (7d)", str(len(recent_resolved)), "#388bfd", f"{len(wins_7d)}W-{len(recent_resolved)-len(wins_7d)}L"),
+        ("WR (7d)", f"{wr_7d:.1f}%", "#3fb950" if wr_7d >= 55 else "#f85149", f"van {len(recent_resolved)} trades"),
+        ("P&L (7d)", f'{"+" if pnl_7d >= 0 else ""}${pnl_7d:.2f}', "#3fb950" if pnl_7d >= 0 else "#f85149", "gerapporteerd pnl-veld"),
+    ]
+    for label, value, color, sub in tiles:
+        tiles_html += f"""
+        <div class="kpi-tile" style="border-top:3px solid {color}">
+          <div class="kpi-label">{label}</div>
+          <div class="kpi-value">{value}</div>
+          <div class="kpi-sub">{sub}</div>
+        </div>"""
+
+    body = f"""
+    <div class="kpi-row">{tiles_html}</div>
+    <div class="source-row" style="margin-bottom:24px">
+      {freshness_section}
+      {anomaly_section}
+    </div>
+    <div class="section">
+      {pnl_section}
+    </div>"""
+
+    return page_wrap("/ops", body)
 
 
 # ── HTTP Server ───────────────────────────────────────────────────────────────
 
 class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path in ("/", "/index.html", "/trades", "/wallets", "/strategy"):
+        if self.path in ("/", "/index.html", "/trades", "/wallets", "/edge", "/ops", "/strategy"):
             try:
                 trades     = load_trades()
                 wallet_map = parse_config_wallets()
@@ -1899,8 +2236,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     html = render_trades_page(trades, wallet_map)
                 elif self.path == "/wallets":
                     html = render_wallets_page(trades, wallet_map)
+                elif self.path == "/edge":
+                    html = render_edge_page(trades, wallet_map)
+                elif self.path == "/ops":
+                    html = render_ops_page(trades, wallet_map)
                 elif self.path == "/strategy":
-                    html = render_strategy_page(trades, wallet_map)
+                    # Legacy redirect — strategy content moved to /edge
+                    html = render_edge_page(trades, wallet_map)
                 else:
                     html = render_overview(trades, wallet_map)
                 body = html.encode("utf-8")

@@ -353,12 +353,16 @@ async fn copy_trading_loop(
             }
         }
 
-        // Read stability config
-        let (stability_window, stability_threshold) = {
+        // Read stability config + allowed leagues for early filtering
+        let (stability_window, stability_threshold, stability_leagues) = {
             let c = config.read().await;
+            let leagues = c.copy_trading.watchlist.first()
+                .map(|w| w.leagues.clone())
+                .unwrap_or_default();
             (
                 c.copy_trading.stability_window_minutes,
                 c.copy_trading.stability_threshold_pct,
+                leagues,
             )
         };
 
@@ -387,7 +391,7 @@ async fn copy_trading_loop(
             }
         };
 
-        // Feed Cannae positions into stability tracker
+        // Feed Cannae positions into stability tracker (with league filter)
         for (addr, name, positions) in &raw_positions {
             stability_tracker.update(
                 addr,
@@ -395,6 +399,7 @@ async fn copy_trading_loop(
                 positions,
                 &our_event_slugs,
                 stability_threshold,
+                &stability_leagues,
             );
         }
 
@@ -455,10 +460,23 @@ async fn execute_stable_game(
     let max_legs = cfg.copy_trading.watchlist.first()
         .map(|w| w.max_legs_per_event)
         .unwrap_or(0);
+    let allowed_leagues = cfg.copy_trading.watchlist.first()
+        .map(|w| w.leagues.clone())
+        .unwrap_or_default();
     let allowed_market_types = cfg.copy_trading.watchlist.first()
         .map(|w| w.market_types.clone())
         .unwrap_or_default();
     drop(cfg);
+
+    // League filter: event_slug format is "{league}-{teams}-{date}"
+    let league_prefix = game.event_slug.split('-').next().unwrap_or("");
+    if !allowed_leagues.is_empty() && !allowed_leagues.iter().any(|l| l == league_prefix) {
+        info!(
+            "STABILITY SKIP: {} not in allowed leagues (prefix={}, allowed={:?})",
+            game.event_slug, league_prefix, allowed_leagues
+        );
+        return;
+    }
 
     // Group positions by conditionId, keep largest per condition
     let mut best_per_condition: std::collections::HashMap<
@@ -472,23 +490,35 @@ async fn execute_stable_game(
             continue;
         }
         let existing = best_per_condition.get(cid);
-        if existing.is_none() || pos.size_f64() > existing.unwrap().size_f64() {
+        // RUS-260 Fix B: Compare on $ value (initial_value), not shares.
+        // Cheap legs have more shares per dollar, biasing toward them.
+        if existing.is_none() || pos.initial_value_f64() > existing.unwrap().initial_value_f64() {
             best_per_condition.insert(cid.to_string(), pos);
         }
     }
 
-    // Filter by allowed market types and collect legs
-    let mut game_legs: Vec<&crate::clob::types::WalletPosition> = Vec::new();
-    for pos in best_per_condition.values() {
-        let title = pos.title.as_deref().unwrap_or("");
-        let market_type = CopyTrader::detect_market_type(title);
-        if !allowed_market_types.is_empty()
-            && !allowed_market_types.iter().any(|mt| mt == &market_type)
-        {
-            continue;
-        }
-        game_legs.push(pos);
-    }
+    // Hauptbet selection: best per condition, filtered by allowed market types
+    let mut game_legs: Vec<&crate::clob::types::WalletPosition> = best_per_condition
+        .values()
+        .copied()
+        .filter(|pos| {
+            if allowed_market_types.is_empty() {
+                return true;
+            }
+            let title = pos.title.as_deref().unwrap_or("");
+            let detected = CopyTrader::detect_market_type(title);
+            let allowed = allowed_market_types.iter().any(|mt| mt == &detected);
+            if !allowed {
+                info!(
+                    "STABILITY FILTER: skipping leg '{}' (type={}, allowed={:?})",
+                    &title[..title.len().min(60)],
+                    detected,
+                    allowed_market_types
+                );
+            }
+            allowed
+        })
+        .collect();
 
     // Sort by USDC size descending, apply max_legs limit
     game_legs.sort_by(|a, b| {
@@ -503,23 +533,25 @@ async fn execute_stable_game(
     // Need at least 1 leg
     if game_legs.is_empty() {
         info!(
-            "STABILITY SKIP: {} has no matching legs",
+            "STABILITY SKIP: {} has no legs after conditionId grouping",
             game.event_slug,
         );
         return;
     }
 
-    // Calculate Cannae's total USDC for ALL positions in this game
-    let cannae_game_total: f64 = game.positions.iter().map(|p| p.initial_value_f64()).sum();
-    if cannae_game_total <= 0.0 {
+    // Cannae's total USDC for SELECTED legs only (not all positions).
+    // We size based on what we actually bet on — if we only take the hauptbet,
+    // the full game_budget goes to that single leg.
+    let cannae_selected_total: f64 = game_legs.iter().map(|p| p.initial_value_f64()).sum();
+    if cannae_selected_total <= 0.0 {
         return;
     }
 
     info!(
-        "STABILITY EXECUTE: {} — {} legs, Cannae total ${:.0}",
+        "STABILITY EXECUTE: {} — {} legs, Cannae selected ${:.0}",
         game.event_slug,
         game_legs.len(),
-        cannae_game_total
+        cannae_selected_total
     );
 
     // Build AggregatedSignal for each leg and execute
@@ -588,7 +620,7 @@ async fn execute_stable_game(
 
         let mut risk_guard = risk.write().await;
         match executor
-            .execute_with_game_context(&agg_signal, &mut risk_guard, &logger, cannae_game_total)
+            .execute_with_game_context(&agg_signal, &mut risk_guard, &logger, cannae_selected_total)
             .await
         {
             Ok(filled) => {

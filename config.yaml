@@ -10,8 +10,8 @@ copy_trading:
     name: Cannae
     weight: 1.0
     sports: [all]
+    leagues: ["epl", "bun", "lal", "fl1", "uel", "arg", "mls", "rou1", "efa", "por", "bra", "itc", "ere", "es2", "bl2", "sea", "elc", "mex", "fr2", "aus", "spl", "efl", "tur"]
     market_types: ["win"]
-    leagues: ["epl", "bun", "lal", "fl1", "uel", "arg", "mls", "rou1", "efa", "por", "bra", "itc", "ere", "es2", "bl2"]
     max_legs_per_event: 1
     min_price: 0.05
     max_price: 0.95
@@ -21,7 +21,7 @@ copy_trading:
     multiplier_2: 1.0
     multiplier_3plus: 1.0
   max_delay_seconds: 60
-  max_resolution_days: 3
+  max_resolution_days: 7
   warm_poll_interval_seconds: 60
   batch_size: 8
   stability_window_minutes: 30
