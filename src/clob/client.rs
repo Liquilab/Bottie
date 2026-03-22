@@ -383,6 +383,60 @@ impl ClobClient {
         Ok(all_trades)
     }
 
+    /// Get a wallet's trades since a given timestamp.
+    /// Paginates through the Data API to find all trades after `since_unix`.
+    /// Returns trades sorted by timestamp descending (most recent first).
+    pub async fn get_trades_since(
+        &self,
+        wallet: &str,
+        since_unix: i64,
+        max_pages: u32,
+    ) -> Result<Vec<DataApiTrade>> {
+        let mut all_trades = Vec::new();
+        let mut offset: u32 = 0;
+        let page_size: u32 = 100;
+
+        for _ in 0..max_pages {
+            let url = format!(
+                "{DATA_API}/trades?maker={wallet}&limit={page_size}&offset={offset}"
+            );
+            let trades: Vec<DataApiTrade> = match self.http.get(&url).send().await {
+                Ok(resp) => resp.json::<Vec<DataApiTrade>>().await.unwrap_or_default(),
+                Err(_) => break,
+            };
+
+            let count = trades.len();
+
+            let mut past_window = false;
+            for t in &trades {
+                if let Some(ts) = t.timestamp_secs() {
+                    if ts < since_unix {
+                        past_window = true;
+                        break;
+                    }
+                }
+                all_trades.push(t.clone());
+            }
+
+            if past_window || count < page_size as usize {
+                break;
+            }
+            offset += page_size;
+        }
+
+        // Filter: only trades after since_unix
+        all_trades.retain(|t| {
+            t.timestamp_secs().map_or(false, |ts| ts >= since_unix)
+        });
+
+        // Sort descending
+        all_trades.sort_by(|a, b| {
+            b.timestamp_secs().unwrap_or(0).cmp(&a.timestamp_secs().unwrap_or(0))
+        });
+
+        Ok(all_trades)
+    }
+
     // --- Per-wallet Activity (DEPRECATED: unreliable, use get_wallet_positions instead) ---
 
     pub async fn get_wallet_activity(&self, address: &str, limit: u32) -> Result<Vec<WalletActivity>> {
