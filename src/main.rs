@@ -403,20 +403,44 @@ async fn copy_trading_loop(
             );
         }
 
-        // Collect ALL fetched positions for drain_stable (to get current data)
+        // Collect ALL fetched positions for stability check (to get current data)
         let all_cannae_positions: Vec<crate::clob::types::WalletPosition> = raw_positions
             .iter()
             .flat_map(|(_, _, positions)| positions.clone())
             .collect();
 
-        // Check for newly stable games
-        let stable_games = stability_tracker.drain_stable(
+        // Check for newly stable games — get candidates WITHOUT modifying state
+        let candidates = stability_tracker.get_ready_candidates(
             stability_window,
             &all_cannae_positions,
         );
 
-        // Process stable games: build signals, apply 3-leg filter, execute
-        for game in &stable_games {
+        // Prune stale entries periodically
+        stability_tracker.prune_stale();
+
+        // Process candidates: check if Cannae is done, then execute
+        let cannae_address = raw_positions.first()
+            .map(|(addr, _, _)| addr.as_str())
+            .unwrap_or("");
+
+        for game in &candidates {
+            // RUS-260 Fix A: check if Cannae still has recent trades on this event
+            if cannae_still_trading(&client, cannae_address, game, 120).await {
+                // Cannae still active — don't emit yet, stays in pending
+                continue;
+            }
+
+            // Cannae is done — execute and confirm
+            let wait_mins = stability_tracker.pending_summary()
+                .iter()
+                .find(|(s, _, _)| s == &game.event_slug)
+                .map(|(_, m, _)| *m)
+                .unwrap_or(0);
+            info!(
+                "STABILITY EMIT: {} after {}min (Cannae quiet for 2h+)",
+                game.event_slug, wait_mins
+            );
+
             execute_stable_game(
                 &game,
                 &mut executor,
@@ -425,6 +449,9 @@ async fn copy_trading_loop(
                 &config,
             )
             .await;
+
+            // Mark as emitted only after execution
+            stability_tracker.confirm_emitted(&game.event_slug);
         }
 
         // Log pending stability status periodically (every 20 polls = ~5 min)
@@ -443,6 +470,49 @@ async fn copy_trading_loop(
 
         tokio::time::sleep(Duration::from_secs(poll_interval)).await;
     }
+}
+
+/// Check if Cannae has recent trades on any conditionId in this event.
+/// Returns true if Cannae is still actively trading this event.
+async fn cannae_still_trading(
+    client: &ClobClient,
+    cannae_address: &str,
+    game: &stability::StableGame,
+    cooldown_minutes: u64,
+) -> bool {
+    let since = chrono::Utc::now()
+        .checked_sub_signed(chrono::Duration::minutes(cooldown_minutes as i64))
+        .unwrap_or_else(chrono::Utc::now);
+    let since_unix = since.timestamp();
+
+    let trades = match client.get_trades_since(cannae_address, since_unix, 10).await {
+        Ok(t) => t,
+        Err(e) => {
+            warn!("trades check failed for {}: {} — allowing emit", game.event_slug, e);
+            return false; // On error: allow emit (don't block on API failure)
+        }
+    };
+
+    let event_cids: std::collections::HashSet<String> = game.positions.iter()
+        .filter_map(|p| p.condition_id.clone())
+        .collect();
+
+    for trade in &trades {
+        if let Some(cid) = &trade.condition_id {
+            if event_cids.contains(cid) {
+                let age_mins = trade.timestamp_secs()
+                    .map(|ts| (chrono::Utc::now().timestamp() - ts) / 60)
+                    .unwrap_or(0);
+                info!(
+                    "STABILITY WAIT: {} — Cannae traded {}min ago on cid={}...",
+                    game.event_slug, age_mins, &cid[..12.min(cid.len())]
+                );
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 /// Build AggregatedSignals from a stable game's Cannae positions,
