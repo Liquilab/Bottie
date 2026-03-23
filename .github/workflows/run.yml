@@ -1,0 +1,27 @@
+name: Run VPS Command
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: 'Command to run on VPS'
+        required: true
+        default: 'systemctl status bottie'
+      working_dir:
+        description: 'Working directory'
+        required: false
+        default: '/root/Projects/RustedPoly'
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run command via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd ${{ github.event.inputs.working_dir }}
+            ${{ github.event.inputs.command }}
