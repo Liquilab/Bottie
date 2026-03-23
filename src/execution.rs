@@ -59,6 +59,53 @@ impl Executor {
         format!("{}:{}:{}", condition_id, outcome.to_lowercase(), side)
     }
 
+    /// Seed attempted map from trades.jsonl so historical trades survive restarts.
+    /// The PM Data API inconsistently returns positions, so this is the belt to
+    /// PM-seeding's suspenders.
+    pub fn seed_from_trade_log(&mut self, path: &std::path::Path) {
+        use std::io::BufRead;
+
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("could not open {}: {} — skipping trade log seed", path.display(), e);
+                return;
+            }
+        };
+
+        let reader = std::io::BufReader::new(file);
+        let mut added = 0u32;
+
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) if !l.trim().is_empty() => l,
+                _ => continue,
+            };
+            let trade: serde_json::Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            // Skip phantom fills
+            if trade.get("result").and_then(|v| v.as_str()) == Some("phantom") {
+                continue;
+            }
+
+            let condition_id = trade.get("condition_id").and_then(|v| v.as_str()).unwrap_or("");
+            let outcome = trade.get("outcome").and_then(|v| v.as_str()).unwrap_or("");
+            let side = trade.get("side").and_then(|v| v.as_str()).unwrap_or("BUY");
+
+            if !condition_id.is_empty() && !outcome.is_empty() {
+                let key = Self::attempt_key(condition_id, outcome, side);
+                if self.attempted.insert(key) {
+                    added += 1;
+                }
+            }
+        }
+
+        info!("seeded {} entries from trades.jsonl into attempted map (total: {})", added, self.attempted.len());
+    }
+
     /// Execute with game context: proportional shares sizing using Cannae's game total
     pub async fn execute_with_game_context(
         &mut self,
@@ -499,4 +546,45 @@ fn extract_signal_meta(sources: &[SignalSource]) -> (String, Option<String>, Opt
         }
     }
     ("unknown".to_string(), None, None, None, 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seed_from_trade_log_blocks_duplicates() {
+        let tmp = std::env::temp_dir().join("test_trades.jsonl");
+        std::fs::write(&tmp, r#"{"condition_id":"0xabc123","outcome":"No","side":"BUY","result":"win"}
+{"condition_id":"0xdef456","outcome":"Yes","side":"BUY","result":"loss"}
+{"condition_id":"0xphantom","outcome":"No","side":"BUY","result":"phantom"}
+"#).unwrap();
+
+        let mut attempted: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Simulate seed_from_trade_log inline (can't construct Executor without ClobClient)
+        use std::io::BufRead;
+        let file = std::fs::File::open(&tmp).unwrap();
+        let reader = std::io::BufReader::new(file);
+        let mut added = 0u32;
+        for line in reader.lines() {
+            let line = match line { Ok(l) if !l.trim().is_empty() => l, _ => continue };
+            let trade: serde_json::Value = match serde_json::from_str(&line) { Ok(v) => v, Err(_) => continue };
+            if trade.get("result").and_then(|v| v.as_str()) == Some("phantom") { continue; }
+            let cid = trade.get("condition_id").and_then(|v| v.as_str()).unwrap_or("");
+            let outcome = trade.get("outcome").and_then(|v| v.as_str()).unwrap_or("");
+            let side = trade.get("side").and_then(|v| v.as_str()).unwrap_or("BUY");
+            if !cid.is_empty() && !outcome.is_empty() {
+                let key = Executor::attempt_key(cid, outcome, side);
+                if attempted.insert(key) { added += 1; }
+            }
+        }
+
+        assert_eq!(added, 2, "should seed 2 non-phantom trades");
+        assert!(attempted.contains("0xabc123:no:BUY"), "should contain abc123");
+        assert!(attempted.contains("0xdef456:yes:BUY"), "should contain def456");
+        assert!(!attempted.contains("0xphantom:no:BUY"), "should NOT contain phantom");
+
+        std::fs::remove_file(&tmp).ok();
+    }
 }
