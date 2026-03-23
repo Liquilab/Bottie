@@ -371,17 +371,27 @@ async fn copy_trading_loop(
 
             let live_roi = logger.compute_wallet_roi();
 
+            // Canonicalize market type names: logger uses "total"/"moneyline",
+            // CopyTrader uses "ou"/"win". Normalize to CopyTrader names.
+            let canonical_mt = |mt: &str| -> String {
+                match mt {
+                    "total" => "ou".to_string(),
+                    "moneyline" => "win".to_string(),
+                    other => other.to_string(),
+                }
+            };
+
             roi_cache.clear();
             for ((wallet, mt), (roi, count)) in &live_roi {
                 if *count >= min_trades {
-                    roi_cache.insert((wallet.to_lowercase(), mt.clone()), *roi);
+                    roi_cache.insert((wallet.to_lowercase(), canonical_mt(mt)), *roi);
                 }
             }
 
             // Fill in seed rankings for wallets without enough live data
             for wallet_entry in &cfg.copy_trading.watchlist {
                 let name = wallet_entry.name.to_lowercase();
-                for mt in &["spread", "total", "moneyline", "ml", "draw"] {
+                for mt in &["spread", "ou", "win", "ml", "draw"] {
                     let key = (name.clone(), mt.to_string());
                     if !roi_cache.contains_key(&key) {
                         if let Some(rank) = conflict_cfg.seed_rank(&wallet_entry.name, mt) {
@@ -474,10 +484,19 @@ async fn copy_trading_loop(
         // RUS-278: Process candidates — trades check first, THEN in-memory conflict resolution
         {
             // Phase 1: Filter candidates that are still actively trading.
-            // This is the ONLY phase with API calls — same as pre-RUS-277.
+            // Dedup: one trades check per wallet, not per candidate.
+            let mut wallet_still_active: HashMap<String, bool> = HashMap::new();
             let mut ready_candidates: Vec<&stability::StableGame> = Vec::new();
             for game in &candidates {
-                if cannae_still_trading(&client, &game.source_wallet, game, 120).await {
+                let active = match wallet_still_active.get(&game.source_wallet) {
+                    Some(cached) => *cached,
+                    None => {
+                        let result = cannae_still_trading(&client, &game.source_wallet, game, 120).await;
+                        wallet_still_active.insert(game.source_wallet.clone(), result);
+                        result
+                    }
+                };
+                if active {
                     continue;
                 }
                 ready_candidates.push(game);
@@ -530,7 +549,7 @@ async fn copy_trading_loop(
                                 .filter_map(|p| p.title.as_deref())
                                 .map(|title| CopyTrader::detect_market_type(title))
                                 .next()
-                                .unwrap_or_else(|| "moneyline".to_string());
+                                .unwrap_or_else(|| "win".to_string());
 
                             let key = (game.source_name.to_lowercase(), mt.clone());
                             let roi = roi_cache.get(&key).copied().unwrap_or(f64::NEG_INFINITY);
