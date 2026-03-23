@@ -145,7 +145,7 @@ impl CopyTrader {
                     let min_price = *min_price;
                     let max_price = *max_price;
                     async move {
-                        let result = client.get_wallet_positions(&addr, 100).await;
+                        let result = client.get_wallet_positions(&addr, 500).await;
                         (addr, name, weight, market_types, leagues, max_legs, min_price, max_price, result)
                     }
                 })

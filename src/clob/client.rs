@@ -455,7 +455,7 @@ impl ClobClient {
 
         loop {
             let url = format!(
-                "{DATA_API}/positions?user={address}&limit={page_size}&sizeThreshold=0.01&sortBy=CURRENT&sortOrder=desc&offset={offset}"
+                "{DATA_API}/positions?user={address}&limit={page_size}&sizeThreshold=0.1&sortBy=CURRENT&sortOrder=desc&offset={offset}"
             );
             let page: Vec<WalletPosition> = self.http.get(&url).send().await?.error_for_status()?.json().await?;
             let count = page.len() as u32;
