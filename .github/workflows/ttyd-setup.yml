@@ -1,0 +1,40 @@
+name: Setup ttyd web terminal
+
+on:
+  workflow_dispatch:
+
+jobs:
+  setup-ttyd:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install and start ttyd
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+            if ! command -v ttyd &> /dev/null; then
+              wget -q https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.x86_64 -O /usr/local/bin/ttyd
+              chmod +x /usr/local/bin/ttyd
+            fi
+            PASS="${{ secrets.TTYD_PASSWORD }}"
+            if [ -z "$PASS" ]; then PASS=$(openssl rand -hex 8); echo "ttyd password: $PASS"; fi
+            echo "TTYD_PASSWORD=$PASS" > /etc/ttyd.env
+            cat > /etc/systemd/system/ttyd.service << 'SVCEOF'
+            [Unit]
+            Description=ttyd web terminal
+            After=network.target
+            [Service]
+            EnvironmentFile=/etc/ttyd.env
+            ExecStart=/usr/local/bin/ttyd --port 7681 --credential bottie:${TTYD_PASSWORD} bash
+            Restart=always
+            [Install]
+            WantedBy=multi-user.target
+            SVCEOF
+            systemctl daemon-reload
+            systemctl enable ttyd
+            systemctl restart ttyd
+            sleep 2
+            echo "ttyd running at http://${{ secrets.VPS_HOST }}:7681 (user: bottie)"
