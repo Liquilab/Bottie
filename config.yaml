@@ -139,3 +139,22 @@ autoresearch_params:
   sport_multipliers: {}
   timing_rules: []
   active_strategies: []
+schedule:
+  enabled: true
+  t_minus_minutes: 30
+  refresh_interval_minutes: 60
+  taker_mode: true
+  sport_tags:
+  - nba
+  - nhl
+  - soccer
+  - mlb
+  - cbb
+  - ncaa
+  - nfl
+  - ucl
+  - epl
+  - bundesliga
+  - la-liga
+  - serie-a
+  - ligue-1

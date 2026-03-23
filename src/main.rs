@@ -7,6 +7,7 @@ mod odds;
 mod portfolio;
 mod resolver;
 mod risk;
+mod scheduler;
 mod signal;
 mod signing;
 mod sizing;
@@ -24,7 +25,7 @@ use alloy_signer_local::PrivateKeySigner;
 use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::sync::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::{error, info, warn};
 
 use crate::clob::client::ClobClient;
@@ -325,6 +326,10 @@ async fn copy_trading_loop(
     let mut polls_since_stability_log: u32 = 0;
     let mut emit_cooldown: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
 
+    // T-30 schedule state
+    let mut game_schedule = scheduler::GameSchedule::new();
+    let mut t30_attempted: HashSet<String> = HashSet::new();
+
     // RUS-278: Pre-computed ROI cache — refreshed every 20 polls (~5 min), NOT per candidate.
     let mut roi_cache: HashMap<(String, String), f64> = HashMap::new();
     let mut polls_since_roi_refresh: u32 = 20; // Force immediate refresh on first cycle
@@ -620,6 +625,47 @@ async fn copy_trading_loop(
             }
         }
 
+        // --- T-30 schedule-based copy trading ---
+        {
+            let schedule_cfg = config.read().await.schedule.clone();
+            if schedule_cfg.enabled && !schedule_cfg.sport_tags.is_empty() {
+                // Refresh schedule if stale
+                if game_schedule.needs_refresh(schedule_cfg.refresh_interval_minutes as i64) {
+                    scheduler::refresh_schedule(
+                        &client,
+                        &schedule_cfg.sport_tags,
+                        &mut game_schedule,
+                    ).await;
+                }
+
+                // Check for T-30 matches
+                let watchlist = config.read().await.copy_trading.watchlist.clone();
+                let matches = scheduler::check_t30_games(
+                    &client,
+                    &game_schedule,
+                    &watchlist,
+                    schedule_cfg.t_minus_minutes as i64,
+                    &mut t30_attempted,
+                ).await;
+
+                for t30_match in &matches {
+                    let game = stability::StableGame {
+                        event_slug: t30_match.game_event_slug.clone(),
+                        positions: t30_match.positions.clone(),
+                        source_wallet: t30_match.wallet_address.clone(),
+                        source_name: t30_match.wallet_name.clone(),
+                    };
+                    info!(
+                        "T30 EXECUTE: {} from {} ({} positions)",
+                        game.event_slug, game.source_name, game.positions.len()
+                    );
+                    execute_stable_game_taker(
+                        &game, &mut executor, &risk, &logger, &config, schedule_cfg.taker_mode,
+                    ).await;
+                }
+            }
+        }
+
         tokio::time::sleep(Duration::from_secs(poll_interval)).await;
     }
 }
@@ -856,6 +902,178 @@ async fn execute_stable_game(
             }
             Err(e) => {
                 warn!("STABILITY ERROR: {}: {e}", agg_signal.market_title);
+            }
+        }
+    }
+}
+
+/// T-30 variant of execute_stable_game that supports taker mode.
+/// Delegates to execute_stable_game logic but uses execute_with_game_context_taker.
+async fn execute_stable_game_taker(
+    game: &stability::StableGame,
+    executor: &mut Executor,
+    risk: &Arc<RwLock<RiskManager>>,
+    logger: &Arc<TradeLogger>,
+    config: &SharedConfig,
+    taker_mode: bool,
+) {
+    use crate::copy_trader::CopyTrader;
+
+    let cfg = config.read().await;
+    let Some(wallet_cfg) = cfg.copy_trading.watchlist.iter()
+        .find(|w| w.address.eq_ignore_ascii_case(&game.source_wallet))
+    else {
+        warn!(
+            "T30 SKIP: no watchlist config for source wallet {}",
+            game.source_wallet
+        );
+        return;
+    };
+    let max_legs = wallet_cfg.max_legs_per_event;
+    let allowed_leagues = wallet_cfg.leagues.clone();
+    let allowed_market_types = wallet_cfg.market_types.clone();
+    drop(cfg);
+
+    // League filter
+    let league_prefix = game.event_slug.split('-').next().unwrap_or("");
+    if !allowed_leagues.is_empty() && !allowed_leagues.iter().any(|l| l == league_prefix) {
+        info!(
+            "T30 SKIP: {} not in allowed leagues (prefix={}, allowed={:?})",
+            game.event_slug, league_prefix, allowed_leagues
+        );
+        return;
+    }
+
+    // Group positions by conditionId, keep largest per condition
+    let mut best_per_condition: std::collections::HashMap<
+        String,
+        &crate::clob::types::WalletPosition,
+    > = std::collections::HashMap::new();
+
+    for pos in &game.positions {
+        let cid = pos.condition_id.as_deref().unwrap_or("");
+        if cid.is_empty() {
+            continue;
+        }
+        let existing = best_per_condition.get(cid);
+        if existing.is_none() || pos.initial_value_f64() > existing.unwrap().initial_value_f64() {
+            best_per_condition.insert(cid.to_string(), pos);
+        }
+    }
+
+    // Hauptbet selection with market type filter
+    let mut game_legs: Vec<&crate::clob::types::WalletPosition> = best_per_condition
+        .values()
+        .copied()
+        .filter(|pos| {
+            if allowed_market_types.is_empty() {
+                return true;
+            }
+            let title = pos.title.as_deref().unwrap_or("");
+            let detected = CopyTrader::detect_market_type(title);
+            allowed_market_types.iter().any(|mt| mt == &detected)
+        })
+        .collect();
+
+    game_legs.sort_by(|a, b| {
+        b.initial_value_f64()
+            .partial_cmp(&a.initial_value_f64())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if max_legs > 0 {
+        game_legs.truncate(max_legs);
+    }
+
+    if game_legs.is_empty() {
+        info!("T30 SKIP: {} has no legs after filtering", game.event_slug);
+        return;
+    }
+
+    let cannae_selected_total: f64 = game_legs.iter().map(|p| p.initial_value_f64()).sum();
+    if cannae_selected_total <= 0.0 {
+        return;
+    }
+
+    info!(
+        "T30 EXECUTE: {} — {} legs, source ${:.0}, taker={}",
+        game.event_slug, game_legs.len(), cannae_selected_total, taker_mode
+    );
+
+    for pos in &game_legs {
+        let title = pos.title.as_deref().unwrap_or("").to_string();
+        let condition_id = pos.condition_id.as_deref().unwrap_or("").to_string();
+        let outcome = pos.outcome.as_deref().unwrap_or("").to_string();
+        let token_id = pos.asset.as_deref().unwrap_or("").to_string();
+        let event_slug = pos
+            .event_slug
+            .clone()
+            .or_else(|| pos.slug.clone())
+            .unwrap_or_default()
+            .trim_end_matches("-more-markets")
+            .to_string();
+        let price = pos.avg_price_f64();
+        let sport = CopyTrader::detect_sport_static(&title, &event_slug);
+        let market_type = CopyTrader::detect_market_type(&title);
+        let source_size_usdc = pos.initial_value_f64();
+        let source_shares = pos.size_f64();
+        let confidence = (price * 1.10).min(0.95);
+
+        let agg_signal = signal::AggregatedSignal {
+            token_id,
+            condition_id,
+            side: "BUY".to_string(),
+            price,
+            market_title: title.clone(),
+            market_type,
+            sport,
+            outcome,
+            event_slug,
+            sources: vec![signal::SignalSource::Copy(signal::CopySignal {
+                source_wallet: game.source_wallet.clone(),
+                source_name: game.source_name.clone(),
+                token_id: pos.asset.as_deref().unwrap_or("").to_string(),
+                condition_id: pos.condition_id.as_deref().unwrap_or("").to_string(),
+                side: "BUY".to_string(),
+                price,
+                size: source_size_usdc,
+                market_title: title,
+                sport: CopyTrader::detect_sport_static(
+                    pos.title.as_deref().unwrap_or(""),
+                    &pos.event_slug.as_deref().unwrap_or(""),
+                ),
+                outcome: pos.outcome.as_deref().unwrap_or("").to_string(),
+                event_slug: pos
+                    .event_slug
+                    .clone()
+                    .unwrap_or_default()
+                    .trim_end_matches("-more-markets")
+                    .to_string(),
+                confidence,
+                consensus_count: 1,
+                consensus_wallets: vec![game.source_name.clone()],
+                timestamp: chrono::Utc::now(),
+                signal_delay_ms: 0,
+            })],
+            combined_confidence: confidence,
+            edge_pct: 0.0,
+            source_size_usdc,
+            source_shares,
+        };
+
+        let mut risk_guard = risk.write().await;
+        match executor
+            .execute_with_game_context_taker(
+                &agg_signal, &mut risk_guard, &logger, cannae_selected_total, taker_mode,
+            )
+            .await
+        {
+            Ok(filled) => {
+                if filled {
+                    info!("T30 FILLED: {}", agg_signal.market_title);
+                }
+            }
+            Err(e) => {
+                warn!("T30 ERROR: {}: {e}", agg_signal.market_title);
             }
         }
     }
