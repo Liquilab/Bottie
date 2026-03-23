@@ -124,8 +124,9 @@ impl StabilityTracker {
                 }
             }
 
-            // Get or create pending entry
-            let pending = self.pending.entry(event_slug.clone()).or_insert_with(|| {
+            // Get or create pending entry — compound key isolates per wallet
+            let compound_key = format!("{}::{}", event_slug, wallet_addr);
+            let pending = self.pending.entry(compound_key).or_insert_with(|| {
                 info!(
                     "STABILITY: new event {} from {} ({} legs)",
                     event_slug, wallet_name, current.len()
@@ -205,15 +206,18 @@ impl StabilityTracker {
         let window = chrono::Duration::minutes(window_minutes as i64);
         let mut ready = Vec::new();
         let mut to_remove = Vec::new();
+        let mut emitted_slugs = Vec::new();
 
-        for (event_slug, pending) in &self.pending {
+        for (compound_key, pending) in &self.pending {
+            let event_slug = compound_key.split("::").next().unwrap_or(compound_key);
+
             // Prune stale entries (no stability after 4 hours)
             if now.signed_duration_since(pending.first_seen) > chrono::Duration::hours(4) {
                 info!(
                     "STABILITY: abandoned {} after 4h without stabilizing",
                     event_slug
                 );
-                to_remove.push(event_slug.clone());
+                to_remove.push(compound_key.clone());
                 continue;
             }
 
@@ -230,7 +234,7 @@ impl StabilityTracker {
                                 .unwrap_or_default()
                                 .trim_end_matches("-more-markets")
                                 .to_string();
-                            &es == event_slug
+                            es == event_slug
                                 && p.cur_price_f64() > 0.01
                                 && p.cur_price_f64() < 0.99
                                 && p.size_f64() > 0.0
@@ -250,19 +254,22 @@ impl StabilityTracker {
                             window_minutes
                         );
                         ready.push(StableGame {
-                            event_slug: event_slug.clone(),
+                            event_slug: event_slug.to_string(),
                             positions,
                             source_wallet: pending.source_wallet.clone(),
                             source_name: pending.source_name.clone(),
                         });
                     }
-                    to_remove.push(event_slug.clone());
+                    to_remove.push(compound_key.clone());
+                    emitted_slugs.push(event_slug.to_string());
                 }
             }
         }
 
-        for slug in to_remove {
-            self.pending.remove(&slug);
+        for key in to_remove {
+            self.pending.remove(&key);
+        }
+        for slug in emitted_slugs {
             self.emitted.insert(slug);
         }
 
@@ -280,7 +287,10 @@ impl StabilityTracker {
         let window = chrono::Duration::minutes(window_minutes as i64);
         let mut ready = Vec::new();
 
-        for (event_slug, pending) in &self.pending {
+        for (compound_key, pending) in &self.pending {
+            // Parse event_slug from compound key "{event_slug}::{wallet_addr}"
+            let event_slug = compound_key.split("::").next().unwrap_or(compound_key);
+
             // Skip stale entries (>4h without stabilizing) — cleanup happens in prune_stale()
             if now.signed_duration_since(pending.first_seen) > chrono::Duration::hours(4) {
                 continue;
@@ -298,7 +308,7 @@ impl StabilityTracker {
                                 .unwrap_or_default()
                                 .trim_end_matches("-more-markets")
                                 .to_string();
-                            &es == event_slug
+                            es == event_slug
                                 && p.cur_price_f64() > 0.01
                                 && p.cur_price_f64() < 0.99
                                 && p.size_f64() > 0.0
@@ -308,7 +318,7 @@ impl StabilityTracker {
 
                     if !positions.is_empty() {
                         ready.push(StableGame {
-                            event_slug: event_slug.clone(),
+                            event_slug: event_slug.to_string(),
                             positions,
                             source_wallet: pending.source_wallet.clone(),
                             source_name: pending.source_name.clone(),
@@ -322,8 +332,15 @@ impl StabilityTracker {
     }
 
     /// Confirm that a candidate has been executed — move from pending to emitted.
+    /// Removes ALL wallet entries for this event_slug (compound keys).
     pub fn confirm_emitted(&mut self, slug: &str) {
-        self.pending.remove(slug);
+        let keys_to_remove: Vec<String> = self.pending.keys()
+            .filter(|k| k.split("::").next().unwrap_or(k) == slug)
+            .cloned()
+            .collect();
+        for key in keys_to_remove {
+            self.pending.remove(&key);
+        }
         self.emitted.insert(slug.to_string());
         info!("STABILITY: {} confirmed emitted", slug);
     }
@@ -334,12 +351,23 @@ impl StabilityTracker {
         let now = Utc::now();
         let stale: Vec<String> = self.pending.iter()
             .filter(|(_, p)| now.signed_duration_since(p.first_seen) > chrono::Duration::hours(4))
-            .map(|(slug, _)| slug.clone())
+            .map(|(key, _)| key.clone())
             .collect();
-        for slug in stale {
-            info!("STABILITY: abandoned {} after 4h without stabilizing", slug);
-            self.pending.remove(&slug);
+        for key in stale {
+            let event_slug = key.split("::").next().unwrap_or(&key);
+            info!("STABILITY: abandoned {} after 4h without stabilizing", event_slug);
+            self.pending.remove(&key);
         }
+    }
+
+    /// Group a list of stable candidates by event_slug.
+    /// Returns a map from event_slug to all StableGame entries for that event.
+    pub fn group_candidates_by_event(candidates: &[StableGame]) -> HashMap<String, Vec<&StableGame>> {
+        let mut groups: HashMap<String, Vec<&StableGame>> = HashMap::new();
+        for game in candidates {
+            groups.entry(game.event_slug.clone()).or_default().push(game);
+        }
+        groups
     }
 
     pub fn pending_count(&self) -> usize {
@@ -350,9 +378,10 @@ impl StabilityTracker {
         let now = Utc::now();
         self.pending
             .iter()
-            .map(|(slug, p)| {
+            .map(|(key, p)| {
+                let event_slug = key.split("::").next().unwrap_or(key).to_string();
                 let wait_mins = now.signed_duration_since(p.first_seen).num_minutes();
-                (slug.clone(), wait_mins, p.stable_since.is_some())
+                (event_slug, wait_mins, p.stable_since.is_some())
             })
             .collect()
     }
@@ -598,5 +627,70 @@ mod tests {
         assert_eq!(stable.len(), 1, "only EPL event should be stable");
         assert_eq!(stable[0].event_slug, "epl-ars-che-2026-03-22");
         assert_eq!(tracker.pending_count(), 0, "no NBA event in pending");
+    }
+
+    #[test]
+    fn compound_key_isolates_wallets() {
+        let mut tracker = StabilityTracker::new();
+        let our_events = HashSet::new();
+
+        let positions = vec![
+            make_position("cid1", "Yes", 100.0, 0.50, "test-event", "Will X win?"),
+        ];
+
+        // Two different wallets track the same event independently
+        tracker.update("0xWalletA", "WalletA", &positions, &our_events, 5.0, &[]);
+        tracker.update("0xWalletB", "WalletB", &positions, &our_events, 5.0, &[]);
+
+        // Both should be in pending (compound keys are different)
+        assert_eq!(tracker.pending_count(), 2, "each wallet should have its own pending entry");
+    }
+
+    #[test]
+    fn confirm_emitted_clears_all_wallets() {
+        let mut tracker = StabilityTracker::new();
+        let our_events = HashSet::new();
+
+        let positions = vec![
+            make_position("cid1", "Yes", 100.0, 0.50, "test-event", "Will X win?"),
+        ];
+
+        // Two wallets enter pending for same event
+        tracker.update("0xWalletA", "WalletA", &positions, &our_events, 5.0, &[]);
+        tracker.update("0xWalletB", "WalletB", &positions, &our_events, 5.0, &[]);
+        assert_eq!(tracker.pending_count(), 2);
+
+        // Confirm emitted should remove BOTH wallet entries
+        tracker.confirm_emitted("test-event");
+        assert_eq!(tracker.pending_count(), 0, "confirm_emitted should clear all wallet entries for the event");
+    }
+
+    #[test]
+    fn group_candidates_by_event() {
+        let pos_a = vec![
+            make_position("cid1", "Yes", 100.0, 0.50, "event-a", "Will X win?"),
+        ];
+        let pos_b = vec![
+            make_position("cid2", "Yes", 80.0, 0.60, "event-a", "Will Y win?"),
+        ];
+
+        let candidates = vec![
+            StableGame {
+                event_slug: "event-a".to_string(),
+                positions: pos_a,
+                source_wallet: "0xWalletA".to_string(),
+                source_name: "WalletA".to_string(),
+            },
+            StableGame {
+                event_slug: "event-a".to_string(),
+                positions: pos_b,
+                source_wallet: "0xWalletB".to_string(),
+                source_name: "WalletB".to_string(),
+            },
+        ];
+
+        let groups = StabilityTracker::group_candidates_by_event(&candidates);
+        assert_eq!(groups.len(), 1, "both candidates share the same event");
+        assert_eq!(groups["event-a"].len(), 2, "two wallets for event-a");
     }
 }

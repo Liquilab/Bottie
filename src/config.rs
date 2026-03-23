@@ -156,6 +156,62 @@ pub struct CopyTradingConfig {
     /// Maximum % change in shares per leg to consider positions stable
     #[serde(default = "default_stability_threshold")]
     pub stability_threshold_pct: f64,
+    /// Conflict resolution: when multiple wallets signal the same event,
+    /// pick the best wallet based on live ROI or seed ranking.
+    #[serde(default)]
+    pub conflict_resolution: ConflictResolutionConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConflictResolutionConfig {
+    #[serde(default)]
+    pub spread: Vec<String>,
+    #[serde(default)]
+    pub ou: Vec<String>,
+    #[serde(default)]
+    pub win: Vec<String>,
+    #[serde(default)]
+    pub ml: Vec<String>,
+    #[serde(default)]
+    pub draw: Vec<String>,
+    #[serde(default = "default_min_trades_for_live_roi")]
+    pub min_trades_for_live_roi: u32,
+}
+
+impl Default for ConflictResolutionConfig {
+    fn default() -> Self {
+        Self {
+            spread: vec![],
+            ou: vec![],
+            win: vec![],
+            ml: vec![],
+            draw: vec![],
+            min_trades_for_live_roi: 20,
+        }
+    }
+}
+
+fn default_min_trades_for_live_roi() -> u32 {
+    20
+}
+
+impl ConflictResolutionConfig {
+    /// Return the seed rank (0-based, lower = better) for a wallet name within a market type.
+    /// Maps both CopyTrader types ("ou", "spread", "win", "draw", "ml", "btts", "other")
+    /// and logger types ("total", "moneyline") to the correct seed list.
+    /// Returns None if the wallet is not in the seed list for that type.
+    pub fn seed_rank(&self, wallet_name: &str, market_type: &str) -> Option<usize> {
+        let list = match market_type {
+            "spread" => &self.spread,
+            "ou" | "total" => &self.ou,
+            "win" | "moneyline" => &self.win,
+            "ml" => &self.ml,
+            "draw" => &self.draw,
+            // btts, other → no seed list
+            _ => return None,
+        };
+        list.iter().position(|n| n == wallet_name)
+    }
 }
 
 fn default_warm_poll_interval() -> u64 {

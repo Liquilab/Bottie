@@ -257,6 +257,80 @@ impl TradeLogger {
         event_types.contains_key(&dedup_key)
     }
 
+    /// Compute ROI per (copy_wallet, market_type) from resolved trades.
+    /// Returns HashMap<(wallet_name, market_type), (roi_pct, trade_count)>.
+    /// market_type uses logger's classification ("spread", "total", "moneyline").
+    pub fn compute_wallet_roi(&self) -> HashMap<(String, String), (f64, u32)> {
+        let trades = self.load_all();
+        let mut stats: HashMap<(String, String), (f64, f64)> = HashMap::new(); // (pnl_sum, cost_sum)
+        let mut counts: HashMap<(String, String), u32> = HashMap::new();
+
+        for t in &trades {
+            // Only count resolved trades with a known wallet
+            if t.result.is_none() || t.copy_wallet.is_none() {
+                continue;
+            }
+            let wallet = t.copy_wallet.as_ref().unwrap().clone();
+            let mtype = Self::market_type(&t.market_title);
+
+            let pnl = t.actual_pnl.or(t.pnl).unwrap_or(0.0);
+            let cost = t.size_usdc;
+
+            let key = (wallet, mtype);
+            let entry = stats.entry(key.clone()).or_insert((0.0, 0.0));
+            entry.0 += pnl;
+            entry.1 += cost;
+            *counts.entry(key).or_insert(0) += 1;
+        }
+
+        let mut result = HashMap::new();
+        for (key, (pnl_sum, cost_sum)) in &stats {
+            let count = counts.get(key).copied().unwrap_or(0);
+            let roi_pct = if *cost_sum > 0.0 {
+                (pnl_sum / cost_sum) * 100.0
+            } else {
+                0.0
+            };
+            result.insert(key.clone(), (roi_pct, count));
+        }
+        result
+    }
+
+    /// Pick the best wallet for a given market_type based on live ROI.
+    /// Only considers wallets with at least min_trades resolved trades.
+    /// Accepts market_type in CopyTrader format ("win", "ou", "spread", etc.)
+    /// and maps to logger format ("moneyline", "total", "spread") for lookup.
+    /// Returns Some((wallet_name, roi_pct)) or None if no wallet qualifies.
+    pub fn best_wallet_for_market_type(
+        &self,
+        market_type: &str,
+        candidate_wallets: &[&str],
+        min_trades: u32,
+    ) -> Option<(String, f64)> {
+        // Map CopyTrader market types to logger market types
+        let logger_type = match market_type {
+            "win" | "ml" | "draw" => "moneyline",
+            "ou" => "total",
+            "spread" => "spread",
+            other => other,
+        };
+
+        let roi_map = self.compute_wallet_roi();
+        let mut best: Option<(String, f64)> = None;
+
+        for wallet in candidate_wallets {
+            let key = (wallet.to_string(), logger_type.to_string());
+            if let Some(&(roi, count)) = roi_map.get(&key) {
+                if count >= min_trades {
+                    if best.is_none() || roi > best.as_ref().unwrap().1 {
+                        best = Some((wallet.to_string(), roi));
+                    }
+                }
+            }
+        }
+        best
+    }
+
     /// Rewrite the entire log with updated records (used by the resolver).
     /// Thread-safe: truncates the file under the mutex then rewrites all records.
     /// Also rebuilds the open positions cache from the new data.
