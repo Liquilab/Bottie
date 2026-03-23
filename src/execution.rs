@@ -114,7 +114,19 @@ impl Executor {
         logger: &TradeLogger,
         cannae_game_total_usdc: f64,
     ) -> Result<bool> {
-        self.execute_inner(signal, risk, logger, cannae_game_total_usdc).await
+        self.execute_inner(signal, risk, logger, cannae_game_total_usdc, false).await
+    }
+
+    /// Execute with game context and taker mode (FOK on ask price)
+    pub async fn execute_with_game_context_taker(
+        &mut self,
+        signal: &AggregatedSignal,
+        risk: &mut RiskManager,
+        logger: &TradeLogger,
+        cannae_game_total_usdc: f64,
+        taker_mode: bool,
+    ) -> Result<bool> {
+        self.execute_inner(signal, risk, logger, cannae_game_total_usdc, taker_mode).await
     }
 
     /// Execute a signal: size it, risk-check it, place the order
@@ -124,7 +136,7 @@ impl Executor {
         risk: &mut RiskManager,
         logger: &TradeLogger,
     ) -> Result<bool> {
-        self.execute_inner(signal, risk, logger, 0.0).await
+        self.execute_inner(signal, risk, logger, 0.0, false).await
     }
 
     async fn execute_inner(
@@ -133,6 +145,7 @@ impl Executor {
         risk: &mut RiskManager,
         logger: &TradeLogger,
         cannae_game_total_usdc: f64,
+        taker_mode: bool,
     ) -> Result<bool> {
         // Read config values we need, then drop the lock immediately (N6: avoid holding
         // RwLock across HTTP await points which blocks config hot-reload)
@@ -234,8 +247,13 @@ impl Executor {
                         );
                         return Ok(false);
                     }
-                    // Buy at ask - 1ct for maker rebate (GTC sits in book)
-                    (ask - 0.01_f64).max(0.02)
+                    if taker_mode {
+                        // Taker mode: buy at ask price directly (FOK)
+                        ask
+                    } else {
+                        // Maker mode: buy at ask - 1ct for maker rebate (GTC sits in book)
+                        (ask - 0.01_f64).max(0.02)
+                    }
                 }
                 _ => signal.price, // fall back to signal price if orderbook unavailable or invalid
             }
@@ -404,16 +422,18 @@ impl Executor {
             return Ok(true);
         }
 
-        // Place GTC order (sits in orderbook until filled — avoids FOK kills on low liquidity)
+        // Place order: FOK for taker mode (immediate fill), GTC for maker mode (sits in book)
+        let order_type = if taker_mode { OrderType::FOK } else { OrderType::GTC };
+        let mode_label = if taker_mode { "TAKER" } else { "MAKER" };
         info!(
-            "EXECUTE: {} {} {:.0} shares @ {:.3} = ${:.2} | edge={:.1}% | {}",
-            side, signal.market_title, size, exec_price, size_usdc, signal.edge_pct, signal_source
+            "EXECUTE [{}]: {} {} {:.0} shares @ {:.3} = ${:.2} | edge={:.1}% | {}",
+            mode_label, side, signal.market_title, size, exec_price, size_usdc, signal.edge_pct, signal_source
         );
 
         let mut actual_fee = fee_bps;
         let resp = match self
             .client
-            .create_and_post_order(&signal.token_id, exec_price, size, side, OrderType::GTC, fee_bps)
+            .create_and_post_order(&signal.token_id, exec_price, size, side, order_type, fee_bps)
             .await
         {
             Ok(r) => r,
@@ -431,7 +451,7 @@ impl Executor {
                             actual_fee = correct_fee;
                             self.fee_cache.insert(signal.token_id.clone(), correct_fee);
                             self.client
-                                .create_and_post_order(&signal.token_id, exec_price, size, side, OrderType::GTC, correct_fee)
+                                .create_and_post_order(&signal.token_id, exec_price, size, side, order_type, correct_fee)
                                 .await?
                         } else {
                             return Err(e);
@@ -441,7 +461,7 @@ impl Executor {
                         actual_fee = correct_fee;
                         self.fee_cache.insert(signal.token_id.clone(), correct_fee);
                         self.client
-                            .create_and_post_order(&signal.token_id, exec_price, size, side, OrderType::GTC, correct_fee)
+                            .create_and_post_order(&signal.token_id, exec_price, size, side, order_type, correct_fee)
                             .await?
                     } else {
                         return Err(e);

@@ -7,6 +7,7 @@ mod odds;
 mod portfolio;
 mod resolver;
 mod risk;
+mod scheduler;
 mod signal;
 mod signing;
 mod sizing;
@@ -24,7 +25,7 @@ use alloy_signer_local::PrivateKeySigner;
 use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::sync::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::{error, info, warn};
 
 use crate::clob::client::ClobClient;
@@ -325,6 +326,10 @@ async fn copy_trading_loop(
     let mut polls_since_stability_log: u32 = 0;
     let mut emit_cooldown: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
 
+    // T-30 schedule state
+    let mut game_schedule = scheduler::GameSchedule::new();
+    let mut t30_attempted: HashSet<String> = HashSet::new();
+
     // RUS-278: Pre-computed ROI cache — refreshed every 20 polls (~5 min), NOT per candidate.
     let mut roi_cache: HashMap<(String, String), f64> = HashMap::new();
     let mut polls_since_roi_refresh: u32 = 20; // Force immediate refresh on first cycle
@@ -614,7 +619,7 @@ async fn copy_trading_loop(
                     );
 
                     execute_stable_game(
-                        winner, &mut executor, &risk, &logger, &config
+                        winner, &mut executor, &risk, &logger, &config, false
                     ).await;
                     stability_tracker.confirm_emitted(event_slug);
                 }
@@ -631,6 +636,49 @@ async fn copy_trading_loop(
                 for (slug, wait_mins, is_stable) in &summary {
                     let state = if *is_stable { "stable" } else { "filling" };
                     info!("STABILITY PENDING: {} ({}min, {})", slug, wait_mins, state);
+                }
+            }
+        }
+
+        // --- T-30 schedule-based copy trading ---
+        {
+            let (schedule_cfg, watchlist) = {
+                let c = config.read().await;
+                (c.schedule.clone(), c.copy_trading.watchlist.clone())
+            };
+            if schedule_cfg.enabled && !schedule_cfg.sport_tags.is_empty() {
+                // Refresh schedule if stale
+                if game_schedule.needs_refresh(schedule_cfg.refresh_interval_minutes as i64) {
+                    scheduler::refresh_schedule(
+                        &client,
+                        &schedule_cfg.sport_tags,
+                        &mut game_schedule,
+                    ).await;
+                }
+
+                // Check for T-30 matches
+                let matches = scheduler::check_t30_games(
+                    &client,
+                    &game_schedule,
+                    &watchlist,
+                    schedule_cfg.t_minus_minutes as i64,
+                    &mut t30_attempted,
+                ).await;
+
+                for t30_match in &matches {
+                    let game = stability::StableGame {
+                        event_slug: t30_match.game_event_slug.clone(),
+                        positions: t30_match.positions.clone(),
+                        source_wallet: t30_match.wallet_address.clone(),
+                        source_name: t30_match.wallet_name.clone(),
+                    };
+                    info!(
+                        "T30 EXECUTE: {} from {} ({} positions)",
+                        game.event_slug, game.source_name, game.positions.len()
+                    );
+                    execute_stable_game(
+                        &game, &mut executor, &risk, &logger, &config, schedule_cfg.taker_mode,
+                    ).await;
                 }
             }
         }
@@ -690,6 +738,7 @@ async fn execute_stable_game(
     risk: &Arc<RwLock<RiskManager>>,
     logger: &Arc<TradeLogger>,
     config: &SharedConfig,
+    taker_mode: bool,
 ) {
     use crate::copy_trader::CopyTrader;
 
@@ -860,21 +909,25 @@ async fn execute_stable_game(
         };
 
         let mut risk_guard = risk.write().await;
-        match executor
-            .execute_with_game_context(&agg_signal, &mut risk_guard, &logger, cannae_selected_total)
-            .await
-        {
+        let label = if taker_mode { "T30" } else { "STABILITY" };
+        let result = if taker_mode {
+            executor.execute_with_game_context_taker(&agg_signal, &mut risk_guard, &logger, cannae_selected_total, true).await
+        } else {
+            executor.execute_with_game_context(&agg_signal, &mut risk_guard, &logger, cannae_selected_total).await
+        };
+        match result {
             Ok(filled) => {
                 if filled {
-                    info!("STABILITY FILLED: {}", agg_signal.market_title);
+                    info!("{} FILLED: {}", label, agg_signal.market_title);
                 }
             }
             Err(e) => {
-                warn!("STABILITY ERROR: {}: {e}", agg_signal.market_title);
+                warn!("{} ERROR: {}: {e}", label, agg_signal.market_title);
             }
         }
     }
 }
+
 
 async fn odds_arb_loop(
     client: Arc<ClobClient>,

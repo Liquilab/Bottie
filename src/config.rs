@@ -102,6 +102,30 @@ pub struct AppConfig {
     pub autoresearch: AutoresearchConfig,
     #[serde(default)]
     pub autoresearch_params: AutoresearchParams,
+    #[serde(default)]
+    pub schedule: ScheduleConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ScheduleConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_t_minus")]
+    pub t_minus_minutes: u32,
+    #[serde(default = "default_refresh_interval")]
+    pub refresh_interval_minutes: u32,
+    #[serde(default)]
+    pub taker_mode: bool,
+    #[serde(default)]
+    pub sport_tags: Vec<String>,
+}
+
+fn default_t_minus() -> u32 {
+    30
+}
+
+fn default_refresh_interval() -> u32 {
+    60
 }
 
 #[derive(Debug, Clone, Deserialize)]
