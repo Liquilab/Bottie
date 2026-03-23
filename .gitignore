@@ -1,16 +1,40 @@
+# Build
 /target
+
+# Environment
 .env
+
+# Text files (except requirements)
 *.txt
 !requirements.txt
+
+# Data (local only, not deployed)
 data/trades.jsonl
 data/wallet_trades/
 data/leaderboard/
+data/sessions/
+data/scout_candidates.json
+data/scout_evaluated.json
+data/*.json
+
+# Research
 research/hypotheses/*.json
+research/.venv/
+research/data_lake/prices/
+research/data_lake/trades/
+research/cannae_trades/*.csv
+
+# Logs
 *.log
+
+# OS / IDE
 .DS_Store
 __pycache__/
 *.pyc
-research/.venv/
+
+# Local
 private/
-data/sessions/
 tmp/
+COWORK.md
+COWORK_PROMPT.md
+*.bak
