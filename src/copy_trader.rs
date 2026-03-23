@@ -587,6 +587,8 @@ impl CopyTrader {
             "ou".to_string()
         } else if t.contains("spread") {
             "spread".to_string()
+        } else if t.contains("both teams to score") || t.contains("btts") {
+            "btts".to_string()
         } else if t.contains("draw") {
             "draw".to_string()
         } else if t.contains("vs.") {
@@ -953,5 +955,117 @@ mod tests {
         assert_eq!(mult(2), 1.5);
         assert_eq!(mult(3), 2.0);
         assert_eq!(mult(10), 2.0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // RUS-239: Market type detection + draw filter
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn detect_market_type_win() {
+        assert_eq!(CopyTrader::detect_market_type("Will Manchester City win on April 5?"), "win");
+        assert_eq!(CopyTrader::detect_market_type("Will Arsenal win the Premier League?"), "win");
+        // Case insensitive
+        assert_eq!(CopyTrader::detect_market_type("Will Arsenal WIN ON matchday 30?"), "win");
+    }
+
+    #[test]
+    fn detect_market_type_draw() {
+        assert_eq!(
+            CopyTrader::detect_market_type("Will Villarreal CF vs. Real Sociedad de Fútbol end in a draw?"),
+            "draw"
+        );
+        assert_eq!(
+            CopyTrader::detect_market_type("Will Hull City AFC vs. Sheffield Wednesday FC end in a draw?"),
+            "draw"
+        );
+        // Case variations
+        assert_eq!(CopyTrader::detect_market_type("Will X vs Y end in a Draw?"), "draw");
+    }
+
+    #[test]
+    fn detect_market_type_ou_spread_ml() {
+        assert_eq!(CopyTrader::detect_market_type("Will O/U 2.5 goals in Arsenal match?"), "ou");
+        assert_eq!(CopyTrader::detect_market_type("Will Spread -1.5 cover?"), "spread");
+        assert_eq!(CopyTrader::detect_market_type("Arsenal vs. Chelsea"), "ml");
+    }
+
+    #[test]
+    fn detect_market_type_btts() {
+        assert_eq!(
+            CopyTrader::detect_market_type("Querétaro FC vs. FC Juárez: Both Teams to Score"),
+            "btts"
+        );
+        assert_eq!(
+            CopyTrader::detect_market_type("Arsenal vs Leverkusen BTTS"),
+            "btts"
+        );
+    }
+
+    #[test]
+    fn detect_market_type_other() {
+        assert_eq!(CopyTrader::detect_market_type("Some random market title"), "other");
+    }
+
+    #[test]
+    fn market_type_filter_allows_win_blocks_draw() {
+        // Simulates the filter logic in execute_stable_game (RUS-239 fix)
+        let allowed: Vec<String> = vec!["win".to_string()];
+
+        let win_title = "Will Arsenal win on matchday 30?";
+        let draw_title = "Will Arsenal vs. Chelsea end in a draw?";
+        let ou_title = "Will O/U 2.5 goals in Arsenal match?";
+        let ml_title = "Arsenal vs. Chelsea";
+
+        let is_allowed = |title: &str| -> bool {
+            if allowed.is_empty() { return true; }
+            let detected = CopyTrader::detect_market_type(title);
+            allowed.iter().any(|mt| mt == &detected)
+        };
+
+        assert!(is_allowed(win_title), "win should be allowed");
+        assert!(!is_allowed(draw_title), "draw should be BLOCKED");
+        assert!(!is_allowed(ou_title), "ou should be BLOCKED");
+        assert!(!is_allowed(ml_title), "ml should be BLOCKED");
+    }
+
+    #[test]
+    fn market_type_filter_empty_allows_all() {
+        let allowed: Vec<String> = vec![];
+
+        let is_allowed = |title: &str| -> bool {
+            if allowed.is_empty() { return true; }
+            let detected = CopyTrader::detect_market_type(title);
+            allowed.iter().any(|mt| mt == &detected)
+        };
+
+        assert!(is_allowed("Will Arsenal vs. Chelsea end in a draw?"));
+        assert!(is_allowed("Arsenal vs. Chelsea"));
+        assert!(is_allowed("Will Arsenal win on matchday 30?"));
+    }
+
+    #[test]
+    fn real_leaked_draw_titles_blocked() {
+        // Actual titles from trades_vps.jsonl that leaked through the old code
+        let allowed: Vec<String> = vec!["win".to_string()];
+        let leaked_titles = vec![
+            "Will Rodez Aveyron Football vs. SC Bastia end in a draw?",
+            "Will Western Sydney Wanderers FC vs. Adelaide United FC end in a draw?",
+            "Will FC CFR 1907 Cluj vs. FC Rapid 1923 end in a draw?",
+            "Will Villarreal CF vs. Real Sociedad de Fútbol end in a draw?",
+            "Will Hull City AFC vs. Sheffield Wednesday FC end in a draw?",
+            "Will AFC Bournemouth vs. Manchester United FC end in a draw?",
+            "Will RB Leipzig vs. TSG 1899 Hoffenheim end in a draw?",
+        ];
+
+        for title in &leaked_titles {
+            let detected = CopyTrader::detect_market_type(title);
+            assert_eq!(detected, "draw", "title should be detected as draw: {}", title);
+            assert!(
+                !allowed.iter().any(|mt| mt == &detected),
+                "draw title should be BLOCKED by market_types=[\"win\"]: {}",
+                title
+            );
+        }
     }
 }
