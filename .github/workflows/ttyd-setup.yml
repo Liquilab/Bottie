@@ -1,0 +1,40 @@
+name: Setup ttyd Web Terminal
+
+on:
+  workflow_dispatch:
+
+jobs:
+  setup-ttyd:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install and configure ttyd
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            # Download ttyd binary
+            wget -O /usr/local/bin/ttyd https://github.com/tsl0922/ttyd/releases/download/1.7.3/ttyd.x86_64
+            chmod +x /usr/local/bin/ttyd
+
+            # Create systemd service
+            cat > /etc/systemd/system/ttyd.service << 'EOF'
+            [Unit]
+            Description=ttyd Web Terminal
+            After=network.target
+
+            [Service]
+            ExecStart=/usr/local/bin/ttyd --port 7681 --credential bottie:${{ secrets.TTYD_PASSWORD }} bash
+            Restart=always
+            RestartSec=3
+
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+
+            systemctl daemon-reload
+            systemctl enable ttyd
+            systemctl restart ttyd
+            systemctl status ttyd --no-pager
+            echo "ttyd running on port 7681"
