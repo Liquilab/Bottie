@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Deploy to VPS
-        uses: appleboy/ssh-action@v1.0.3
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ secrets.VPS_HOST }}
           username: root
@@ -27,18 +27,26 @@ jobs:
             set -e
             cd /root/Projects/RustedPoly
             git pull origin main
-            cargo build --release 2>&1 | tail -5
-            systemctl restart bottie || (pkill -f bottie; sleep 1; nohup ./target/release/bottie &)
+            cargo build --release 2>&1 | tail -50
+            systemctl daemon-reload
+            systemctl restart bottie
             sleep 3
             systemctl status bottie 2>/dev/null | head -5 || pgrep -a bottie
 
       - name: Run extra command
         if: ${{ inputs.command != '' }}
-        uses: appleboy/ssh-action@v1.0.3
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ secrets.VPS_HOST }}
           username: root
           key: ${{ secrets.VPS_SSH_KEY }}
+          envs: EXTRA_CMD
+          env:
+            EXTRA_CMD: ${{ inputs.command }}
           script: |
-            cd /root/Projects/RustedPoly
-            ${{ inputs.command }}
+            case "$EXTRA_CMD" in
+              "status") systemctl status bottie ;;
+              "logs") journalctl -u bottie -n 50 ;;
+              "restart") systemctl restart bottie ;;
+              *) echo "Unknown command: $EXTRA_CMD"; exit 1 ;;
+            esac
