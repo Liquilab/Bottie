@@ -24,6 +24,7 @@ use alloy_signer_local::PrivateKeySigner;
 use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::sync::RwLock;
+use std::collections::HashMap;
 use tracing::{error, info, warn};
 
 use crate::clob::client::ClobClient;
@@ -322,6 +323,7 @@ async fn copy_trading_loop(
     }
     let mut polls_since_sync: u32 = 0;
     let mut polls_since_stability_log: u32 = 0;
+    let mut emit_cooldown: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
 
     loop {
         let poll_interval = {
@@ -427,27 +429,122 @@ async fn copy_trading_loop(
         // Prune stale entries periodically
         stability_tracker.prune_stale();
 
-        // Process candidates: check if source wallet is done, then execute
-        for game in &candidates {
-            // RUS-260 Fix A: check if source wallet still has recent trades on this event
-            if cannae_still_trading(&client, &game.source_wallet, game, 120).await {
-                // Cannae still active — don't emit yet, stays in pending
+        // Process candidates: group by event, resolve conflicts, execute
+        let grouped = stability::StabilityTracker::group_candidates_by_event(&candidates);
+
+        for (event_slug, wallet_games) in &grouped {
+            // Filter out wallets still actively trading
+            let mut ready_games: Vec<&stability::StableGame> = Vec::new();
+            for game in wallet_games {
+                if cannae_still_trading(&client, &game.source_wallet, game, 120).await {
+                    continue;
+                }
+                ready_games.push(game);
+            }
+
+            if ready_games.is_empty() {
                 continue;
             }
 
-            // Cannae is done — execute and confirm
+            // Emit cooldown: when multiple wallets, wait 30s after first candidate
+            // to give other wallets time to stabilize before resolving
+            if ready_games.len() > 1 || wallet_games.len() > 1 {
+                let now = chrono::Utc::now();
+                let cooldown_entry = emit_cooldown.entry(event_slug.clone())
+                    .or_insert(now);
+                let elapsed = now.signed_duration_since(*cooldown_entry);
+                if elapsed < chrono::Duration::seconds(30) {
+                    let remaining = 30 - elapsed.num_seconds();
+                    info!(
+                        "CONFLICT COOLDOWN: {} — waiting {}s for more wallets",
+                        event_slug, remaining
+                    );
+                    continue;
+                }
+            }
+
+            // Remove cooldown entry once we proceed
+            emit_cooldown.remove(event_slug.as_str());
+
+            let chosen_game = if ready_games.len() == 1 {
+                // Single wallet → execute directly
+                ready_games[0]
+            } else {
+                // Multiple wallets → conflict resolution
+                let wallet_names: Vec<&str> = ready_games.iter()
+                    .map(|g| g.source_name.as_str())
+                    .collect();
+                info!(
+                    "CONFLICT DETECTED: {} — {} wallets: {:?}",
+                    event_slug, ready_games.len(), wallet_names
+                );
+
+                // Detect market type from first position
+                let market_type = ready_games[0].positions.first()
+                    .and_then(|p| p.title.as_deref())
+                    .map(|t| CopyTrader::detect_market_type(t))
+                    .unwrap_or_else(|| "other".to_string());
+
+                // Try live ROI first
+                let conflict_cfg = config.read().await.copy_trading.conflict_resolution.clone();
+                let min_trades = conflict_cfg.min_trades_for_live_roi;
+
+                let roi_winner = logger.best_wallet_for_market_type(
+                    &market_type,
+                    &wallet_names,
+                    min_trades,
+                );
+
+                if let Some((best_wallet, roi_pct)) = &roi_winner {
+                    info!(
+                        "CONFLICT ROI: {} — best={} roi={:.1}% (type={})",
+                        event_slug, best_wallet, roi_pct, market_type
+                    );
+                    ready_games.iter()
+                        .find(|g| g.source_name == *best_wallet)
+                        .unwrap_or(&ready_games[0])
+                } else {
+                    // Fall back to seed ranking
+                    let mut best_idx = 0;
+                    let mut best_rank: Option<usize> = None;
+                    for (i, game) in ready_games.iter().enumerate() {
+                        if let Some(rank) = conflict_cfg.seed_rank(&game.source_name, &market_type) {
+                            if best_rank.is_none() || rank < best_rank.unwrap() {
+                                best_rank = Some(rank);
+                                best_idx = i;
+                            }
+                        }
+                    }
+                    info!(
+                        "CONFLICT RESOLVED: {} — picked {} (seed rank, type={})",
+                        event_slug, ready_games[best_idx].source_name, market_type
+                    );
+                    ready_games[best_idx]
+                }
+            };
+
+            // Log skipped wallets
+            for game in &ready_games {
+                if game.source_wallet != chosen_game.source_wallet {
+                    info!(
+                        "CONFLICT SKIP: {} — skipping wallet {}",
+                        event_slug, game.source_name
+                    );
+                }
+            }
+
             let wait_mins = stability_tracker.pending_summary()
                 .iter()
-                .find(|(s, _, _)| s == &game.event_slug)
+                .find(|(s, _, _)| s == event_slug)
                 .map(|(_, m, _)| *m)
                 .unwrap_or(0);
             info!(
-                "STABILITY EMIT: {} after {}min (Cannae quiet for 2h+)",
-                game.event_slug, wait_mins
+                "STABILITY EMIT: {} after {}min (wallet={}, quiet for 2h+)",
+                event_slug, wait_mins, chosen_game.source_name
             );
 
             execute_stable_game(
-                &game,
+                chosen_game,
                 &mut executor,
                 &risk,
                 &logger,
@@ -455,8 +552,8 @@ async fn copy_trading_loop(
             )
             .await;
 
-            // Mark as emitted only after execution
-            stability_tracker.confirm_emitted(&game.event_slug);
+            // Mark as emitted — removes ALL wallet entries for this event
+            stability_tracker.confirm_emitted(event_slug);
         }
 
         // Log pending stability status periodically (every 20 polls = ~5 min)

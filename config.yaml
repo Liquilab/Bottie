@@ -6,32 +6,87 @@ copy_trading:
   enabled: true
   poll_interval_seconds: 15
   watchlist:
-  - address: "0x7ea571c40408f340c1c8fc8eaacebab53c1bde7b"
+  - address: '0x7ea571c40408f340c1c8fc8eaacebab53c1bde7b'
     name: Cannae
     weight: 1.0
-    sports: [all]
-    leagues: ["epl", "bun", "lal", "fl1", "uel", "arg", "mls", "rou1", "efa", "por", "bra", "itc", "ere", "es2", "bl2", "sea", "elc", "mex", "fr2", "aus", "spl", "efl", "tur"]
-    market_types: ["win"]
+    sports:
+    - all
+    leagues:
+    - epl
+    - bun
+    - lal
+    - fl1
+    - uel
+    - arg
+    - mls
+    - rou1
+    - efa
+    - por
+    - bra
+    - itc
+    - ere
+    - es2
+    - bl2
+    - sea
+    - elc
+    - mex
+    - fr2
+    - aus
+    - spl
+    - efl
+    - tur
+    market_types:
+    - spread
+    - win
     max_legs_per_event: 1
-    min_price: 0.05
+    min_price: 0.4
     max_price: 0.95
-  - address: "0xee613b3fe3cb6b78631f0845ba308a5e31e7517a"
+  - address: '0xee613b3fc183ee44f9da9c05f53e2da107e3debf'
     name: Sovereign
     weight: 1.0
-    sports: [all]
-    leagues: ["nba", "other", "ucl"]
-    market_types: ["over_under"]
+    market_types:
+    - ou
+    leagues:
+    - nba
+    - cbb
+    - ucl
     max_legs_per_event: 1
-    min_price: 0.05
+    min_price: 0.4
     max_price: 0.95
-  - address: "0x6a72f61820b26b1fe4d956e17b6dc2a1ea3033ee"
+    sports:
+    - all
+  - address: '0x6a72f61820b26b1fe4d956e17b6dc2a1ea3033ee'
     name: kch123
     weight: 1.0
-    sports: [all]
-    leagues: ["nba", "nhl", "ucl"]
-    market_types: ["win", "spread"]
+    sports:
+    - all
+    leagues:
+    - nba
+    - nhl
+    - ucl
+    market_types:
+    - spread
+    - ou
     max_legs_per_event: 2
-    min_price: 0.05
+    min_price: 0.4
+    max_price: 0.95
+  - address: '0x339a0e5aea39a7db5cea5b0003abab33c78c1eae'
+    name: Tokidoki
+    weight: 1.0
+    sports:
+    - all
+    leagues:
+    - nba
+    - nhl
+    - ncaa
+    - mlb
+    - nfl
+    - cbb
+    market_types:
+    - ou
+    - spread
+    max_legs_per_event: 2
+    min_price: 0.4
     max_price: 0.95
   consensus:
     min_traders: 1
@@ -44,17 +99,25 @@ copy_trading:
   batch_size: 8
   stability_window_minutes: 30
   stability_threshold_pct: 5.0
+  conflict_resolution:
+    spread: ["Cannae", "kch123", "Tokidoki"]
+    ou: ["Tokidoki", "kch123", "Sovereign"]
+    win: ["Cannae"]
+    ml: []
+    draw: []
+    min_trades_for_live_roi: 20
 odds_arb:
   enabled: false
   poll_interval_seconds: 300
   base_url: https://api.the-odds-api.com/v4
-  sports: [basketball_nba]
+  sports:
+  - basketball_nba
   min_edge_pct: 3.0
 sizing:
   kelly_fraction: 0.25
   max_bet_pct: 3.0
   copy_base_size_pct: 20.0
-  min_price: 0.05
+  min_price: 0.4
   max_price: 0.95
   portfolio_reference_usdc: 800
 take_profit:
