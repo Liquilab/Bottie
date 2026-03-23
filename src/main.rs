@@ -393,11 +393,14 @@ async fn copy_trading_loop(
         {
             let c = config.read().await;
             for (addr, name, positions) in &raw_positions {
-                // Look up this wallet's leagues from config
-                let wallet_leagues = c.copy_trading.watchlist.iter()
+                // Fail closed: skip wallets not in watchlist config
+                let Some(wallet_cfg) = c.copy_trading.watchlist.iter()
                     .find(|w| w.address.eq_ignore_ascii_case(addr))
-                    .map(|w| w.leagues.clone())
-                    .unwrap_or_default();
+                else {
+                    warn!("STABILITY SKIP: no watchlist config for source wallet {}", addr);
+                    continue;
+                };
+                let wallet_leagues = wallet_cfg.leagues.clone();
                 stability_tracker.update(
                     addr,
                     name,
@@ -529,12 +532,19 @@ async fn execute_stable_game(
     use crate::copy_trader::CopyTrader;
 
     let cfg = config.read().await;
-    // Look up config for the wallet that sourced this game
-    let wallet_cfg = cfg.copy_trading.watchlist.iter()
-        .find(|w| w.address.eq_ignore_ascii_case(&game.source_wallet));
-    let max_legs = wallet_cfg.map(|w| w.max_legs_per_event).unwrap_or(0);
-    let allowed_leagues = wallet_cfg.map(|w| w.leagues.clone()).unwrap_or_default();
-    let allowed_market_types = wallet_cfg.map(|w| w.market_types.clone()).unwrap_or_default();
+    // Fail closed: skip games sourced from wallets not in watchlist config
+    let Some(wallet_cfg) = cfg.copy_trading.watchlist.iter()
+        .find(|w| w.address.eq_ignore_ascii_case(&game.source_wallet))
+    else {
+        warn!(
+            "EXECUTE SKIP: no watchlist config for source wallet {}",
+            game.source_wallet
+        );
+        return;
+    };
+    let max_legs = wallet_cfg.max_legs_per_event;
+    let allowed_leagues = wallet_cfg.leagues.clone();
+    let allowed_market_types = wallet_cfg.market_types.clone();
     drop(cfg);
 
     // League filter: event_slug format is "{league}-{teams}-{date}"
