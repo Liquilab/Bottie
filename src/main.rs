@@ -302,6 +302,8 @@ async fn copy_trading_loop(
         match client.get_wallet_positions(&funder, 500).await {
             Ok(positions) => {
                 executor.seed_from_positions(&positions);
+                // RUS-266: also seed from trades.jsonl — PM API inconsistently returns positions
+                executor.seed_from_trade_log(std::path::Path::new("data/trades.jsonl"));
                 // Seed stability tracker: events we already hold should never re-enter
                 let our_events = positions
                     .iter()
