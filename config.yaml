@@ -67,7 +67,7 @@ copy_trading:
     market_types:
     - spread
     - ou
-    max_legs_per_event: 2
+    max_legs_per_event: 1
     min_price: 0.4
     max_price: 0.95
   - address: '0x339a0e5aea39a7db5cea5b0003abab33c78c1eae'
