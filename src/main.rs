@@ -325,6 +325,10 @@ async fn copy_trading_loop(
     let mut polls_since_stability_log: u32 = 0;
     let mut emit_cooldown: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
 
+    // RUS-278: Pre-computed ROI cache — refreshed every 20 polls (~5 min), NOT per candidate.
+    let mut roi_cache: HashMap<(String, String), f64> = HashMap::new();
+    let mut polls_since_roi_refresh: u32 = 20; // Force immediate refresh on first cycle
+
     loop {
         let poll_interval = {
             let c = config.read().await;
@@ -355,6 +359,54 @@ async fn copy_trading_loop(
                 let mut r = risk.write().await;
                 r.sync_full(&open_context);
             }
+        }
+
+        // RUS-278: Refresh ROI cache periodically (every 20 polls = ~5 min)
+        polls_since_roi_refresh += 1;
+        if polls_since_roi_refresh >= 20 {
+            polls_since_roi_refresh = 0;
+            let cfg = config.read().await;
+            let conflict_cfg = &cfg.copy_trading.conflict_resolution;
+            let min_trades = conflict_cfg.min_trades_for_live_roi;
+
+            let live_roi = logger.compute_wallet_roi();
+
+            // Canonicalize market type names: logger uses "total"/"moneyline",
+            // CopyTrader uses "ou"/"win". Normalize to CopyTrader names.
+            let canonical_mt = |mt: &str| -> String {
+                match mt {
+                    "total" => "ou".to_string(),
+                    "moneyline" => "win".to_string(),
+                    other => other.to_string(),
+                }
+            };
+
+            roi_cache.clear();
+            for ((wallet, mt), (roi, count)) in &live_roi {
+                if *count >= min_trades {
+                    roi_cache.insert((wallet.to_lowercase(), canonical_mt(mt)), *roi);
+                }
+            }
+
+            // Fill in seed rankings for wallets without enough live data
+            for wallet_entry in &cfg.copy_trading.watchlist {
+                let name = wallet_entry.name.to_lowercase();
+                for mt in &["spread", "ou", "win", "ml", "draw"] {
+                    let key = (name.clone(), mt.to_string());
+                    if !roi_cache.contains_key(&key) {
+                        if let Some(rank) = conflict_cfg.seed_rank(&wallet_entry.name, mt) {
+                            roi_cache.insert(key, 100.0 - rank as f64);
+                        }
+                    }
+                }
+            }
+
+            drop(cfg);
+            info!(
+                "ROI CACHE: refreshed — {} entries ({} from live data)",
+                roi_cache.len(),
+                live_roi.values().filter(|(_, count)| *count >= 20).count()
+            );
         }
 
         // Read stability config
@@ -429,131 +481,129 @@ async fn copy_trading_loop(
         // Prune stale entries periodically
         stability_tracker.prune_stale();
 
-        // Process candidates: group by event, resolve conflicts, execute
-        let grouped = stability::StabilityTracker::group_candidates_by_event(&candidates);
-
-        for (event_slug, wallet_games) in &grouped {
-            // Filter out wallets still actively trading
-            let mut ready_games: Vec<&stability::StableGame> = Vec::new();
-            for game in wallet_games {
-                if cannae_still_trading(&client, &game.source_wallet, game, 120).await {
+        // RUS-278: Process candidates — trades check first, THEN in-memory conflict resolution
+        {
+            // Phase 1: Filter candidates that are still actively trading.
+            // Dedup: one trades check per wallet, not per candidate.
+            let mut wallet_still_active: HashMap<String, bool> = HashMap::new();
+            let mut ready_candidates: Vec<&stability::StableGame> = Vec::new();
+            for game in &candidates {
+                let active = match wallet_still_active.get(&game.source_wallet) {
+                    Some(cached) => *cached,
+                    None => {
+                        let result = cannae_still_trading(&client, &game.source_wallet, game, 120).await;
+                        wallet_still_active.insert(game.source_wallet.clone(), result);
+                        result
+                    }
+                };
+                if active {
                     continue;
                 }
-                ready_games.push(game);
+                ready_candidates.push(game);
             }
 
-            if ready_games.is_empty() {
-                continue;
-            }
-
-            // Emit cooldown: when multiple wallets, wait 30s after first candidate
-            // to give other wallets time to stabilize before resolving
-            if ready_games.len() > 1 || wallet_games.len() > 1 {
-                let now = chrono::Utc::now();
-                let cooldown_entry = emit_cooldown.entry(event_slug.clone())
-                    .or_insert(now);
-                let elapsed = now.signed_duration_since(*cooldown_entry);
-                if elapsed < chrono::Duration::seconds(30) {
-                    let remaining = 30 - elapsed.num_seconds();
-                    info!(
-                        "CONFLICT COOLDOWN: {} — waiting {}s for more wallets",
-                        event_slug, remaining
-                    );
-                    continue;
+            if !ready_candidates.is_empty() {
+                // Phase 2: Group by event_slug for conflict detection (pure in-memory)
+                let mut by_event: HashMap<String, Vec<&stability::StableGame>> = HashMap::new();
+                for game in &ready_candidates {
+                    by_event.entry(game.event_slug.clone()).or_default().push(game);
                 }
-            }
 
-            // Remove cooldown entry once we proceed
-            emit_cooldown.remove(event_slug.as_str());
+                let num_wallets = {
+                    let cfg = config.read().await;
+                    cfg.copy_trading.watchlist.len()
+                };
 
-            let chosen_game = if ready_games.len() == 1 {
-                // Single wallet → execute directly
-                ready_games[0]
-            } else {
-                // Multiple wallets → conflict resolution
-                let wallet_names: Vec<&str> = ready_games.iter()
-                    .map(|g| g.source_name.as_str())
-                    .collect();
-                info!(
-                    "CONFLICT DETECTED: {} — {} wallets: {:?}",
-                    event_slug, ready_games.len(), wallet_names
-                );
-
-                // Detect market type from first position
-                let market_type = ready_games[0].positions.first()
-                    .and_then(|p| p.title.as_deref())
-                    .map(|t| CopyTrader::detect_market_type(t))
-                    .unwrap_or_else(|| "other".to_string());
-
-                // Try live ROI first
-                let conflict_cfg = config.read().await.copy_trading.conflict_resolution.clone();
-                let min_trades = conflict_cfg.min_trades_for_live_roi;
-
-                let roi_winner = logger.best_wallet_for_market_type(
-                    &market_type,
-                    &wallet_names,
-                    min_trades,
-                );
-
-                if let Some((best_wallet, roi_pct)) = &roi_winner {
-                    info!(
-                        "CONFLICT ROI: {} — best={} roi={:.1}% (type={})",
-                        event_slug, best_wallet, roi_pct, market_type
-                    );
-                    ready_games.iter()
-                        .find(|g| g.source_name == *best_wallet)
-                        .unwrap_or(&ready_games[0])
-                } else {
-                    // Fall back to seed ranking
-                    let mut best_idx = 0;
-                    let mut best_rank: Option<usize> = None;
-                    for (i, game) in ready_games.iter().enumerate() {
-                        if let Some(rank) = conflict_cfg.seed_rank(&game.source_name, &market_type) {
-                            if best_rank.is_none() || rank < best_rank.unwrap() {
-                                best_rank = Some(rank);
-                                best_idx = i;
-                            }
+                for (event_slug, wallet_games) in &by_event {
+                    // Phase 2a: Emit cooldown — wait for other wallets (only if multi-wallet)
+                    if num_wallets > 1 {
+                        let now = chrono::Utc::now();
+                        let first_ready = emit_cooldown.entry(event_slug.clone())
+                            .or_insert(now);
+                        let waited_secs = now.signed_duration_since(*first_ready).num_seconds();
+                        if waited_secs < 30 {
+                            continue;
                         }
                     }
-                    info!(
-                        "CONFLICT RESOLVED: {} — picked {} (seed rank, type={})",
-                        event_slug, ready_games[best_idx].source_name, market_type
-                    );
-                    ready_games[best_idx]
-                }
-            };
+                    emit_cooldown.remove(event_slug.as_str());
 
-            // Log skipped wallets
-            for game in &ready_games {
-                if game.source_wallet != chosen_game.source_wallet {
+                    // Phase 2b: Pick winner — pure in-memory lookup from roi_cache
+                    let winner = if wallet_games.len() == 1 {
+                        wallet_games[0]
+                    } else {
+                        // Conflict! Pick highest ROI from cache
+                        info!(
+                            "CONFLICT: {} — {} wallets: [{}]",
+                            event_slug,
+                            wallet_games.len(),
+                            wallet_games.iter()
+                                .map(|g| g.source_name.as_str())
+                                .collect::<Vec<_>>().join(", ")
+                        );
+
+                        let mut best: Option<&stability::StableGame> = None;
+                        let mut best_roi = f64::NEG_INFINITY;
+
+                        for game in wallet_games {
+                            let mt = game.positions.iter()
+                                .filter_map(|p| p.title.as_deref())
+                                .map(|title| CopyTrader::detect_market_type(title))
+                                .next()
+                                .unwrap_or_else(|| "win".to_string());
+
+                            let key = (game.source_name.to_lowercase(), mt.clone());
+                            let roi = roi_cache.get(&key).copied().unwrap_or(f64::NEG_INFINITY);
+
+                            let outcome = game.positions.first()
+                                .and_then(|p| p.outcome.as_deref())
+                                .unwrap_or("?");
+                            info!(
+                                "CONFLICT: {} bets {} on {} (ROI={:.1}%{})",
+                                game.source_name, outcome, mt, roi,
+                                if roi > 99.0 { " seed" } else { "" }
+                            );
+
+                            if roi > best_roi {
+                                best_roi = roi;
+                                best = Some(game);
+                            }
+                        }
+
+                        match best {
+                            Some(winner) => {
+                                info!(
+                                    "CONFLICT RESOLVED: {} wins (ROI={:.1}%)",
+                                    winner.source_name, best_roi
+                                );
+                                winner
+                            }
+                            None => {
+                                warn!(
+                                    "CONFLICT FALLBACK: no ROI data for {} — taking {}",
+                                    event_slug, wallet_games[0].source_name
+                                );
+                                wallet_games[0]
+                            }
+                        }
+                    };
+
+                    // Phase 3: Execute the winner
+                    let wait_mins = stability_tracker.pending_summary()
+                        .iter()
+                        .find(|(s, _, _)| s == event_slug)
+                        .map(|(_, m, _)| *m)
+                        .unwrap_or(0);
                     info!(
-                        "CONFLICT SKIP: {} — skipping wallet {}",
-                        event_slug, game.source_name
+                        "STABILITY EMIT: {} after {}min ({} quiet for 2h+)",
+                        event_slug, wait_mins, winner.source_name
                     );
+
+                    execute_stable_game(
+                        winner, &mut executor, &risk, &logger, &config
+                    ).await;
+                    stability_tracker.confirm_emitted(event_slug);
                 }
             }
-
-            let wait_mins = stability_tracker.pending_summary()
-                .iter()
-                .find(|(s, _, _)| s == event_slug)
-                .map(|(_, m, _)| *m)
-                .unwrap_or(0);
-            info!(
-                "STABILITY EMIT: {} after {}min (wallet={}, quiet for 2h+)",
-                event_slug, wait_mins, chosen_game.source_name
-            );
-
-            execute_stable_game(
-                chosen_game,
-                &mut executor,
-                &risk,
-                &logger,
-                &config,
-            )
-            .await;
-
-            // Mark as emitted — removes ALL wallet entries for this event
-            stability_tracker.confirm_emitted(event_slug);
         }
 
         // Log pending stability status periodically (every 20 polls = ~5 min)
