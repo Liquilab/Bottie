@@ -455,10 +455,25 @@ async fn copy_trading_loop(
                     continue;
                 };
                 let wallet_leagues = wallet_cfg.leagues.clone();
+
+                // RUS-281: Pre-filter futures noise before stability tracker
+                let futures_kw = &["division", "conference", "champion", "winner", "mvp",
+                    "season", "playoff", "finals", "award", "rookie", "win total"];
+                let filtered_positions: Vec<_> = positions.iter()
+                    .filter(|p| {
+                        let title = p.title.as_deref().unwrap_or("").to_lowercase();
+                        let slug = p.event_slug.as_deref()
+                            .or(p.slug.as_deref())
+                            .unwrap_or("").to_lowercase();
+                        !futures_kw.iter().any(|kw| title.contains(kw) || slug.contains(kw))
+                    })
+                    .cloned()
+                    .collect();
+
                 stability_tracker.update(
                     addr,
                     name,
-                    positions,
+                    &filtered_positions,
                     &our_event_slugs,
                     stability_threshold,
                     &wallet_leagues,
