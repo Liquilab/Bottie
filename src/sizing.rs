@@ -88,15 +88,16 @@ pub fn copy_trade_size(
 
     // Tiered sizing: scale with Cannae's conviction (game size).
     // Cannae bets more on games he's more confident about — follow that signal.
-    //   < $15K  → 1% of bankroll (base, testing tier)
-    //   $15-50K → 1.5%
-    //   $50-100K → 2%
-    //   > $100K → 3% (max conviction)
-    let game_budget_pct = if cannae_game_total_usdc >= 100_000.0 {
+    // Calibrated on 1550 on-chain games (P50=$1.3K, P75=$5K, P90=$15K).
+    //   < $1.3K  → 1% of bankroll (bottom 50%)
+    //   $1.3-5K  → 1.5% (P50-P75)
+    //   $5-15K   → 2%   (P75-P90)
+    //   > $15K   → 3%   (top 10%)
+    let game_budget_pct = if cannae_game_total_usdc >= 15_000.0 {
         0.03
-    } else if cannae_game_total_usdc >= 50_000.0 {
+    } else if cannae_game_total_usdc >= 5_000.0 {
         0.02
-    } else if cannae_game_total_usdc >= 15_000.0 {
+    } else if cannae_game_total_usdc >= 1_300.0 {
         0.015
     } else {
         0.01

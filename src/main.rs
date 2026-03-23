@@ -355,16 +355,12 @@ async fn copy_trading_loop(
             }
         }
 
-        // Read stability config + allowed leagues for early filtering
-        let (stability_window, stability_threshold, stability_leagues) = {
+        // Read stability config
+        let (stability_window, stability_threshold) = {
             let c = config.read().await;
-            let leagues = c.copy_trading.watchlist.first()
-                .map(|w| w.leagues.clone())
-                .unwrap_or_default();
             (
                 c.copy_trading.stability_window_minutes,
                 c.copy_trading.stability_threshold_pct,
-                leagues,
             )
         };
 
@@ -393,16 +389,24 @@ async fn copy_trading_loop(
             }
         };
 
-        // Feed Cannae positions into stability tracker (with league filter)
-        for (addr, name, positions) in &raw_positions {
-            stability_tracker.update(
-                addr,
-                name,
-                positions,
-                &our_event_slugs,
-                stability_threshold,
-                &stability_leagues,
-            );
+        // Feed wallet positions into stability tracker (with per-wallet league filter)
+        {
+            let c = config.read().await;
+            for (addr, name, positions) in &raw_positions {
+                // Look up this wallet's leagues from config
+                let wallet_leagues = c.copy_trading.watchlist.iter()
+                    .find(|w| w.address.eq_ignore_ascii_case(addr))
+                    .map(|w| w.leagues.clone())
+                    .unwrap_or_default();
+                stability_tracker.update(
+                    addr,
+                    name,
+                    positions,
+                    &our_event_slugs,
+                    stability_threshold,
+                    &wallet_leagues,
+                );
+            }
         }
 
         // Collect ALL fetched positions for stability check (to get current data)
@@ -420,14 +424,10 @@ async fn copy_trading_loop(
         // Prune stale entries periodically
         stability_tracker.prune_stale();
 
-        // Process candidates: check if Cannae is done, then execute
-        let cannae_address = raw_positions.first()
-            .map(|(addr, _, _)| addr.as_str())
-            .unwrap_or("");
-
+        // Process candidates: check if source wallet is done, then execute
         for game in &candidates {
-            // RUS-260 Fix A: check if Cannae still has recent trades on this event
-            if cannae_still_trading(&client, cannae_address, game, 120).await {
+            // RUS-260 Fix A: check if source wallet still has recent trades on this event
+            if cannae_still_trading(&client, &game.source_wallet, game, 120).await {
                 // Cannae still active — don't emit yet, stays in pending
                 continue;
             }
@@ -529,15 +529,12 @@ async fn execute_stable_game(
     use crate::copy_trader::CopyTrader;
 
     let cfg = config.read().await;
-    let max_legs = cfg.copy_trading.watchlist.first()
-        .map(|w| w.max_legs_per_event)
-        .unwrap_or(0);
-    let allowed_leagues = cfg.copy_trading.watchlist.first()
-        .map(|w| w.leagues.clone())
-        .unwrap_or_default();
-    let allowed_market_types = cfg.copy_trading.watchlist.first()
-        .map(|w| w.market_types.clone())
-        .unwrap_or_default();
+    // Look up config for the wallet that sourced this game
+    let wallet_cfg = cfg.copy_trading.watchlist.iter()
+        .find(|w| w.address.eq_ignore_ascii_case(&game.source_wallet));
+    let max_legs = wallet_cfg.map(|w| w.max_legs_per_event).unwrap_or(0);
+    let allowed_leagues = wallet_cfg.map(|w| w.leagues.clone()).unwrap_or_default();
+    let allowed_market_types = wallet_cfg.map(|w| w.market_types.clone()).unwrap_or_default();
     drop(cfg);
 
     // League filter: event_slug format is "{league}-{teams}-{date}"
