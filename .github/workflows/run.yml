@@ -1,4 +1,4 @@
-name: Run VPS Command
+name: Run command on VPS
 
 on:
   workflow_dispatch:
@@ -6,7 +6,6 @@ on:
       command:
         description: 'Command to run on VPS'
         required: true
-        default: 'systemctl status bottie'
       working_dir:
         description: 'Working directory'
         required: false
@@ -16,12 +15,19 @@ jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - name: Run command via SSH
-        uses: appleboy/ssh-action@v1.0.3
+      - name: Execute on VPS
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ secrets.VPS_HOST }}
           username: root
           key: ${{ secrets.VPS_SSH_KEY }}
+          envs: WORKING_DIR,COMMAND
+          env:
+            WORKING_DIR: ${{ inputs.working_dir }}
+            COMMAND: ${{ inputs.command }}
           script: |
-            cd ${{ github.event.inputs.working_dir }}
-            ${{ github.event.inputs.command }}
+            cd "$WORKING_DIR"
+            echo "=== $(date -u) ==="
+            echo "CMD: $COMMAND"
+            eval "$COMMAND"
+            echo "=== DONE ==="
