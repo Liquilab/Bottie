@@ -15,6 +15,24 @@ copy_trading:
     max_legs_per_event: 1
     min_price: 0.05
     max_price: 0.95
+  - address: "0xee613b3fe3cb6b78631f0845ba308a5e31e7517a"
+    name: Sovereign
+    weight: 1.0
+    sports: [all]
+    leagues: ["nba", "other", "ucl"]
+    market_types: ["over_under"]
+    max_legs_per_event: 1
+    min_price: 0.05
+    max_price: 0.95
+  - address: "0x6a72f61820b26b1fe4d956e17b6dc2a1ea3033ee"
+    name: kch123
+    weight: 1.0
+    sports: [all]
+    leagues: ["nba", "nhl", "ucl"]
+    market_types: ["win", "spread"]
+    max_legs_per_event: 2
+    min_price: 0.05
+    max_price: 0.95
   consensus:
     min_traders: 1
     window_minutes: 60
