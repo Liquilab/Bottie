@@ -192,14 +192,19 @@ impl ClobClient {
 
         let (maker_amount, taker_amount) = match side {
             Side::Buy => {
-                // maker_amount = price * size, rounded at micro-amount level (6 decimals)
-                let maker_raw = (price * size * CTF_DECIMAL_FACTOR).round() as u128;
-                let taker_raw = (size * CTF_DECIMAL_FACTOR).round() as u128;
+                // maker_amount (USDC) must have max 2 decimal precision (cents)
+                // taker_amount (shares) must have max 4 decimal precision
+                let usdc = (price * size * 100.0).round() / 100.0; // round to cents
+                let shares = (size * 10000.0).round() / 10000.0; // round to 4 decimals
+                let maker_raw = (usdc * CTF_DECIMAL_FACTOR).round() as u128;
+                let taker_raw = (shares * CTF_DECIMAL_FACTOR).round() as u128;
                 (U256::from(maker_raw), U256::from(taker_raw))
             }
             Side::Sell => {
-                let maker_raw = (size * CTF_DECIMAL_FACTOR).round() as u128;
-                let taker_raw = (price * size * CTF_DECIMAL_FACTOR).round() as u128;
+                let shares = (size * 10000.0).round() / 10000.0;
+                let usdc = (price * size * 100.0).round() / 100.0;
+                let maker_raw = (shares * CTF_DECIMAL_FACTOR).round() as u128;
+                let taker_raw = (usdc * CTF_DECIMAL_FACTOR).round() as u128;
                 (U256::from(maker_raw), U256::from(taker_raw))
             }
         };
