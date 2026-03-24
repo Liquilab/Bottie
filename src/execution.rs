@@ -269,7 +269,9 @@ impl Executor {
                         );
                         return Ok(false);
                     }
-                    ask
+                    // Buy 1ct above best ask to sweep deeper into the book.
+                    // FOK on exact ask fails when top-of-book is thin.
+                    (ask + 0.01_f64).min(0.99)
                 }
                 Ok(ask) => {
                     warn!(
