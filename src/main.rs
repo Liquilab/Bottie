@@ -620,7 +620,7 @@ async fn copy_trading_loop(
                     );
 
                     execute_stable_game(
-                        winner, &mut executor, &risk, &logger, &config, false
+                        winner, &mut executor, &risk, &logger, &config, true
                     ).await;
                     stability_tracker.confirm_emitted(event_slug);
                 }
