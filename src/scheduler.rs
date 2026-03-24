@@ -317,14 +317,13 @@ pub async fn confirm_and_execute_t5(
     }
 
     for game in &due_games {
-        // Build condition_id set for this game from the schedule
-        // We use the T-30 snapshot condition_ids as our reference
-        let game_cids: HashSet<String> = game.wallet_snapshots.values()
-            .flat_map(|positions| positions.iter())
-            .filter_map(|p| p.condition_id.clone())
-            .collect();
-
         for (wallet_addr, t30_positions) in &game.wallet_snapshots {
+            // Per-wallet T-30 reference: only match this wallet's own snapshot
+            let t30_keys: HashSet<String> = t30_positions
+                .iter()
+                .map(|p| p.position_key())
+                .collect();
+
             let wallet_cfg = match watchlist.iter()
                 .find(|w| w.address.to_lowercase() == *wallet_addr)
             {
@@ -337,17 +336,13 @@ pub async fn confirm_and_execute_t5(
                 None => continue,
             };
 
-            // Filter current positions to those matching this game's condition_ids
+            // Filter current positions to those matching this wallet's T-30 snapshot
             let current_game_positions: Vec<WalletPosition> = current_all.iter()
                 .filter(|p| {
                     if p.size_f64() <= 0.0 { return false; }
                     let cur = p.cur_price_f64();
                     if cur <= 0.01 || cur >= 0.99 { return false; }
-                    if let Some(cid) = &p.condition_id {
-                        game_cids.contains(cid)
-                    } else {
-                        false
-                    }
+                    t30_keys.contains(&p.position_key())
                 })
                 .cloned()
                 .collect();

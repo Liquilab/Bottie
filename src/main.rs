@@ -708,10 +708,12 @@ async fn copy_trading_loop(
                             game.event_slug, game.source_name,
                             t5_match.positions.len(), t5_match.t30_position_count,
                         );
-                        execute_stable_game(
+                        let filled = execute_stable_game(
                             &game, &mut executor, &risk, &logger, &config, true,
                         ).await;
-                        t5_executed.insert(t5_match.game_event_slug.clone());
+                        if filled {
+                            t5_executed.insert(t5_match.game_event_slug.clone());
+                        }
                     }
 
                     // Cleanup: remove watched games that have already started (past due)
@@ -770,6 +772,7 @@ async fn cannae_still_trading(
 
 /// Build AggregatedSignals from a stable game's Cannae positions,
 /// select legs based on config (max_legs_per_event), and execute.
+/// Execute a stable game. Returns true if at least one order was filled.
 async fn execute_stable_game(
     game: &stability::StableGame,
     executor: &mut Executor,
@@ -777,7 +780,7 @@ async fn execute_stable_game(
     logger: &Arc<TradeLogger>,
     config: &SharedConfig,
     taker_mode: bool,
-) {
+) -> bool {
     use crate::copy_trader::CopyTrader;
 
     let cfg = config.read().await;
@@ -789,7 +792,7 @@ async fn execute_stable_game(
             "EXECUTE SKIP: no watchlist config for source wallet {}",
             game.source_wallet
         );
-        return;
+        return false;
     };
     let max_legs = wallet_cfg.max_legs_per_event;
     let allowed_leagues = wallet_cfg.leagues.clone();
@@ -803,7 +806,7 @@ async fn execute_stable_game(
             "STABILITY SKIP: {} not in allowed leagues (prefix={}, allowed={:?})",
             game.event_slug, league_prefix, allowed_leagues
         );
-        return;
+        return false;
     }
 
     // Group positions by conditionId, keep largest per condition
@@ -864,7 +867,7 @@ async fn execute_stable_game(
             "STABILITY SKIP: {} has no legs after conditionId grouping",
             game.event_slug,
         );
-        return;
+        return false;
     }
 
     // Cannae's total USDC for SELECTED legs only (not all positions).
@@ -872,7 +875,7 @@ async fn execute_stable_game(
     // the full game_budget goes to that single leg.
     let cannae_selected_total: f64 = game_legs.iter().map(|p| p.initial_value_f64()).sum();
     if cannae_selected_total <= 0.0 {
-        return;
+        return false;
     }
 
     info!(
@@ -883,6 +886,7 @@ async fn execute_stable_game(
     );
 
     // Build AggregatedSignal for each leg and execute
+    let mut any_filled = false;
     for pos in &game_legs {
         let title = pos.title.as_deref().unwrap_or("").to_string();
         let condition_id = pos.condition_id.as_deref().unwrap_or("").to_string();
@@ -957,6 +961,7 @@ async fn execute_stable_game(
             Ok(filled) => {
                 if filled {
                     info!("{} FILLED: {}", label, agg_signal.market_title);
+                    any_filled = true;
                 }
             }
             Err(e) => {
@@ -964,6 +969,7 @@ async fn execute_stable_game(
             }
         }
     }
+    any_filled
 }
 
 
