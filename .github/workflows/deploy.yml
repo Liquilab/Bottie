@@ -1,52 +1,58 @@
-name: Deploy to VPS
+name: Build & Deploy
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      command:
-        description: 'Optional extra command after deploy'
-        required: false
-        default: ''
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Run tests
+        run: cargo test
 
       - name: Deploy to VPS
-        uses: appleboy/ssh-action@v1.2.5
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: root
-          key: ${{ secrets.VPS_SSH_KEY }}
-          script: |
-            set -e
-            cd /root/Projects/RustedPoly
-            git pull origin main
-            cargo build --release 2>&1 | tail -50
-            systemctl daemon-reload
-            systemctl restart bottie
-            sleep 3
-            systemctl status bottie 2>/dev/null | head -5 || pgrep -a bottie
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -H $VPS_HOST >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Run extra command
-        if: ${{ inputs.command != '' }}
-        uses: appleboy/ssh-action@v1.2.5
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: root
-          key: ${{ secrets.VPS_SSH_KEY }}
-          envs: EXTRA_CMD
-          env:
-            EXTRA_CMD: ${{ inputs.command }}
-          script: |
-            case "$EXTRA_CMD" in
-              "status") systemctl status bottie ;;
-              "logs") journalctl -u bottie -n 50 ;;
-              "restart") systemctl restart bottie ;;
-              *) echo "Unknown command: $EXTRA_CMD"; exit 1 ;;
-            esac
+          # Upload binary
+          scp -i ~/.ssh/id_deploy target/release/bottie ${VPS_USER}@${VPS_HOST}:/opt/bottie/bottie-bin.new
+
+          # Atomic swap + restart
+          ssh -i ~/.ssh/id_deploy ${VPS_USER}@${VPS_HOST} << 'EOF'
+            systemctl stop bottie
+            cp /opt/bottie/bottie-bin /opt/bottie/bottie-bin.bak
+            mv /opt/bottie/bottie-bin.new /opt/bottie/bottie-bin
+            chmod +x /opt/bottie/bottie-bin
+            systemctl start bottie
+            sleep 3
+            systemctl is-active bottie && echo "DEPLOY OK" || echo "DEPLOY FAILED"
+            journalctl -u bottie -n 10 --no-pager
+          EOF
