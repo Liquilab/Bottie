@@ -350,34 +350,15 @@ impl ClobClient {
     }
 
     pub async fn get_trades_for_wallet(&self, wallet: &str, limit: u32) -> Result<Vec<DataApiTrade>> {
-        // Query both maker and taker — wallets can be either depending on order type
-        let mut all_trades = Vec::new();
-
-        // Maker trades
-        let url = format!("{DATA_API}/trades?maker={wallet}&limit={limit}");
-        if let Ok(resp) = self.http.get(&url).send().await {
-            if let Ok(trades) = resp.json::<Vec<DataApiTrade>>().await {
-                all_trades.extend(trades);
-            }
-        }
-
-        // Taker trades (critical: FOK orders make the wallet a taker)
-        let url = format!("{DATA_API}/trades?taker={wallet}&limit={limit}");
-        if let Ok(resp) = self.http.get(&url).send().await {
-            if let Ok(trades) = resp.json::<Vec<DataApiTrade>>().await {
-                all_trades.extend(trades);
-            }
-        }
+        // Use user= parameter (maker=/taker= are broken — return global trades)
+        let url = format!("{DATA_API}/trades?user={wallet}&limit={limit}");
+        let mut all_trades: Vec<DataApiTrade> = self.http.get(&url).send().await?
+            .error_for_status()?
+            .json().await?;
 
         // Sort by timestamp descending (most recent first)
         all_trades.sort_by(|a, b| {
             b.timestamp_secs().unwrap_or(0).cmp(&a.timestamp_secs().unwrap_or(0))
-        });
-
-        // Dedup by trade ID
-        let mut seen = std::collections::HashSet::new();
-        all_trades.retain(|t| {
-            t.trade_id().map_or(true, |id| seen.insert(id))
         });
 
         Ok(all_trades)
@@ -398,7 +379,7 @@ impl ClobClient {
 
         for _ in 0..max_pages {
             let url = format!(
-                "{DATA_API}/trades?maker={wallet}&limit={page_size}&offset={offset}"
+                "{DATA_API}/trades?user={wallet}&limit={page_size}&offset={offset}"
             );
             let trades: Vec<DataApiTrade> = match self.http.get(&url).send().await {
                 Ok(resp) => resp.json::<Vec<DataApiTrade>>().await.unwrap_or_default(),
@@ -588,9 +569,13 @@ impl ClobClient {
 
     // --- Sports Market Search ---
 
-    pub async fn search_sports_events(&self, tag: &str) -> Result<Vec<GammaSportsEvent>> {
+    pub async fn search_sports_events(&self, tag_slug: &str) -> Result<Vec<GammaSportsEvent>> {
+        let now = chrono::Utc::now();
+        let end = now + chrono::Duration::hours(48);
+        let end_date_min = now.format("%Y-%m-%dT%H:%M:%SZ");
+        let end_date_max = end.format("%Y-%m-%dT%H:%M:%SZ");
         let url = format!(
-            "{GAMMA_API}/events?active=true&closed=false&tag={tag}&limit=100"
+            "{GAMMA_API}/events?active=true&closed=false&tag_slug={tag_slug}&end_date_min={end_date_min}&end_date_max={end_date_max}&limit=100"
         );
         let events: Vec<GammaSportsEvent> = self
             .http

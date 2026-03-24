@@ -112,6 +112,8 @@ pub struct ScheduleConfig {
     pub enabled: bool,
     #[serde(default = "default_t_minus")]
     pub t_minus_minutes: u32,
+    #[serde(default = "default_t5")]
+    pub t5_minutes: u32,
     #[serde(default = "default_refresh_interval")]
     pub refresh_interval_minutes: u32,
     #[serde(default)]
@@ -122,6 +124,10 @@ pub struct ScheduleConfig {
 
 fn default_t_minus() -> u32 {
     30
+}
+
+fn default_t5() -> u32 {
+    5
 }
 
 fn default_refresh_interval() -> u32 {
