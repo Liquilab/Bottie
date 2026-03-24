@@ -91,8 +91,16 @@ impl StabilityTracker {
         }
 
         let now = Utc::now();
+        let stale_cutoff = now - chrono::Duration::days(7);
 
         for (event_slug, event_positions) in &by_event {
+            // Skip stale events: parse date from slug suffix (e.g. "nba-dal-mil-2026-01-25")
+            if let Some(game_date) = parse_date_from_slug(event_slug) {
+                if game_date < stale_cutoff {
+                    continue;
+                }
+            }
+
             // League filter: event_slug format is "{league}-{teams}-{date}"
             // Skip events whose league prefix is not in the allowed list.
             if !allowed_leagues.is_empty() {
@@ -385,6 +393,19 @@ impl StabilityTracker {
             })
             .collect()
     }
+}
+
+/// Parse a date from an event slug suffix like "nba-dal-mil-2026-01-25"
+/// Returns None if no valid date found.
+fn parse_date_from_slug(slug: &str) -> Option<DateTime<Utc>> {
+    let parts: Vec<&str> = slug.rsplitn(4, '-').collect();
+    if parts.len() >= 3 {
+        let date_str = format!("{}-{}-{}", parts[2], parts[1], parts[0]);
+        if let Ok(nd) = chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
+            return Some(nd.and_hms_opt(0, 0, 0)?.and_utc());
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -692,5 +713,30 @@ mod tests {
         let groups = StabilityTracker::group_candidates_by_event(&candidates);
         assert_eq!(groups.len(), 1, "both candidates share the same event");
         assert_eq!(groups["event-a"].len(), 2, "two wallets for event-a");
+    }
+
+    #[test]
+    fn parse_date_from_slug_works() {
+        let dt = super::parse_date_from_slug("nba-dal-mil-2026-01-25").unwrap();
+        assert_eq!(dt.format("%Y-%m-%d").to_string(), "2026-01-25");
+
+        let dt2 = super::parse_date_from_slug("es2-ceu-cad-2026-03-28").unwrap();
+        assert_eq!(dt2.format("%Y-%m-%d").to_string(), "2026-03-28");
+
+        // No date suffix
+        assert!(super::parse_date_from_slug("some-random-slug").is_none());
+    }
+
+    #[test]
+    fn stale_events_skipped() {
+        let mut tracker = StabilityTracker::new();
+        let our_events = HashSet::new();
+
+        // Event from 2 months ago — should be skipped
+        let old = vec![
+            make_position("cid1", "Yes", 100.0, 0.50, "nba-dal-mil-2025-01-25", "Will Dallas win?"),
+        ];
+        tracker.update("0xCannae", "Cannae", &old, &our_events, 5.0, &[]);
+        assert_eq!(tracker.pending_count(), 0, "stale event should be skipped");
     }
 }
