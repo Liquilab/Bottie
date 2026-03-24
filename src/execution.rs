@@ -187,13 +187,14 @@ impl Executor {
         }
 
         // Dedup against LIVE PM positions (source of truth, not trade log).
-        // Checks per condition_id (same market). This:
-        // - Blocks duplicates (same condition+outcome)
-        // - Blocks contradictions (same condition, opposite outcome)
-        // - Allows different market types on same event (different condition_id)
-        //   e.g. Cannae "Will X win? No" + sovereign "X O/U 233.5" = OK
+        // Two checks in one API call:
+        // 1. condition_id: blocks exact duplicates + contradictions
+        // 2. event_slug + market_type: blocks same-type bets on same event
+        //    (e.g. ORL -13.5 spread + ORL -12.5 spread = blocked)
+        //    But spread + ou on same event = allowed (different market_type)
         {
             let funder = self.client.funder_address();
+            let signal_market_type = crate::copy_trader::CopyTrader::detect_market_type(&signal.market_title);
             match self.client.get_wallet_positions(&funder, 500).await {
                 Ok(positions) => {
                     for pos in &positions {
@@ -202,6 +203,7 @@ impl Executor {
                         }
                         let pos_cid = pos.condition_id.as_deref().unwrap_or("");
 
+                        // Check 1: exact condition_id match
                         if pos_cid == signal.condition_id {
                             let pos_outcome = pos.outcome.as_deref().unwrap_or("");
                             if pos_outcome.to_lowercase() == signal.outcome.to_lowercase() {
@@ -216,6 +218,27 @@ impl Executor {
                                 );
                             }
                             return Ok(false);
+                        }
+
+                        // Check 2 (RUS-283): event_slug + market_type dedup
+                        let pos_event = pos.event_slug.as_deref()
+                            .or(pos.slug.as_deref())
+                            .unwrap_or("")
+                            .trim_end_matches("-more-markets");
+                        if !signal.event_slug.is_empty()
+                            && !pos_event.is_empty()
+                            && pos_event == signal.event_slug
+                        {
+                            let pos_title = pos.title.as_deref().unwrap_or("");
+                            let pos_mt = crate::copy_trader::CopyTrader::detect_market_type(pos_title);
+                            if pos_mt == signal_market_type {
+                                info!(
+                                    "SKIP DEDUP: already have {} bet on {} (have: {}, signal: {})",
+                                    signal_market_type, signal.event_slug,
+                                    pos_title, signal.market_title
+                                );
+                                return Ok(false);
+                            }
                         }
                     }
                 }
