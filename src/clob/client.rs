@@ -588,9 +588,13 @@ impl ClobClient {
 
     // --- Sports Market Search ---
 
-    pub async fn search_sports_events(&self, tag: &str) -> Result<Vec<GammaSportsEvent>> {
+    pub async fn search_sports_events(&self, tag_slug: &str) -> Result<Vec<GammaSportsEvent>> {
+        let now = chrono::Utc::now();
+        let end = now + chrono::Duration::hours(48);
+        let end_date_min = now.format("%Y-%m-%dT%H:%M:%SZ");
+        let end_date_max = end.format("%Y-%m-%dT%H:%M:%SZ");
         let url = format!(
-            "{GAMMA_API}/events?active=true&closed=false&tag={tag}&limit=100"
+            "{GAMMA_API}/events?active=true&closed=false&tag_slug={tag_slug}&end_date_min={end_date_min}&end_date_max={end_date_max}&limit=100"
         );
         let events: Vec<GammaSportsEvent> = self
             .http

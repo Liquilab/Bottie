@@ -416,6 +416,8 @@ pub struct GammaSportsEvent {
     pub description: Option<String>,
     #[serde(rename = "startDate")]
     pub start_date: Option<String>,
+    #[serde(rename = "startTime")]
+    pub start_time: Option<String>,
     #[serde(rename = "endDate")]
     pub end_date: Option<String>,
     pub markets: Option<Vec<GammaMarketResponse>>,

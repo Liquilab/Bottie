@@ -326,9 +326,10 @@ async fn copy_trading_loop(
     let mut polls_since_stability_log: u32 = 0;
     let mut emit_cooldown: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
 
-    // T-30 schedule state
+    // Two-phase schedule state
     let mut game_schedule = scheduler::GameSchedule::new();
-    let mut t30_attempted: HashSet<String> = HashSet::new();
+    let mut watched_games: Vec<scheduler::WatchedGame> = Vec::new(); // T-30 discovered, waiting for T-5
+    let mut t5_executed: HashSet<String> = HashSet::new(); // event_slugs already bought
 
     // RUS-278: Pre-computed ROI cache — refreshed every 20 polls (~5 min), NOT per candidate.
     let mut roi_cache: HashMap<(String, String), f64> = HashMap::new();
@@ -640,45 +641,82 @@ async fn copy_trading_loop(
             }
         }
 
-        // --- T-30 schedule-based copy trading ---
+        // --- Two-phase schedule: T-30 discovery + T-5 confirm+buy ---
         {
             let (schedule_cfg, watchlist) = {
                 let c = config.read().await;
                 (c.schedule.clone(), c.copy_trading.watchlist.clone())
             };
-            if schedule_cfg.enabled && !schedule_cfg.sport_tags.is_empty() {
-                // Refresh schedule if stale
-                if game_schedule.needs_refresh(schedule_cfg.refresh_interval_minutes as i64) {
-                    scheduler::refresh_schedule(
+            if schedule_cfg.enabled {
+                // Derive sport tags from watchlist leagues (union of all wallets)
+                let sport_tags = if schedule_cfg.sport_tags.is_empty() {
+                    scheduler::sport_tags_from_watchlist(&watchlist)
+                } else {
+                    schedule_cfg.sport_tags.clone()
+                };
+
+                if !sport_tags.is_empty() {
+                    // 1. Refresh schedule if stale
+                    if game_schedule.needs_refresh(schedule_cfg.refresh_interval_minutes as i64) {
+                        scheduler::refresh_schedule(
+                            &client,
+                            &sport_tags,
+                            &mut game_schedule,
+                        ).await;
+                    }
+
+                    // 2. T-30 Discovery: find games starting in ~30 min, check wallets, add to watched_games
+                    let already_watched: HashSet<String> = watched_games.iter()
+                        .map(|g| g.event_slug.clone())
+                        .chain(t5_executed.iter().cloned())
+                        .collect();
+
+                    let new_watched = scheduler::discover_t30(
                         &client,
-                        &schedule_cfg.sport_tags,
-                        &mut game_schedule,
+                        &game_schedule,
+                        &watchlist,
+                        schedule_cfg.t_minus_minutes,
+                        &already_watched,
                     ).await;
-                }
 
-                // Check for T-30 matches
-                let matches = scheduler::check_t30_games(
-                    &client,
-                    &game_schedule,
-                    &watchlist,
-                    schedule_cfg.t_minus_minutes as i64,
-                    &mut t30_attempted,
-                ).await;
+                    if !new_watched.is_empty() {
+                        info!(
+                            "T30 DISCOVERED: {} new games to watch",
+                            new_watched.len()
+                        );
+                        watched_games.extend(new_watched);
+                    }
 
-                for t30_match in &matches {
-                    let game = stability::StableGame {
-                        event_slug: t30_match.game_event_slug.clone(),
-                        positions: t30_match.positions.clone(),
-                        source_wallet: t30_match.wallet_address.clone(),
-                        source_name: t30_match.wallet_name.clone(),
-                    };
-                    info!(
-                        "T30 EXECUTE: {} from {} ({} positions)",
-                        game.event_slug, game.source_name, game.positions.len()
-                    );
-                    execute_stable_game(
-                        &game, &mut executor, &risk, &logger, &config, schedule_cfg.taker_mode,
+                    // 3. T-5 Confirm+Buy: for watched games starting soon, re-fetch, compare, execute
+                    let t5_matches = scheduler::confirm_and_execute_t5(
+                        &client,
+                        &watched_games,
+                        &watchlist,
+                        schedule_cfg.t5_minutes,
+                        &t5_executed,
                     ).await;
+
+                    for t5_match in &t5_matches {
+                        let game = stability::StableGame {
+                            event_slug: t5_match.game_event_slug.clone(),
+                            positions: t5_match.positions.clone(),
+                            source_wallet: t5_match.wallet_address.clone(),
+                            source_name: t5_match.wallet_name.clone(),
+                        };
+                        info!(
+                            "T5 EXECUTE: {} from {} ({} positions, T-30 had {})",
+                            game.event_slug, game.source_name,
+                            t5_match.positions.len(), t5_match.t30_position_count,
+                        );
+                        execute_stable_game(
+                            &game, &mut executor, &risk, &logger, &config, true,
+                        ).await;
+                        t5_executed.insert(t5_match.game_event_slug.clone());
+                    }
+
+                    // Cleanup: remove watched games that have already started (past due)
+                    let now = chrono::Utc::now();
+                    watched_games.retain(|g| g.start_time > now);
                 }
             }
         }
@@ -909,7 +947,7 @@ async fn execute_stable_game(
         };
 
         let mut risk_guard = risk.write().await;
-        let label = if taker_mode { "T30" } else { "STABILITY" };
+        let label = if taker_mode { "T5" } else { "STABILITY" };
         let result = if taker_mode {
             executor.execute_with_game_context_taker(&agg_signal, &mut risk_guard, &logger, cannae_selected_total, true).await
         } else {
