@@ -86,30 +86,12 @@ pub fn copy_trade_size(
         return 0.0;
     }
 
-    // Tiered sizing: scale with Cannae's conviction (game size).
-    // Cannae bets more on games he's more confident about — follow that signal.
-    // Calibrated on 1550 on-chain games (P50=$1.3K, P75=$5K, P90=$15K).
-    //   < $1.3K  → 1% of bankroll (bottom 50%)
-    //   $1.3-5K  → 1.5% (P50-P75)
-    //   $5-15K   → 2%   (P75-P90)
-    //   > $15K   → 3%   (top 10%)
-    let game_budget_pct = if cannae_game_total_usdc >= 15_000.0 {
-        0.03
-    } else if cannae_game_total_usdc >= 5_000.0 {
-        0.02
-    } else if cannae_game_total_usdc >= 1_300.0 {
-        0.015
-    } else {
-        0.01
-    };
-    let game_budget = bankroll * game_budget_pct;
-
-    // Factor: scale Cannae's position to our budget
-    let factor = game_budget / cannae_game_total_usdc;
-
-    // Our shares = Cannae's shares × factor
-    let our_shares = signal.source_shares * factor;
-    let our_usdc = our_shares * price;
+    // Flat 1% bankroll per leg. Each leg gets the same budget regardless
+    // of Cannae's sizing — his spread might be $24 while his moneyline is
+    // $9K on the same game, but both have ~85% WR and ~54% ROI.
+    let leg_budget = bankroll * 0.01;
+    let our_shares = leg_budget / price;
+    let our_usdc = leg_budget;
 
     // Floor at $2.50 minimum bet
     let (final_shares, final_usdc) = if our_usdc < 2.50 {
