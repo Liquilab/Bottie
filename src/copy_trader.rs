@@ -578,12 +578,10 @@ impl CopyTrader {
     /// - "ou" = title contains "O/U"
     /// - "spread" = title contains "Spread"
     /// - "draw" = title contains "draw"
-    /// - "ml" = title contains "vs." and none of the above
+    /// - "win" = title contains "win" or moneyline ("X vs. Y")
     pub fn detect_market_type(title: &str) -> String {
         let t = title.to_lowercase();
-        if t.contains("win on") || t.contains("win the") {
-            "win".to_string()
-        } else if t.contains("o/u") {
+        if t.contains("o/u") || t.contains("over/under") {
             "ou".to_string()
         } else if t.contains("spread") {
             "spread".to_string()
@@ -591,10 +589,9 @@ impl CopyTrader {
             "btts".to_string()
         } else if t.contains("draw") {
             "draw".to_string()
-        } else if t.contains("vs.") {
-            "ml".to_string()
         } else {
-            "other".to_string()
+            // "Will X win", "X vs. Y" (moneyline), and everything else = "win"
+            "win".to_string()
         }
     }
 
@@ -987,7 +984,7 @@ mod tests {
     fn detect_market_type_ou_spread_ml() {
         assert_eq!(CopyTrader::detect_market_type("Will O/U 2.5 goals in Arsenal match?"), "ou");
         assert_eq!(CopyTrader::detect_market_type("Will Spread -1.5 cover?"), "spread");
-        assert_eq!(CopyTrader::detect_market_type("Arsenal vs. Chelsea"), "ml");
+        assert_eq!(CopyTrader::detect_market_type("Arsenal vs. Chelsea"), "win");
     }
 
     #[test]
@@ -1004,7 +1001,8 @@ mod tests {
 
     #[test]
     fn detect_market_type_other() {
-        assert_eq!(CopyTrader::detect_market_type("Some random market title"), "other");
+        // Everything without spread/ou/draw/btts keywords is "win" (incl moneylines)
+        assert_eq!(CopyTrader::detect_market_type("Some random market title"), "win");
     }
 
     #[test]
@@ -1015,7 +1013,7 @@ mod tests {
         let win_title = "Will Arsenal win on matchday 30?";
         let draw_title = "Will Arsenal vs. Chelsea end in a draw?";
         let ou_title = "Will O/U 2.5 goals in Arsenal match?";
-        let ml_title = "Arsenal vs. Chelsea";
+        let ml_title = "Arsenal vs. Chelsea"; // moneyline = win
 
         let is_allowed = |title: &str| -> bool {
             if allowed.is_empty() { return true; }
@@ -1026,7 +1024,7 @@ mod tests {
         assert!(is_allowed(win_title), "win should be allowed");
         assert!(!is_allowed(draw_title), "draw should be BLOCKED");
         assert!(!is_allowed(ou_title), "ou should be BLOCKED");
-        assert!(!is_allowed(ml_title), "ml should be BLOCKED");
+        assert!(is_allowed(ml_title), "moneyline should be allowed (= win)");
     }
 
     #[test]

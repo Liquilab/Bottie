@@ -256,8 +256,7 @@ impl Executor {
             return Ok(false);
         }
 
-        // Fetch current market price from orderbook.
-        // Skip if price moved >25% against us since the wallet bought.
+        // Fetch current ASK from orderbook. NEVER use stale signal.price.
         let exec_price = if !signal.token_id.is_empty() {
             match self.client.get_best_ask(&signal.token_id).await {
                 Ok(ask) if ask > 0.0 && ask < 1.0 => {
@@ -270,18 +269,26 @@ impl Executor {
                         );
                         return Ok(false);
                     }
-                    if taker_mode {
-                        // Taker mode: buy at ask price directly (FOK)
-                        ask
-                    } else {
-                        // Maker mode: buy at ask - 1ct for maker rebate (GTC sits in book)
-                        (ask - 0.01_f64).max(0.02)
-                    }
+                    ask
                 }
-                _ => signal.price, // fall back to signal price if orderbook unavailable or invalid
+                Ok(ask) => {
+                    warn!(
+                        "SKIP: invalid ASK {:.2} for {} — orderbook empty or resolved",
+                        ask, signal.market_title
+                    );
+                    return Ok(false);
+                }
+                Err(e) => {
+                    warn!(
+                        "SKIP: orderbook fetch failed for {}: {} — refusing stale price",
+                        signal.market_title, e
+                    );
+                    return Ok(false);
+                }
             }
         } else {
-            signal.price
+            warn!("SKIP: no token_id for {} — cannot fetch ASK", signal.market_title);
+            return Ok(false);
         };
 
         // --- Check market resolution time (capital efficiency) ---
