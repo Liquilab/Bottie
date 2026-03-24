@@ -231,6 +231,13 @@ impl BookLevel {
             _ => 0.0,
         }
     }
+    pub fn size_f64(&self) -> f64 {
+        match &self.size {
+            serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0),
+            serde_json::Value::String(s) => s.parse().unwrap_or(0.0),
+            _ => 0.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -247,6 +254,20 @@ impl OrderBook {
             .filter(|&p| p > 0.0 && p < 1.0)
             .reduce(f64::min)?;
         Some(ask)
+    }
+
+    /// Returns (best_ask_price, shares_available_at_best_ask)
+    pub fn best_ask_with_depth(&self) -> Option<(f64, f64)> {
+        let asks = self.asks.as_ref()?;
+        let best_price = asks.iter()
+            .map(|l| l.price_f64())
+            .filter(|&p| p > 0.0 && p < 1.0)
+            .reduce(f64::min)?;
+        let depth: f64 = asks.iter()
+            .filter(|l| (l.price_f64() - best_price).abs() < 0.001)
+            .map(|l| l.size_f64())
+            .sum();
+        Some((best_price, depth))
     }
 
     pub fn best_bid(&self) -> Option<f64> {

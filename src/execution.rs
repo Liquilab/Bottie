@@ -256,10 +256,10 @@ impl Executor {
             return Ok(false);
         }
 
-        // Fetch current ASK from orderbook. NEVER use stale signal.price.
+        // Fetch current ASK + depth from orderbook. NEVER use stale signal.price.
         let exec_price = if !signal.token_id.is_empty() {
-            match self.client.get_best_ask(&signal.token_id).await {
-                Ok(ask) if ask > 0.0 && ask < 1.0 => {
+            match self.client.get_best_ask_with_depth(&signal.token_id).await {
+                Ok((ask, depth)) if ask > 0.0 && ask < 1.0 => {
                     if ask > signal.price * 1.25 {
                         info!(
                             "SKIP: price moved too much for {} (was {:.0}ct, now {:.0}ct)",
@@ -269,11 +269,21 @@ impl Executor {
                         );
                         return Ok(false);
                     }
-                    // Buy 1ct above best ask to sweep deeper into the book.
-                    // FOK on exact ask fails when top-of-book is thin.
-                    (ask + 0.01_f64).min(0.99)
+                    // Only add 1ct buffer when top-of-book is too thin for our order.
+                    // Estimate order size: ~$15 / ask_price (typical copy trade).
+                    let est_shares = 15.0 / ask;
+                    let need_sweep = depth < est_shares * 1.5; // 50% margin
+                    if need_sweep {
+                        info!(
+                            "ASK+1ct: {} has only {:.0}sh at {:.0}ct (need ~{:.0}sh)",
+                            signal.market_title, depth, ask * 100.0, est_shares
+                        );
+                        (ask + 0.01_f64).min(0.99)
+                    } else {
+                        ask
+                    }
                 }
-                Ok(ask) => {
+                Ok((ask, _)) => {
                     warn!(
                         "SKIP: invalid ASK {:.2} for {} — orderbook empty or resolved",
                         ask, signal.market_title

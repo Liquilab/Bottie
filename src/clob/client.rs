@@ -513,6 +513,13 @@ impl ClobClient {
         book.best_ask().ok_or_else(|| anyhow::anyhow!("no asks in orderbook for {token_id}"))
     }
 
+    /// Returns (best_ask_price, shares_at_best_ask)
+    pub async fn get_best_ask_with_depth(&self, token_id: &str) -> Result<(f64, f64)> {
+        let url = format!("{CLOB_API}/book?token_id={token_id}");
+        let book: OrderBook = self.http.get(&url).send().await?.error_for_status()?.json().await?;
+        book.best_ask_with_depth().ok_or_else(|| anyhow::anyhow!("no asks in orderbook for {token_id}"))
+    }
+
     pub async fn get_best_bid(&self, token_id: &str) -> Result<f64> {
         let url = format!("{CLOB_API}/book?token_id={token_id}");
         let book: OrderBook = self.http.get(&url).send().await?.error_for_status()?.json().await?;
