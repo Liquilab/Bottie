@@ -93,13 +93,13 @@ pub fn copy_trade_size(
     //   Q3 $480-1879: 91% WR, +80% ROI
     //   Q4 >$1879:  93% WR, +57% ROI
     let pct = if cannae_game_total_usdc < 100.0 {
-        0.005 // 0.5% — low confidence
+        0.010 // 1.0% — low confidence
     } else if cannae_game_total_usdc < 500.0 {
-        0.010 // 1.0% — base
+        0.020 // 2.0% — base
     } else if cannae_game_total_usdc < 2000.0 {
-        0.015 // 1.5% — high confidence
+        0.030 // 3.0% — high confidence
     } else {
-        0.020 // 2.0% — very high confidence (93% WR)
+        0.040 // 4.0% — very high confidence (93% WR)
     };
     let leg_budget = bankroll * pct;
     let our_shares = leg_budget / price;
