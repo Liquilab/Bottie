@@ -1,0 +1,119 @@
+{
+  "analysis_date": "2026-03-24T15:13:11.091042",
+  "data_range": {
+    "start": "2026-01-08T11:38:19",
+    "end": "2026-03-20T09:21:21"
+  },
+  "regime_timeline": {
+    "nba_exceeds_15pct": "2026-02-23 00:00:00",
+    "weekly_allocation": {
+      "2026-01-05": {
+        "nba_count": 43,
+        "total_count": 410,
+        "nba_pct": 10.49
+      },
+      "2026-01-12": {
+        "nba_count": 111,
+        "total_count": 762,
+        "nba_pct": 14.57
+      },
+      "2026-01-19": {
+        "nba_count": 104,
+        "total_count": 1272,
+        "nba_pct": 8.18
+      },
+      "2026-01-26": {
+        "nba_count": 83,
+        "total_count": 1973,
+        "nba_pct": 4.21
+      },
+      "2026-02-02": {
+        "nba_count": 118,
+        "total_count": 1751,
+        "nba_pct": 6.74
+      },
+      "2026-02-09": {
+        "nba_count": 84,
+        "total_count": 1474,
+        "nba_pct": 5.7
+      },
+      "2026-02-16": {
+        "nba_count": 150,
+        "total_count": 1705,
+        "nba_pct": 8.8
+      },
+      "2026-02-23": {
+        "nba_count": 451,
+        "total_count": 2132,
+        "nba_pct": 21.15
+      },
+      "2026-03-02": {
+        "nba_count": 562,
+        "total_count": 1928,
+        "nba_pct": 29.15
+      },
+      "2026-03-09": {
+        "nba_count": 540,
+        "total_count": 2105,
+        "nba_pct": 25.65
+      },
+      "2026-03-16": {
+        "nba_count": 389,
+        "total_count": 1249,
+        "nba_pct": 31.14
+      }
+    }
+  },
+  "nba_performance": {
+    "total_nba_bets": 2635,
+    "monthly": [
+      {
+        "month": "2026-01",
+        "count": 332,
+        "wins": 183,
+        "wr": 55.12,
+        "wr_ci_lower": 49.74,
+        "wr_ci_upper": 60.38,
+        "roi": 5.14,
+        "pnl": 33023.85,
+        "status": "\u2713 Valid"
+      },
+      {
+        "month": "2026-02",
+        "count": 769,
+        "wins": 430,
+        "wr": 55.92,
+        "wr_ci_lower": 52.39,
+        "wr_ci_upper": 59.39,
+        "roi": 2.63,
+        "pnl": 71570.97,
+        "status": "\u2713 Valid"
+      },
+      {
+        "month": "2026-03",
+        "count": 1534,
+        "wins": 827,
+        "wr": 53.91,
+        "wr_ci_lower": 51.41,
+        "wr_ci_upper": 56.39,
+        "roi": 5.89,
+        "pnl": 179011.55,
+        "status": "\u2713 Valid"
+      }
+    ]
+  },
+  "overall_stats": {
+    "total_bets": 16761,
+    "total_wins": 11233,
+    "wr_pct": 67.02,
+    "wr_ci_lower": 66.3,
+    "wr_ci_upper": 67.73,
+    "total_roi_pct": 25.44,
+    "total_pnl": 9475645.31,
+    "total_invested": 37244467.22
+  },
+  "warnings": {
+    "survivorship_bias": "Closed-positions API shows only winners for draw/win markets",
+    "nba_data_months_low": "Only 2-3 months of significant NBA data available"
+  }
+}
