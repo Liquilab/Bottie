@@ -580,12 +580,12 @@ async fn copy_trading_loop(
                             game.event_slug, game.source_name,
                             t5_match.positions.len(), t5_match.t30_position_count,
                         );
-                        let filled = execute_stable_game(
+                        execute_stable_game(
                             &game, &mut executor, &risk, &logger, &config, true,
                         ).await;
-                        if filled {
-                            t5_executed.insert(t5_match.game_event_slug.clone());
-                        }
+                        // Always mark as executed — never retry. If the order failed,
+                        // retrying every 15 seconds spams the CLOB API and wastes fees.
+                        t5_executed.insert(t5_match.game_event_slug.clone());
                     }
 
                     // Cleanup: remove watched games that have already started (past due)
