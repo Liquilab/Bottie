@@ -86,10 +86,22 @@ pub fn copy_trade_size(
         return 0.0;
     }
 
-    // Flat 1% bankroll per leg. Each leg gets the same budget regardless
-    // of Cannae's sizing — his spread might be $24 while his moneyline is
-    // $9K on the same game, but both have ~85% WR and ~54% ROI.
-    let leg_budget = bankroll * 0.01;
+    // Tiered sizing: scale with Cannae's game total as confidence signal.
+    // Data (173 resolved bets, Jan-Mar 2026):
+    //   Q1 <$68:    70% WR, +89% ROI
+    //   Q2 $68-480: 86% WR, +72% ROI
+    //   Q3 $480-1879: 91% WR, +80% ROI
+    //   Q4 >$1879:  93% WR, +57% ROI
+    let pct = if cannae_game_total_usdc < 100.0 {
+        0.005 // 0.5% — low confidence
+    } else if cannae_game_total_usdc < 500.0 {
+        0.010 // 1.0% — base
+    } else if cannae_game_total_usdc < 2000.0 {
+        0.015 // 1.5% — high confidence
+    } else {
+        0.020 // 2.0% — very high confidence (93% WR)
+    };
+    let leg_budget = bankroll * pct;
     let our_shares = leg_budget / price;
     let our_usdc = leg_budget;
 
