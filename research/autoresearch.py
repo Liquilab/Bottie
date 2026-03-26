@@ -1,490 +1,489 @@
 """
-Evolutionary autoresearch — optimizes the wallet portfolio through Darwinian selection.
+Cannae Intelligence Engine — daily analysis of Cannae's trading behavior.
 
-Inspired by distributed AGI evolutionary systems. Runs every 2 hours:
-1. Load scout report + research DAG + playbook
-2. Determine mode (conservative/normal/aggressive) based on bankroll
-3. Generate 30 mutations of the current wallet portfolio
-4. Score each with composite fitness (WR, sharpe, consistency, parsimony, resilience)
-5. Best mutation survives if it beats current by 2+ points
-6. Every 3rd cycle: LLM curator distills patterns into playbook
+Replaces the old evolutionary wallet optimizer. Runs daily (or --once):
+1. Collect Cannae data (trades, positions, events)
+2. Run intelligence modules (event selection, entry prices, sizing, temporal, odds)
+3. Save report + history
+4. Claude curator distills rules → cannae_playbook.md
+5. Check yesterday's predictions vs today's actuals
 
-The ONLY thing this changes is config.yaml's watchlist. Never touches
-sizing, kelly, delays, or any other bot parameter.
+Usage:
+    python3 autoresearch.py --once          # Single run
+    python3 autoresearch.py                 # Continuous (daily)
+    python3 autoresearch.py --odds-only     # Only collect odds (for 2x/day cron)
 """
 
 import asyncio
 import json
 import logging
+import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
-
-import yaml
-
-from curator import curate_playbook, load_playbook, save_playbook
-from dag import append_decision, diff_portfolios, load_dag, update_outcomes
-from fitness import composite_fitness, load_our_wallet_performance
-from portfolio import (
-    Portfolio,
-    available_candidates,
-    generate_mutations,
-    portfolio_from_config,
-)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
-log = logging.getLogger("autoresearch")
+log = logging.getLogger("intelligence")
 
-CONFIG_PATH = "config.yaml"
-SCOUT_REPORT_PATH = "data/scout_report.json"
+# Add research dir to path for imports
+sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent / "cannae_quant_analysis"))
 
-# Pinned wallets — autoresearch must NEVER remove these
-PINNED_WALLETS = set()
+from cannae_quant_analysis.analyze import (
+    collect_cannae_data,
+    analyze_by_group,
+    analyze_sizing_signal,
+    analyze_timing,
+    analyze_leg_correlation,
+    analyze_edge_decay,
+    analyze_hauptbet,
+    generate_alerts,
+    generate_recommendations,
+    wilson_ci,
+    REPORT_FILE,
+    HISTORY,
+)
+from intelligence.temporal import analyze_temporal
+from intelligence.sizing_model import analyze_sizing_model
+from intelligence.event_menu import analyze_event_selection
+from intelligence.entry_price import analyze_entry_prices
+from intelligence.odds_edge import collect_odds, analyze_odds_edge
+from curator import curate_playbook, load_playbook, save_playbook
+from dag import (
+    load_dag,
+    append_discovery,
+    extract_discoveries,
+    save_predictions,
+    check_predictions,
+)
 
-# Minimum trades before acting on data
-MIN_TRADES_FOR_REMOVE = 20
-MIN_TRADES_FOR_REWEIGHT = 10
-
-cycle_count = 0
+INTEL_REPORT_PATH = Path("research/cannae_quant_analysis/intelligence_report.json")
+INTEL_HISTORY_DIR = Path("research/cannae_quant_analysis/history")
+PREDICTIONS_PATH = Path("data/predictions.json")
 
 
-def load_config(path: str = CONFIG_PATH) -> dict:
-    with open(path) as f:
-        return yaml.safe_load(f)
+async def intelligence_cycle():
+    """Run one full intelligence cycle."""
+    log.info("=" * 70)
+    log.info("CANNAE INTELLIGENCE ENGINE — CYCLE START")
+    log.info("=" * 70)
 
+    # --- 1. Data Collection ---
+    log.info("\n--- Phase 1: Data Collection ---")
+    dataset = collect_cannae_data()
+    resolved = dataset["resolved"]
+    event_cache = dataset["event_cache"]
+    log.info(f"Dataset: {len(dataset['all_bets'])} bets ({len(resolved)} resolved, {len(dataset['open_bets'])} open)")
 
-def save_config(config: dict, path: str = CONFIG_PATH):
-    """Atomic config write: tmp → fsync → rename."""
-    import os
-    tmp_path = path + ".tmp"
-    with open(tmp_path, "w") as f:
-        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-        f.flush()
-        os.fsync(f.fileno())
-    os.rename(tmp_path, path)
+    # --- 2. Original Quant Analysis (preserve existing report.json) ---
+    log.info("\n--- Phase 2: Quant Analysis (existing) ---")
+    quant_report = _run_quant_analysis(dataset)
 
+    # --- 3. Intelligence Modules ---
+    log.info("\n--- Phase 3: Intelligence Modules ---")
 
-def load_scout_report() -> dict:
-    p = Path(SCOUT_REPORT_PATH)
-    if not p.exists():
-        return {}
+    log.info("  Running temporal analysis...")
+    temporal = analyze_temporal(dataset)
+
+    log.info("  Running sizing model...")
+    sizing = analyze_sizing_model(dataset)
+
+    log.info("  Running event selection analysis...")
+    event_selection = analyze_event_selection(dataset)
+
+    log.info("  Running entry price analysis...")
+    entry_prices = analyze_entry_prices(dataset)
+
+    log.info("  Running odds edge analysis...")
+    odds_edge = analyze_odds_edge(dataset)
+
+    # --- 4. Collect fresh odds (budget-aware) ---
+    log.info("\n--- Phase 4: Odds Collection ---")
+    _collect_odds_if_needed(dataset)
+
+    # --- 5. Build full report ---
+    log.info("\n--- Phase 5: Build Report ---")
+    report = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "quant_analysis": quant_report,
+        "event_selection": event_selection,
+        "entry_prices": entry_prices,
+        "sizing": sizing,
+        "temporal": temporal,
+        "odds_edge": odds_edge,
+    }
+
+    # Save reports
+    INTEL_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    INTEL_REPORT_PATH.write_text(json.dumps(report, indent=2, default=str))
+    log.info(f"Intelligence report → {INTEL_REPORT_PATH}")
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    INTEL_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    history_file = INTEL_HISTORY_DIR / f"{today}_intel.json"
+    history_file.write_text(json.dumps(report, indent=2, default=str))
+    log.info(f"History → {history_file}")
+
+    # --- 6. Extract discoveries → DAG ---
+    log.info("\n--- Phase 6: Discovery Extraction ---")
+    discoveries = extract_discoveries(report)
+    for d in discoveries:
+        append_discovery(d)
+    log.info(f"Logged {len(discoveries)} discoveries to DAG")
+
+    # --- 7. Check yesterday's predictions ---
+    log.info("\n--- Phase 7: Prediction Check ---")
+    prediction_results = _check_yesterdays_predictions(dataset)
+
+    # --- 8. Curator: distill playbook ---
+    log.info("\n--- Phase 8: Strategy Curator ---")
     try:
-        return json.loads(p.read_text())
-    except Exception as e:
-        log.error(f"failed to load scout report: {e}")
-        return {}
-
-
-def get_bankroll() -> float:
-    """Get current bankroll from bot's STATUS log (on-chain USDC).
-
-    Prefers the real on-chain balance logged by the bot.
-    Falls back to PnL-based estimate only if no STATUS found.
-    """
-    import subprocess
-
-    # Try to get real on-chain bankroll from bot's STATUS log
-    try:
-        result = subprocess.run(
-            ["journalctl", "-u", "bottie", "--no-pager", "-n", "200"],
-            capture_output=True, text=True, timeout=5,
+        current_playbook = load_playbook()
+        new_playbook = await curate_playbook(
+            report, current_playbook, prediction_results
         )
-        for line in reversed(result.stdout.strip().splitlines()):
-            if "bankroll=$" in line:
-                # Parse: bankroll=$25.80
-                idx = line.index("bankroll=$") + len("bankroll=$")
-                end = line.index(" ", idx) if " " in line[idx:] else len(line)
-                return max(1.0, float(line[idx:end]))
-    except Exception:
-        pass
+        save_playbook(new_playbook)
+        log.info("Playbook updated → data/cannae_playbook.md")
 
-    # Fallback: estimate from trades
-    trades_path = Path("data/trades.jsonl")
-    if not trades_path.exists():
-        return 30.0
+        # Extract predictions from playbook for tomorrow
+        _save_curator_predictions(new_playbook)
+    except Exception as e:
+        log.error(f"Curator failed: {e}")
 
-    total_pnl = 0
-    for line in trades_path.read_text().strip().splitlines():
-        try:
-            t = json.loads(line)
-            if t.get("filled") and not t.get("dry_run") and t.get("pnl") is not None:
-                total_pnl += t["pnl"]
-        except (json.JSONDecodeError, KeyError):
-            continue
+    # --- 9. Telegram Report ---
+    log.info("\n--- Phase 9: Telegram Report ---")
+    try:
+        playbook_text = load_playbook()
+        _send_telegram_report(report, playbook_text)
+    except Exception as e:
+        log.error(f"Telegram report failed: {e}")
 
-    return max(1.0, 250 + total_pnl)
+    # --- Summary ---
+    log.info("\n" + "=" * 70)
+    log.info("CYCLE COMPLETE")
+    log.info("=" * 70)
+    _print_summary(report)
 
 
-def get_portfolio_value() -> float:
-    """Estimate total portfolio value (cash + open positions)."""
-    bankroll = get_bankroll()
+def _run_quant_analysis(dataset: dict) -> dict:
+    """Run the original quant analysis modules and save report.json."""
+    resolved = dataset["resolved"]
+    event_cache = dataset["event_cache"]
+    all_bets = dataset["all_bets"]
 
-    trades_path = Path("data/trades.jsonl")
-    if not trades_path.exists():
-        return bankroll
+    if not resolved:
+        return {"error": "no resolved bets"}
 
-    open_value = 0.0
-    for line in trades_path.read_text().strip().splitlines():
-        try:
-            t = json.loads(line)
-            if t.get("filled") and not t.get("dry_run") and t.get("result") is None:
-                # Open position: estimate value as initial investment * 0.7 (conservative)
-                open_value += (t.get("size_usdc", 0) or 0) * 0.7
-        except (json.JSONDecodeError, KeyError):
-            continue
+    total_wins = sum(1 for b in resolved if b["result"] == "WIN")
+    total_cost = sum(b["cost"] for b in resolved)
+    total_pnl = sum(b["pnl"] for b in resolved)
+    overall = {
+        "bets": len(resolved),
+        "wins": total_wins,
+        "losses": len(resolved) - total_wins,
+        "wr": round(total_wins / len(resolved), 4),
+        "wr_ci_95": list(wilson_ci(total_wins, len(resolved))),
+        "roi": round(total_pnl / total_cost, 4) if total_cost > 0 else 0,
+        "pnl": round(total_pnl, 2),
+    }
 
-    return bankroll + open_value
+    by_mt = analyze_by_group(resolved, lambda r: r["mt"])
+    by_league = analyze_by_group(resolved, lambda r: r["league"])
+    sizing = analyze_sizing_signal(resolved)
+    timing = analyze_timing(resolved, event_cache)
+    correlation = analyze_leg_correlation(resolved)
+    decay = analyze_edge_decay(resolved)
+    hauptbet = analyze_hauptbet(resolved)
+
+    ts_range = sorted(b["first_ts"] for b in resolved if b["first_ts"])
+    report = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "data_range": {
+            "from": datetime.fromtimestamp(ts_range[0], tz=timezone.utc).strftime("%Y-%m-%d") if ts_range else "",
+            "to": datetime.fromtimestamp(ts_range[-1], tz=timezone.utc).strftime("%Y-%m-%d") if ts_range else "",
+        },
+        "total_bets_analyzed": len(all_bets),
+        "resolved_bets": len(resolved),
+        "open_bets": len(dataset["open_bets"]),
+        "overall": overall,
+        "by_market_type": by_mt,
+        "by_league": by_league,
+        "sizing_signal": sizing,
+        "timing": timing,
+        "leg_correlation": correlation,
+        "edge_decay": decay,
+        "hauptbet_analysis": hauptbet,
+        "alerts": generate_alerts({"overall": overall, "by_league": by_league, "timing": timing, "leg_correlation": correlation}),
+        "recommendations": generate_recommendations({"overall": overall, "by_league": by_league, "timing": timing, "leg_correlation": correlation}),
+    }
+
+    # Save original report.json (backwards compatible)
+    REPORT_FILE.write_text(json.dumps(report, indent=2))
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    (HISTORY / f"{today}.json").write_text(json.dumps(report, indent=2))
+
+    return report
 
 
-def determine_mode(bankroll: float, portfolio_value: float = None) -> str:
-    """Determine mode based on portfolio value, not just cash.
+def _collect_odds_if_needed(dataset: dict):
+    """Collect odds only if we haven't already today. Budget: max 5 sport keys/day."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    snapshot_file = Path(f"data/odds_snapshots/{today}.jsonl")
 
-    Cash bankroll can be misleading when capital is in open positions.
-    """
-    value = portfolio_value if portfolio_value else bankroll
-    if value < 50:
-        return "conservative"
-    elif value > 200:
-        return "aggressive"
-    return "normal"
-
-
-def apply_portfolio(portfolio: Portfolio, config: dict):
-    """Write the new watchlist to config.yaml.
-
-    Respects wallet_weights_override: manually pinned weights are preserved.
-    """
-    overrides = config.get("autoresearch_params", {}).get("wallet_weights_override", {})
-
-    watchlist = []
-    for w in portfolio.wallets:
-        weight = round(w.weight, 2)
-        # If this wallet has a manual override, use that weight instead
-        if w.address in overrides:
-            weight = overrides[w.address]
-        watchlist.append({
-            "address": w.address,
-            "name": w.name,
-            "weight": weight,
-            "sports": ["all"],
-        })
-    config["copy_trading"]["watchlist"] = watchlist
-    save_config(config)
-
-
-async def evolution_cycle():
-    """Run one evolutionary cycle."""
-    global cycle_count
-    cycle_count += 1
-    log.info(f"=== EVOLUTION CYCLE {cycle_count} START ===")
-
-    # 1. Load everything
-    config = load_config()
-    scout = load_scout_report()
-    dag = load_dag()
-    playbook = load_playbook()
-    watchlist = config.get("copy_trading", {}).get("watchlist", [])
-
-    if not scout:
-        log.warning("no scout report — skipping cycle")
-        log.info("=== EVOLUTION CYCLE COMPLETE ===")
+    if snapshot_file.exists() and snapshot_file.stat().st_size > 100:
+        log.info("Odds already collected today — skipping")
         return
 
-    # Check scout report age
-    report_age = 0
-    if scout.get("timestamp"):
+    # Determine active leagues from today's/recent bets
+    from collections import Counter
+    recent_leagues = Counter()
+    for b in dataset["all_bets"]:
+        recent_leagues[b["league"]] += 1
+
+    # Top 5 most active leagues (budget: 5 req/day = 150/month)
+    top_leagues = [league for league, _ in recent_leagues.most_common(5)]
+    if not top_leagues:
+        top_leagues = ["epl", "bun", "lal", "itc", "nba"]
+
+    log.info(f"Collecting odds for: {top_leagues}")
+    collect_odds(active_leagues=top_leagues)
+
+
+def _check_yesterdays_predictions(dataset: dict) -> dict:
+    """Load yesterday's predictions and check against today's data."""
+    if not PREDICTIONS_PATH.exists():
+        return {}
+    try:
+        all_preds = json.loads(PREDICTIONS_PATH.read_text())
+        if not all_preds:
+            return {}
+        # Find unchecked predictions
+        for batch in reversed(all_preds):
+            if not batch.get("checked", False):
+                result = check_predictions(batch.get("predictions", []), dataset)
+                batch["checked"] = True
+                batch["result"] = result
+                PREDICTIONS_PATH.write_text(json.dumps(all_preds, indent=2))
+                log.info(f"Prediction check: {result.get('correct', 0)}/{result.get('total_checkable', 0)} correct")
+                return result
+    except Exception as e:
+        log.error(f"Prediction check failed: {e}")
+    return {}
+
+
+def _save_curator_predictions(playbook_text: str):
+    """Extract predictions from curator output and save for tomorrow's check."""
+    # Simple heuristic: look for lines after "VOORSPELLINGEN" or "PREDICTIONS"
+    lines = playbook_text.split("\n")
+    predictions = []
+    in_predictions = False
+
+    for line in lines:
+        lower = line.lower().strip()
+        if "voorspelling" in lower or "prediction" in lower:
+            in_predictions = True
+            continue
+        if in_predictions and line.strip():
+            predictions.append({
+                "type": "curator_prediction",
+                "text": line.strip(),
+            })
+        if in_predictions and not line.strip():
+            break
+
+    if predictions:
+        save_predictions(predictions[:5])
+        log.info(f"Saved {len(predictions[:5])} predictions for tomorrow")
+
+
+def _print_summary(report: dict):
+    """Print concise summary to stdout."""
+    overall = report.get("quant_analysis", {}).get("overall", {})
+    if overall:
+        log.info(f"Overall: {overall.get('bets', 0)} bets, {overall.get('wr', 0):.1%} WR, {overall.get('roi', 0):.1%} ROI, ${overall.get('pnl', 0):.0f} PnL")
+
+    es = report.get("event_selection", {})
+    sr = es.get("selection_rate", {})
+    if isinstance(sr, dict) and sr.get("available_events"):
+        log.info(f"Event selection: {sr.get('selected_events', '?')}/{sr.get('available_events', '?')} ({sr.get('rate', 0):.1%})")
+
+    oe = report.get("odds_edge", {})
+    if oe.get("matched_trades"):
+        edge = oe.get("edge_analysis", {})
+        log.info(f"Odds edge: {oe['matched_trades']} matched, avg edge {edge.get('avg_edge', 0):.1%}")
+
+    tmp = report.get("temporal", {})
+    batches = tmp.get("batches", {})
+    if batches.get("total_batches"):
+        log.info(f"Temporal: {batches['total_batches']} batches, avg size {batches.get('avg_batch_size', 0):.1f}")
+
+
+def _send_telegram_report(report: dict, playbook: str = ""):
+    """Format and send intelligence report via Telegram."""
+    from lib.pm_api import send_telegram
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    lines = [f"*CANNAE INTELLIGENCE — {today}*\n"]
+
+    # --- Overall Performance ---
+    overall = report.get("quant_analysis", {}).get("overall", {})
+    if overall:
+        wr = overall.get("wr", 0)
+        roi = overall.get("roi", 0)
+        pnl = overall.get("pnl", 0)
+        ci = overall.get("wr_ci_95", [0, 0])
+        lines.append(f"*P&L:* ${pnl:+.0f} | *ROI:* {roi:.0%} | *WR:* {wr:.0%} [{ci[0]:.0%}-{ci[1]:.0%}]")
+        lines.append(f"Bets: {overall.get('bets', 0)} resolved, {report.get('quant_analysis', {}).get('open_bets', 0)} open\n")
+
+    # --- Top Leagues ---
+    by_league = report.get("quant_analysis", {}).get("by_league", {})
+    if by_league:
+        lines.append("*Top Leagues (by PnL):*")
+        top = sorted(by_league.items(), key=lambda x: -x[1].get("pnl", 0))[:5]
+        for league, s in top:
+            lines.append(f"  {league.upper():5s} {s['bets']:3d}b {s['wr']:.0%} WR  ${s['pnl']:+.0f}")
+        lines.append("")
+
+    # --- Event Selection ---
+    es = report.get("event_selection", {})
+    sr = es.get("selection_rate", {})
+    if isinstance(sr, dict) and sr.get("available_events"):
+        lines.append(f"*Event Selection:* {sr.get('selected_events', '?')}/{sr.get('available_events', '?')} events ({sr.get('rate', 0):.1%})")
+    filters = es.get("inferred_filters", [])
+    for f in filters[:3]:
+        lines.append(f"  Filter: {f.get('description', '')}")
+    if filters:
+        lines.append("")
+
+    # --- Entry Price Edge ---
+    ep = report.get("entry_prices", {})
+    ie = ep.get("implied_edge", {})
+    if ie:
+        best_buckets = sorted(ie.items(), key=lambda x: -x[1].get("edge", 0))[:3]
+        if best_buckets:
+            lines.append("*Best Edge Buckets:*")
+            for bucket, data in best_buckets:
+                if data.get("bets", 0) >= 5:
+                    lines.append(f"  {bucket}: edge={data['edge']:+.1%} ({data['bets']}b, ${data.get('pnl', 0):+.0f})")
+            lines.append("")
+
+    # --- Sizing Rules ---
+    sz = report.get("sizing", {})
+    rules = sz.get("decision_rules", [])
+    if rules:
+        lines.append("*Sizing Rules:*")
+        for r in rules[:3]:
+            lines.append(f"  {r.get('description', '')}")
+        lines.append("")
+
+    # --- Temporal ---
+    tmp = report.get("temporal", {})
+    batches = tmp.get("batches", {})
+    if batches.get("total_batches"):
+        lines.append(f"*Temporal:* {batches['total_batches']} batches, avg {batches.get('avg_batch_size', 0):.1f} bets, {batches.get('median_gap_hours', 0):.1f}h gap")
+
+    # Best hour
+    hod = tmp.get("hour_of_day", {})
+    if hod:
+        best_hour = max(hod.items(), key=lambda x: x[1].get("pnl", 0))
+        worst_hour = min(hod.items(), key=lambda x: x[1].get("pnl", 0))
+        lines.append(f"  Best hour: {best_hour[0]}:00 UTC (${best_hour[1].get('pnl', 0):+.0f})")
+        lines.append(f"  Worst hour: {worst_hour[0]}:00 UTC (${worst_hour[1].get('pnl', 0):+.0f})")
+        lines.append("")
+
+    # --- Odds Edge ---
+    oe = report.get("odds_edge", {})
+    edge_data = oe.get("edge_analysis", {})
+    if edge_data:
+        lines.append(f"*Odds Edge:* avg {edge_data.get('avg_edge', 0):+.1%}, {edge_data.get('positive_edge_pct', 0):.0%} positive ({oe.get('matched_trades', 0)} matched)")
+        ev = oe.get("edge_vs_outcome", {})
+        if not ev.get("insufficient_data"):
+            lines.append(f"  Winners: {ev.get('avg_edge_winners', 0):+.1%} | Losers: {ev.get('avg_edge_losers', 0):+.1%}")
+        lines.append("")
+
+    # --- Edge Decay ---
+    decay = report.get("quant_analysis", {}).get("edge_decay", {})
+    if decay.get("trend"):
+        lines.append(f"*Edge Trend:* {decay['trend']} (1st half WR={decay.get('first_half_wr', 0):.0%} → 2nd half={decay.get('second_half_wr', 0):.0%})")
+
+    # --- Alerts ---
+    alerts = report.get("quant_analysis", {}).get("alerts", [])
+    if alerts:
+        lines.append("\n*ALERTS:*")
+        for a in alerts:
+            lines.append(f"  {a['msg']}")
+
+    # --- Recommendations ---
+    recs = report.get("quant_analysis", {}).get("recommendations", [])
+    if recs:
+        lines.append("\n*Recommendations:*")
+        for r in recs[:3]:
+            lines.append(f"  {r}")
+
+    # --- Playbook excerpt (last 5 rules) ---
+    if playbook:
+        pb_lines = [l.strip() for l in playbook.strip().split("\n") if l.strip() and not l.startswith("#")]
+        if pb_lines:
+            lines.append("\n*Playbook (top regels):*")
+            for l in pb_lines[:5]:
+                lines.append(f"  {l}")
+
+    message = "\n".join(lines)
+
+    # Telegram has 4096 char limit — truncate if needed
+    if len(message) > 4000:
+        message = message[:3950] + "\n\n_...afgekapt (zie intelligence_report.json)_"
+
+    ok = send_telegram(message)
+    if ok:
+        log.info("Telegram report sent")
+    else:
+        log.warning("Telegram report failed — check TELEGRAM_BOT_TOKEN/CHAT_ID")
+
+
+async def odds_only():
+    """Only collect odds — for 2x/day cron job."""
+    log.info("Odds-only collection run")
+    # Determine active leagues from recent intelligence report
+    top_leagues = ["epl", "bun", "lal", "itc", "nba"]
+    if INTEL_REPORT_PATH.exists():
         try:
-            report_time = datetime.fromisoformat(scout["timestamp"])
-            report_age = (datetime.now(timezone.utc) - report_time).total_seconds() / 3600
+            report = json.loads(INTEL_REPORT_PATH.read_text())
+            by_league = report.get("quant_analysis", {}).get("by_league", {})
+            if by_league:
+                top_leagues = sorted(by_league.keys(), key=lambda k: -by_league[k].get("bets", 0))[:5]
         except Exception:
             pass
-    if report_age > 6:
-        log.warning(f"scout report is {report_age:.1f}h old — skipping cycle")
-        log.info("=== EVOLUTION CYCLE COMPLETE ===")
-        return
-
-    log.info(f"watchlist: {len(watchlist)} wallets | scout: {scout.get('candidates_evaluated', 0)} candidates | DAG: {len(dag)} decisions")
-
-    # 2. Update DAG outcomes from trade data
-    dag = update_outcomes(dag)
-
-    # 3. Build current portfolio and score it
-    current = portfolio_from_config(watchlist, scout)
-    current.fitness = composite_fitness(current, dag)
-    log.info(f"current portfolio fitness: {current.fitness:.1f}/100 ({len(current.wallets)} wallets)")
-
-    # 4. Determine mode
-    bankroll = get_bankroll()
-    portfolio_value = get_portfolio_value()
-    mode = determine_mode(bankroll, portfolio_value)
-    log.info(f"mode: {mode} (bankroll ~${bankroll:.0f}, portfolio ~${portfolio_value:.0f})")
-
-    # 5. Get candidates
-    current_addrs = {w.address for w in current.wallets}
-    candidates = available_candidates(scout, current_addrs)
-    log.info(f"available candidates: {len(candidates)}")
-
-    # 6. Generate 30 mutations
-    mutations = generate_mutations(current, candidates, mode, n=30)
-
-    # 7. Score each mutation
-    for m in mutations:
-        m.fitness = composite_fitness(m, dag)
-
-    # Sort by fitness
-    mutations.sort(key=lambda m: m.fitness, reverse=True)
-
-    # Log top 5
-    for i, m in enumerate(mutations[:5]):
-        log.info(f"  #{i+1} {m.mutation_type:10s} fitness={m.fitness:5.1f} wallets={len(m.wallets)}")
-
-    # 8. Select best — must beat current by 2+ points
-    best = mutations[0]
-    improvement = best.fitness - current.fitness
-
-    # Ensure pinned wallets are in every mutation
-    for m in mutations:
-        m_addrs = {w.address for w in m.wallets}
-        for pinned_addr in PINNED_WALLETS:
-            if pinned_addr not in m_addrs:
-                # Find pinned wallet in current portfolio and add it
-                for w in current.wallets:
-                    if w.address == pinned_addr:
-                        import copy as _copy
-                        m.wallets.append(_copy.deepcopy(w))
-                        break
-        m.fitness = composite_fitness(m, dag)
-
-    mutations.sort(key=lambda m: m.fitness, reverse=True)
-    best = mutations[0]
-    improvement = best.fitness - current.fitness
-
-    # Limit how many wallets can change per cycle (max 3 add + 3 remove)
-    if improvement >= 2.0:
-        decisions_preview = diff_portfolios(watchlist, best.wallets, best.fitness)
-        adds = sum(1 for d in decisions_preview if d["action"] == "add")
-        removes = sum(1 for d in decisions_preview if d["action"] == "remove")
-        if adds > 3 or removes > 3:
-            log.warning(f"mutation too aggressive ({adds} adds, {removes} removes) — capping changes")
-            # Fall back to best non-random mutation
-            for m in mutations:
-                if m.mutation_type != "random" and m.fitness > current.fitness + 2.0:
-                    best = m
-                    improvement = best.fitness - current.fitness
-                    break
-                else:
-                    log.info("no moderate mutation found — keeping current portfolio")
-                    improvement = 0
-
-    if improvement >= 2.0:
-        log.info(f"EVOLVING: {best.mutation_type} (fitness {current.fitness:.1f} → {best.fitness:.1f}, +{improvement:.1f})")
-
-        # Log decisions to DAG
-        decisions = diff_portfolios(watchlist, best.wallets, best.fitness)
-        for d in decisions:
-            d["mutation_type"] = best.mutation_type
-            d["cycle"] = cycle_count
-            append_decision(d)
-            action = d["action"]
-            name = d["wallet_name"]
-            if action == "add":
-                log.info(f"  ADD: {name} weight={d['new_weight']:.2f}")
-            elif action == "remove":
-                log.info(f"  REMOVE: {name}")
-            elif action == "reweight":
-                log.info(f"  REWEIGHT: {name} {d['old_weight']:.2f} → {d['new_weight']:.2f}")
-
-        # Apply to config
-        apply_portfolio(best, config)
-        log.info(f"config.yaml updated — {len(best.wallets)} wallets")
-    else:
-        log.info(f"no improvement found (best: +{improvement:.1f}, need +2.0) — keeping current portfolio")
-
-    # 9. Playbook curator (every 3rd cycle)
-    ar_config = config.get("autoresearch", {})
-    curator_interval = ar_config.get("curator_every_n_cycles", 3)
-    model = ar_config.get("claude_model", "claude-sonnet-4-20250514")
-
-    if cycle_count % curator_interval == 0:
-        log.info("running playbook curator...")
-        try:
-            new_playbook = await curate_playbook(dag, playbook, current.fitness, model=model)
-            save_playbook(new_playbook)
-            log.info("playbook updated")
-        except Exception as e:
-            log.error(f"curator failed: {e}")
-
-    # 10. Smart actions: data-driven wallet management
-    config = load_config()  # reload after potential changes
-    smart_actions(config)
-
-    log.info(f"=== EVOLUTION CYCLE {cycle_count} COMPLETE ===")
-
-
-def smart_actions(config: dict):
-    """Data-driven actions based on OUR actual trade performance.
-
-    Three features:
-    1. Auto-remove wallets with proven negative EV (≥20 trades, EV < -$0.50)
-    2. Per-wallet market type scoring (downweight wallets on losing market types)
-    3. Trading schedule (log best/worst hours for future use)
-
-    Only acts when there's enough data (minimum trade thresholds).
-    """
-    our_perf = load_our_wallet_performance()
-    if not our_perf:
-        log.info("smart-actions: no trade data yet — skipping")
-        return
-
-    watchlist = config.get("copy_trading", {}).get("watchlist", [])
-    overrides = config.get("autoresearch_params", {}).get("wallet_weights_override", {})
-    changed = False
-
-    # === 1. Auto-remove wallets with proven negative EV ===
-    remove_addrs = set()
-    for w in watchlist:
-        addr = w["address"].lower()
-        if addr in PINNED_WALLETS or addr in overrides:
-            continue  # respect manual overrides
-        perf = our_perf.get(addr, {})
-        n = perf.get("n", 0)
-        ev = perf.get("ev", 0)
-        if n >= MIN_TRADES_FOR_REMOVE and ev < -0.50:
-            log.info(
-                "SMART REMOVE: %s — %d trades, EV=$%.2f/trade (threshold: ≥%d trades, EV<-$0.50)",
-                w["name"], n, ev, MIN_TRADES_FOR_REMOVE,
-            )
-            remove_addrs.add(addr)
-
-    if remove_addrs:
-        config["copy_trading"]["watchlist"] = [
-            w for w in watchlist if w["address"].lower() not in remove_addrs
-        ]
-        changed = True
-
-    # === 2. Per-wallet market type scoring ===
-    # Load trades for per-wallet per-market-type breakdown
-    trades_path = Path("data/trades.jsonl")
-    if trades_path.exists():
-        from collections import defaultdict
-        wallet_market_perf = defaultdict(lambda: defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0.0}))
-
-        for line in trades_path.read_text().strip().splitlines():
-            try:
-                t = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if not t.get("filled") or t.get("dry_run") or t.get("result") not in ("win", "loss"):
-                continue
-            if "up or down" in (t.get("market_title") or "").lower():
-                continue
-            addr = (t.get("copy_wallet") or "").lower()
-            if not addr:
-                continue
-
-            # Classify market type
-            title = (t.get("market_title") or "").lower()
-            if "draw" in title:
-                mtype = "draw"
-            elif "spread" in title or "(-" in title or "(+" in title:
-                mtype = "spread"
-            elif "o/u" in title or "over/under" in title or "total" in title:
-                mtype = "total"
-            else:
-                mtype = "moneyline"
-
-            perf = wallet_market_perf[addr][mtype]
-            perf["pnl"] += t.get("pnl", 0) or 0
-            if t["result"] == "win":
-                perf["wins"] += 1
-            else:
-                perf["losses"] += 1
-
-        # Log per-wallet market type performance
-        for w in config["copy_trading"]["watchlist"]:
-            addr = w["address"].lower()
-            if addr in wallet_market_perf:
-                types = wallet_market_perf[addr]
-                for mtype, perf in sorted(types.items(), key=lambda x: x[1]["pnl"]):
-                    n = perf["wins"] + perf["losses"]
-                    if n >= MIN_TRADES_FOR_REWEIGHT:
-                        ev = perf["pnl"] / n
-                        wr = perf["wins"] / n * 100
-                        if ev < -0.30:
-                            log.info(
-                                "SMART INSIGHT: %s loses on %s — %d trades, WR=%.0f%%, EV=$%.2f",
-                                w["name"], mtype, n, wr, ev,
-                            )
-
-    # === 3. Trading schedule analysis ===
-    if trades_path.exists():
-        hour_perf = defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0.0})
-        for line in trades_path.read_text().strip().splitlines():
-            try:
-                t = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if not t.get("filled") or t.get("dry_run") or t.get("result") not in ("win", "loss"):
-                continue
-            if "up or down" in (t.get("market_title") or "").lower():
-                continue
-            ts = t.get("timestamp", "")
-            if len(ts) >= 13:
-                hour = ts[11:13]
-                hour_perf[hour]["pnl"] += t.get("pnl", 0) or 0
-                if t["result"] == "win":
-                    hour_perf[hour]["wins"] += 1
-                else:
-                    hour_perf[hour]["losses"] += 1
-
-        # Log best and worst hours (only with enough data)
-        best_hour, worst_hour = None, None
-        best_ev, worst_ev = -999, 999
-        for hour, perf in hour_perf.items():
-            n = perf["wins"] + perf["losses"]
-            if n >= 10:
-                ev = perf["pnl"] / n
-                if ev > best_ev:
-                    best_ev = ev
-                    best_hour = hour
-                if ev < worst_ev:
-                    worst_ev = ev
-                    worst_hour = hour
-
-        if best_hour and worst_hour:
-            log.info(
-                "SMART SCHEDULE: best hour=%s:00 UTC (EV=$%.2f), worst hour=%s:00 UTC (EV=$%.2f)",
-                best_hour, best_ev, worst_hour, worst_ev,
-            )
-
-    if changed:
-        save_config(config)
-        log.info("smart-actions: config updated")
+    collect_odds(active_leagues=top_leagues)
 
 
 async def main():
     import argparse
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--once", action="store_true")
+    parser = argparse.ArgumentParser(description="Cannae Intelligence Engine")
+    parser.add_argument("--once", action="store_true", help="Single run")
+    parser.add_argument("--odds-only", action="store_true", help="Only collect odds")
     args = parser.parse_args()
 
+    if args.odds_only:
+        await odds_only()
+        return
+
     if args.once:
-        await evolution_cycle()
+        await intelligence_cycle()
         return
 
     while True:
         try:
-            await evolution_cycle()
+            await intelligence_cycle()
         except Exception as e:
-            log.error(f"evolution cycle failed: {e}")
+            log.error(f"Intelligence cycle failed: {e}", exc_info=True)
 
-        config = load_config()
-        interval = config.get("autoresearch", {}).get("interval_hours", 2)
-        log.info(f"sleeping {interval} hours until next cycle...")
-        await asyncio.sleep(interval * 3600)
+        log.info("Sleeping 24 hours until next cycle...")
+        await asyncio.sleep(86400)
 
 
 if __name__ == "__main__":

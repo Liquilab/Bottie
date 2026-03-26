@@ -544,6 +544,73 @@ def analyze_hauptbet(resolved: list) -> dict:
             "pnl": round(s["pnl"], 2),
             "avg_legs": round(statistics.mean(s["legs"]), 1),
         }
+
+    # --- Hauptbet-only vs full-game comparison ---
+    comparison = {"games": [], "summary": {}}
+    multi_leg_events = {slug: legs for slug, legs in by_event.items() if len(legs) > 1}
+
+    totals = {"hb_cost": 0, "hb_pnl": 0, "full_cost": 0, "full_pnl": 0,
+              "hedge_helped": 0, "hedge_hurt": 0, "hedge_neutral": 0}
+
+    for slug, legs in sorted(multi_leg_events.items(), key=lambda x: -sum(l["cost"] for l in x[1])):
+        legs.sort(key=lambda x: x["cost"], reverse=True)
+        hb = legs[0]
+        non_hb = legs[1:]
+
+        full_cost = sum(l["cost"] for l in legs)
+        full_pnl = sum(l["pnl"] for l in legs)
+        hb_cost = hb["cost"]
+        hb_pnl = hb["pnl"]
+        non_hb_pnl = sum(l["pnl"] for l in non_hb)
+        non_hb_cost = sum(l["cost"] for l in non_hb)
+
+        full_roi = full_pnl / full_cost if full_cost > 0 else 0
+        hb_roi = hb_pnl / hb_cost if hb_cost > 0 else 0
+
+        totals["hb_cost"] += hb_cost
+        totals["hb_pnl"] += hb_pnl
+        totals["full_cost"] += full_cost
+        totals["full_pnl"] += full_pnl
+
+        if non_hb_pnl > 0:
+            totals["hedge_helped"] += 1
+        elif non_hb_pnl < -0.01:
+            totals["hedge_hurt"] += 1
+        else:
+            totals["hedge_neutral"] += 1
+
+        comparison["games"].append({
+            "slug": slug,
+            "hauptbet": {"mt": hb["mt"], "outcome": hb["outcome"], "result": hb["result"],
+                         "cost": round(hb_cost, 2), "pnl": round(hb_pnl, 2), "roi": round(hb_roi, 4)},
+            "full_game": {"legs": len(legs), "cost": round(full_cost, 2), "pnl": round(full_pnl, 2),
+                          "roi": round(full_roi, 4)},
+            "non_hb": {"legs": len(non_hb), "cost": round(non_hb_cost, 2), "pnl": round(non_hb_pnl, 2)},
+        })
+
+    n = len(multi_leg_events)
+    comparison["summary"] = {
+        "multi_leg_games": n,
+        "hauptbet_only": {
+            "total_cost": round(totals["hb_cost"], 2),
+            "total_pnl": round(totals["hb_pnl"], 2),
+            "roi": round(totals["hb_pnl"] / totals["hb_cost"], 4) if totals["hb_cost"] > 0 else 0,
+        },
+        "full_game": {
+            "total_cost": round(totals["full_cost"], 2),
+            "total_pnl": round(totals["full_pnl"], 2),
+            "roi": round(totals["full_pnl"] / totals["full_cost"], 4) if totals["full_cost"] > 0 else 0,
+        },
+        "hedge_impact": {
+            "helped": totals["hedge_helped"],
+            "hurt": totals["hedge_hurt"],
+            "neutral": totals["hedge_neutral"],
+            "net_pnl": round(totals["full_pnl"] - totals["hb_pnl"], 2),
+            "net_cost": round(totals["full_cost"] - totals["hb_cost"], 2),
+        },
+    }
+
+    result["_comparison"] = comparison
     return result
 
 
@@ -604,6 +671,59 @@ def generate_recommendations(report: dict) -> list:
     return recs
 
 
+# ---------- Data Collection (importable) ----------
+
+def collect_cannae_data(address: str = None, client: httpx.Client = None) -> dict:
+    """Collect all Cannae data — importable by intelligence modules.
+
+    Returns dict with: trades, redeems, positions, all_bets, resolved, open_bets, event_cache
+    """
+    if address is None:
+        address = load_cannae_address()
+    own_client = client is None
+    if own_client:
+        client = httpx.Client(headers=UA)
+
+    try:
+        log.info("Fetching activity (trades + redeems)...")
+        trades = fetch_activity(client, address, "trade")
+        redeems = fetch_activity(client, address, "redeem")
+        log.info(f"Fetched: {len(trades)} trades, {len(redeems)} redeems")
+
+        log.info("Fetching positions...")
+        positions = fetch_positions(client, address)
+        log.info(f"Fetched: {len(positions)} positions")
+
+        save_raw(trades + redeems)
+
+        all_bets = build_resolved_bets(trades, redeems, positions)
+        resolved = [b for b in all_bets if b["result"] in ("WIN", "LOSS")]
+        open_bets = [b for b in all_bets if b["result"] == "OPEN"]
+        log.info(f"Total bets: {len(all_bets)} (resolved: {len(resolved)}, open: {len(open_bets)})")
+
+        # Event metadata
+        event_cache = {}
+        if EVENT_CACHE.exists():
+            event_cache = json.loads(EVENT_CACHE.read_text())
+        slugs = {b["event_slug"] for b in all_bets if b["event_slug"]}
+        event_cache = fetch_event_metadata(client, slugs, event_cache)
+        EVENT_CACHE.write_text(json.dumps(event_cache, indent=2))
+
+        return {
+            "address": address,
+            "trades": trades,
+            "redeems": redeems,
+            "positions": positions,
+            "all_bets": all_bets,
+            "resolved": resolved,
+            "open_bets": open_bets,
+            "event_cache": event_cache,
+        }
+    finally:
+        if own_client:
+            client.close()
+
+
 # ---------- Main ----------
 
 def main():
@@ -611,44 +731,17 @@ def main():
     log.info("CANNAE QUANT ANALYSIS")
     log.info("=" * 70)
 
-    address = load_cannae_address()
-    client = httpx.Client(headers=UA)
-
-    # --- Fetch data ---
-    log.info("\n--- Step 1: Fetch activity (trades + redeems) ---")
-    trades = fetch_activity(client, address, "trade")
-    redeems = fetch_activity(client, address, "redeem")
-    log.info(f"Fetched: {len(trades)} trades, {len(redeems)} redeems")
-
-    log.info("\n--- Step 2: Fetch positions (for loser identification) ---")
-    positions = fetch_positions(client, address)
-    log.info(f"Fetched: {len(positions)} positions")
-
-    # Save raw data
-    save_raw(trades + redeems)
-
-    # --- Build resolved bets ---
-    log.info("\n--- Step 3: Build resolved bets ---")
-    all_bets = build_resolved_bets(trades, redeems, positions)
-    resolved = [b for b in all_bets if b["result"] in ("WIN", "LOSS")]
-    open_bets = [b for b in all_bets if b["result"] == "OPEN"]
-    log.info(f"Total bets: {len(all_bets)} (resolved: {len(resolved)}, open: {len(open_bets)})")
+    dataset = collect_cannae_data()
+    resolved = dataset["resolved"]
+    open_bets = dataset["open_bets"]
+    all_bets = dataset["all_bets"]
+    event_cache = dataset["event_cache"]
 
     result_counts = Counter(b["result"] for b in all_bets)
     log.info(f"  WIN={result_counts['WIN']} LOSS={result_counts['LOSS']} OPEN={result_counts['OPEN']} UNKNOWN={result_counts.get('UNKNOWN',0)}")
 
-    # --- Fetch event metadata ---
-    log.info("\n--- Step 4: Fetch event metadata ---")
-    event_cache = {}
-    if EVENT_CACHE.exists():
-        event_cache = json.loads(EVENT_CACHE.read_text())
-    slugs = {b["event_slug"] for b in all_bets if b["event_slug"]}
-    event_cache = fetch_event_metadata(client, slugs, event_cache)
-    EVENT_CACHE.write_text(json.dumps(event_cache, indent=2))
-    log.info(f"Event cache: {len(event_cache)} events")
-
     # --- Run analyses ---
-    log.info("\n--- Step 5: Run analysis modules ---")
+    log.info("\n--- Running analysis modules ---")
 
     # Overall
     total_wins = sum(1 for b in resolved if b["result"] == "WIN")
@@ -734,7 +827,6 @@ def main():
         for r in report["recommendations"]:
             log.info(f"  → {r}")
 
-    client.close()
     log.info("\nDone.")
 
 

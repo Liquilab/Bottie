@@ -1,0 +1,13 @@
+[Unit]
+Description=Cannae Intelligence Engine — daily analysis
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/bottie
+EnvironmentFile=/opt/bottie/.env
+ExecStart=/usr/bin/python3 research/autoresearch.py --once
+TimeoutStartSec=600
+StandardOutput=journal
+StandardError=journal
