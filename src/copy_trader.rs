@@ -581,7 +581,13 @@ impl CopyTrader {
     /// - "win" = title contains "win" or moneyline ("X vs. Y")
     pub fn detect_market_type(title: &str) -> String {
         let t = title.to_lowercase();
-        if t.contains("o/u") || t.contains("over/under") {
+        // Player props: "{Name}: Points/Rebounds/Assists O/U" — NOT a game total
+        if (t.contains("points o/u") || t.contains("rebounds o/u") || t.contains("assists o/u")
+            || t.contains("points over/under") || t.contains("rebounds over/under") || t.contains("assists over/under"))
+            && t.contains(": ")
+        {
+            "player_prop".to_string()
+        } else if t.contains("o/u") || t.contains("over/under") {
             "ou".to_string()
         } else if t.contains("spread") {
             "spread".to_string()
@@ -997,6 +1003,20 @@ mod tests {
             CopyTrader::detect_market_type("Arsenal vs Leverkusen BTTS"),
             "btts"
         );
+    }
+
+    #[test]
+    fn detect_market_type_player_props() {
+        // Player props should NOT match as "ou"
+        assert_eq!(CopyTrader::detect_market_type("Jalen Johnson: Points O/U 21.5"), "player_prop");
+        assert_eq!(CopyTrader::detect_market_type("Paul George: Points O/U 15.5"), "player_prop");
+        assert_eq!(CopyTrader::detect_market_type("Jalen Duren: Rebounds O/U 10.5"), "player_prop");
+        assert_eq!(CopyTrader::detect_market_type("Austin Reaves: Points O/U 23.5"), "player_prop");
+        assert_eq!(CopyTrader::detect_market_type("Tobias Harris: Assists O/U 3.5"), "player_prop");
+        // Game totals should still be "ou"
+        assert_eq!(CopyTrader::detect_market_type("Hawks vs. Pistons: O/U 229.5"), "ou");
+        assert_eq!(CopyTrader::detect_market_type("Spurs vs. Grizzlies: O/U 233.5"), "ou");
+        assert_eq!(CopyTrader::detect_market_type("Lakers vs. Pacers: O/U 239.5"), "ou");
     }
 
     #[test]
