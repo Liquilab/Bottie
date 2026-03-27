@@ -449,8 +449,9 @@ impl Executor {
             return Ok(true);
         }
 
-        // Place order: FOK for taker mode (immediate fill), GTC for maker mode (sits in book)
-        let order_type = if taker_mode { OrderType::FOK } else { OrderType::GTC };
+        // Always GTC: fills immediately at ask if liquidity exists, otherwise sits in book.
+        // No more FOK — sports delayed matching causes false "killed" errors.
+        let order_type = OrderType::GTC;
         let mode_label = if taker_mode { "TAKER" } else { "MAKER" };
         info!(
             "EXECUTE [{}]: {} {} {:.0} shares @ {:.3} = ${:.2} | edge={:.1}% | {}",
@@ -492,50 +493,6 @@ impl Executor {
                             .await?
                     } else {
                         return Err(e);
-                    }
-                // Sports FOK: 400 "fully filled or killed" = order in 3s delay.
-                // Wait 5s, check PM positions, retry if not filled.
-                } else if taker_mode && err_str.contains("fully filled or killed") {
-                    info!(
-                        "FOK DELAYED: {} — waiting 5s then checking PM positions",
-                        signal.market_title
-                    );
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-
-                    // Check if we now hold this position
-                    let funder = self.client.funder_address();
-                    let has_position = match self.client.get_wallet_positions(&funder, 500).await {
-                        Ok(positions) => positions.iter().any(|p| {
-                            p.condition_id.as_deref() == Some(&signal.condition_id)
-                                && p.size_f64() > 0.01
-                        }),
-                        Err(_) => false,
-                    };
-
-                    if has_position {
-                        info!("FOK VERIFIED: {} — position confirmed in PM", signal.market_title);
-                        // Return a synthetic filled response
-                        PostOrderResponse {
-                            order_id: None,
-                            id: None,
-                            status: Some("delayed-verified".to_string()),
-                            skipped: None,
-                            size_matched: Some(format!("{:.2}", size)),
-                            success: Some(true),
-                            error_msg: None,
-                        }
-                    } else {
-                        info!("FOK RETRY: {} — not in PM, retrying", signal.market_title);
-                        match self.client
-                            .create_and_post_order(&signal.token_id, exec_price, size, side, order_type, fee_bps)
-                            .await
-                        {
-                            Ok(r) => r,
-                            Err(e2) => {
-                                warn!("FOK RETRY FAILED: {} — {}", signal.market_title, e2);
-                                return Err(e2);
-                            }
-                        }
                     }
                 } else {
                     return Err(e);
