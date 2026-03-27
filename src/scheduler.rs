@@ -274,12 +274,13 @@ pub fn discover_continuous_from_positions(
 
 /// T-5 Confirm + Execute: For watched games starting in ~5 min,
 /// re-fetch wallet positions, compare with T-30 snapshot, return confirmed matches.
-pub async fn confirm_and_execute_t5(
-    client: &ClobClient,
+/// Uses pre-fetched positions from the poll loop (no extra API calls).
+pub fn confirm_and_execute_t5(
     watched_games: &[WatchedGame],
     watchlist: &[WatchlistEntry],
     t5_minutes: u32,
     t5_executed: &HashSet<String>,
+    raw_positions: &[(String, String, Vec<WalletPosition>)],
 ) -> Vec<T5Match> {
     let now = Utc::now();
     let mut matches = Vec::new();
@@ -298,20 +299,10 @@ pub async fn confirm_and_execute_t5(
         return Vec::new();
     }
 
-    // Collect all wallets that have snapshots across due games
-    let wallet_addrs: HashSet<String> = due_games.iter()
-        .flat_map(|g| g.wallet_snapshots.keys().cloned())
-        .collect();
-
-    // Fetch current positions for each wallet (once)
+    // Build wallet positions map from pre-fetched data (already paginated)
     let mut wallet_positions: HashMap<String, Vec<WalletPosition>> = HashMap::new();
-    for addr in &wallet_addrs {
-        match client.get_wallet_positions(addr, 500).await {
-            Ok(p) => { wallet_positions.insert(addr.clone(), p); }
-            Err(e) => {
-                warn!("T5 CONFIRM: failed to fetch positions for {}: {}", addr, e);
-            }
-        }
+    for (addr, _name, positions) in raw_positions {
+        wallet_positions.insert(addr.to_lowercase(), positions.clone());
     }
 
     for game in &due_games {

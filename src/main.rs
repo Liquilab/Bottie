@@ -486,14 +486,14 @@ async fn copy_trading_loop(
                         watched_games.extend(new_watched);
                     }
 
-                    // 3. T-5 Confirm+Buy: for watched games starting soon, re-fetch, compare, execute
+                    // 3. T-5 Confirm+Buy: use pre-fetched positions (no extra API calls)
                     let t5_matches = scheduler::confirm_and_execute_t5(
-                        &client,
                         &watched_games,
                         &watchlist,
                         schedule_cfg.t5_minutes,
                         &t5_executed,
-                    ).await;
+                        &raw_positions,
+                    );
 
                     // Sort T5 matches by Cannae game total DESC (biggest games first)
                     let mut t5_sorted = t5_matches;
