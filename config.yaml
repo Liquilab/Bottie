@@ -41,10 +41,7 @@ copy_trading:
     - mlb
     - nfl
     - fif
-    market_types:
-    - win
-    - draw
-    - spread
+    market_types: []
     max_legs_per_event: 0
     min_price: 0.4
     max_price: 0.95
@@ -100,12 +97,16 @@ autoresearch_params:
   sport_multipliers: {}
   timing_rules: []
   active_strategies: []
-budget:
-  ou_spread_multiplier: 0.5
-  recycling_min_price: 0.65
+sport_sizing:
+  voetbal_ml_pct: 8.0
+  voetbal_draw_pct: 5.0
+  nhl_ml_pct: 5.0
+  nba_ml_pct: 3.0
+  nba_spread_pct: 3.0
+  min_bet_usdc: 2.50
 schedule:
   enabled: true
-  t_minus_minutes: 30
+  t_minus_minutes: 240
   t5_minutes: 5
   refresh_interval_minutes: 60
   taker_mode: true

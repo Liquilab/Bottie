@@ -3,62 +3,51 @@ use std::collections::BTreeMap;
 use tracing::info;
 
 use crate::clob::types::WalletPosition;
-use crate::config::BudgetConfig;
+use crate::config::SportSizingConfig;
 use crate::copy_trader::CopyTrader;
 
-/// Tracks Cannae's games and allocates per-game budgets.
+/// Wave-based budget planner.
 ///
-/// Flow:
-/// 1. CANNAE GAMES log (30 min) feeds game list + remaining_games count
-/// 2. T5 games sorted by Cannae game total DESC
-/// 3. game_budget = effective_cash / remaining_games_today
-/// 4. Per leg: win = 100% tier, ou/spread = ou_spread_multiplier × tier
-pub struct BudgetPlanner {
-    config: BudgetConfig,
-    /// Cannae games seen this cycle: event_slug → (total_usdc, leg_count, Vec<leg_title>)
+/// Allocates per-game-line budgets based on:
+/// 1. Current bankroll (recalculated every poll cycle)
+/// 2. Number of game lines remaining in the current wave
+/// 3. Sport-specific caps (voetbal ML 8%, draw 5%, etc.)
+///
+/// Budget per line = min(90% bankroll / total_lines, sport_cap)
+/// If budget < $2.50 → skip smallest games (lowest Cannae game total)
+pub struct WaveBudget {
+    pub sport_sizing: SportSizingConfig,
+    /// Cannae games: event_slug → CannaeGameInfo
     pub cannae_games: BTreeMap<String, CannaeGameInfo>,
 }
 
 #[derive(Debug, Clone)]
 pub struct CannaeGameInfo {
     pub total_usdc: f64,
-    pub leg_count: usize,
-    pub legs: Vec<CannaeLegs>,
+    pub league: String,
+    pub legs: Vec<CannaeGameLine>,
 }
 
 #[derive(Debug, Clone)]
-pub struct CannaeLegs {
+pub struct CannaeGameLine {
     pub title: String,
-    pub market_type: String,
+    pub game_line: String,
     pub usdc: f64,
-    pub shares: f64,
 }
 
-/// Per-leg allocation for the T5 PLAN log
-#[derive(Debug, Clone)]
-pub struct LegAllocation {
-    pub title: String,
-    pub market_type: String,
-    pub cannae_usdc: f64,
-    pub our_usdc: f64,
-    pub multiplier: f64,
-    pub tier_label: String,
-}
-
-impl BudgetPlanner {
-    pub fn new(config: BudgetConfig) -> Self {
+impl WaveBudget {
+    pub fn new(sport_sizing: SportSizingConfig) -> Self {
         Self {
-            config,
+            sport_sizing,
             cannae_games: BTreeMap::new(),
         }
     }
 
-    pub fn update_config(&mut self, config: BudgetConfig) {
-        self.config = config;
+    pub fn update_config(&mut self, sport_sizing: SportSizingConfig) {
+        self.sport_sizing = sport_sizing;
     }
 
     /// Refresh Cannae game data from raw positions.
-    /// Called every ~30 min from the CANNAE GAMES log cycle.
     pub fn refresh_from_positions(&mut self, positions: &[WalletPosition]) {
         self.cannae_games.clear();
 
@@ -79,16 +68,16 @@ impl BudgetPlanner {
             }
 
             let usdc = pos.initial_value_f64();
-            let shares = pos.size_f64();
             let title = pos.title.as_deref().unwrap_or("").to_string();
-            let market_type = CopyTrader::detect_market_type(&title);
+            let game_line = CopyTrader::detect_market_type(&title);
+            let league = slug.split('-').next().unwrap_or("").to_string();
 
             let entry = self
                 .cannae_games
                 .entry(slug.to_string())
                 .or_insert_with(|| CannaeGameInfo {
                     total_usdc: 0.0,
-                    leg_count: 0,
+                    league: league.clone(),
                     legs: Vec::new(),
                 });
 
@@ -96,78 +85,87 @@ impl BudgetPlanner {
 
             // Dedup legs by title
             if !entry.legs.iter().any(|l| l.title == title) && !title.is_empty() {
-                entry.leg_count += 1;
-                entry.legs.push(CannaeLegs {
+                entry.legs.push(CannaeGameLine {
                     title,
-                    market_type,
+                    game_line,
                     usdc,
-                    shares,
                 });
             }
         }
     }
 
-    /// Number of remaining games (all Cannae games with active positions).
-    pub fn remaining_games(&self) -> usize {
-        self.cannae_games.len().max(1)
-    }
-
-    /// Calculate effective cash = available_cash + recycling estimate.
-    pub fn effective_cash(
-        &self,
-        available_cash: f64,
-        own_positions: &[WalletPosition],
-    ) -> f64 {
-        let recycling = self.estimate_recycling(own_positions);
-        available_cash + recycling
-    }
-
-    /// Estimate capital returning from positions resolving within horizon.
-    /// Positions with cur_price >= threshold are likely winners.
-    pub fn estimate_recycling(&self, own_positions: &[WalletPosition]) -> f64 {
-        let min_price = self.config.recycling_min_price;
-        let mut recycling = 0.0_f64;
-
-        for pos in own_positions {
-            let cur = pos.cur_price_f64();
-            if cur >= min_price && cur < 0.99 {
-                // Expected return = shares × cur_price (market-implied value)
-                let value = pos.size_f64() * cur;
-                recycling += value;
+    /// Count the total number of game lines we would buy across all games.
+    /// Only counts game lines that pass the sport-specific filter.
+    pub fn count_filtered_lines(&self) -> usize {
+        let mut count = 0;
+        for game in self.cannae_games.values() {
+            let allowed = self.sport_sizing.allowed_game_lines(&game.league);
+            // Count unique game line types in this game that are allowed
+            let mut seen_types: Vec<&str> = Vec::new();
+            for leg in &game.legs {
+                let gl = leg.game_line.as_str();
+                if allowed.contains(&gl) && !seen_types.contains(&gl) {
+                    seen_types.push(gl);
+                    count += 1;
+                }
             }
         }
-
-        recycling
+        count
     }
 
-    /// Per-game budget: effective_cash / remaining_games.
-    pub fn game_budget(&self, effective_cash: f64) -> f64 {
-        let remaining = self.remaining_games() as f64;
-        effective_cash / remaining
+    /// Calculate the per-line budget percentage.
+    /// Returns min(90% bankroll / total_lines, sport_cap) for each game line.
+    ///
+    /// bankroll = current cash (automatically includes recycled capital).
+    pub fn line_budget_pct(&self, bankroll: f64) -> f64 {
+        let total_lines = self.count_filtered_lines().max(1) as f64;
+        let deployment_cap = 90.0; // 90% of bankroll max
+        let even_split = deployment_cap / total_lines;
+        even_split // caller applies min(even_split, sport_cap) per line
     }
 
-    /// Market-type multiplier: win = 1.0, ou/spread = config multiplier.
-    pub fn market_type_multiplier(&self, market_type: &str) -> f64 {
-        match market_type {
-            "win" => 1.0,
-            "ou" | "spread" => self.config.ou_spread_multiplier,
-            // btts, draw, player_prop, other: use experiment multiplier too
-            _ => self.config.ou_spread_multiplier,
+    /// Get the sizing percentage for a specific game line.
+    /// Returns 0.0 if the game line should be skipped.
+    pub fn get_line_pct(&self, bankroll: f64, league: &str, game_line: &str) -> f64 {
+        // Sport-specific cap
+        let cap = match self.sport_sizing.cap_for(league, game_line) {
+            Some(c) => c,
+            None => return 0.0, // this game line not allowed for this sport
+        };
+
+        // Budget-driven limit
+        let budget_pct = self.line_budget_pct(bankroll);
+
+        // Use the smaller of cap and budget
+        let pct = cap.min(budget_pct);
+
+        // Check minimum bet
+        let usdc = bankroll * pct / 100.0;
+        if usdc < self.sport_sizing.min_bet_usdc {
+            return 0.0;
         }
+
+        pct
     }
 
     /// Log the CANNAE GAMES flight board.
-    pub fn log_flight_board(&self, schedule: &crate::scheduler::GameSchedule) {
+    pub fn log_flight_board(&self, schedule: &crate::scheduler::GameSchedule, bankroll: f64) {
         if self.cannae_games.is_empty() {
             return;
         }
 
         let total_budget: f64 = self.cannae_games.values().map(|g| g.total_usdc).sum();
+        let filtered_lines = self.count_filtered_lines();
+        let budget_pct = self.line_budget_pct(bankroll);
+
         info!(
-            "CANNAE GAMES: {} events, ${:.0} total, {} remaining",
+            "BUDGET: bankroll=${:.0} | {} games, {} lines | {:.1}%/line (before caps)",
+            bankroll, self.cannae_games.len(), filtered_lines, budget_pct,
+        );
+        info!(
+            "CANNAE GAMES: {} events, ${:.0} total",
             self.cannae_games.len(),
             total_budget,
-            self.remaining_games()
         );
 
         // Sort by total USDC descending
@@ -179,61 +177,44 @@ impl BudgetPlanner {
         });
 
         // Build slug → kickoff map from schedule
-        let kickoff_map: std::collections::HashMap<&str, &chrono::DateTime<chrono::Utc>> = schedule.games
-            .iter()
-            .map(|g| (g.event_slug.as_str(), &g.start_time))
-            .collect();
+        let kickoff_map: std::collections::HashMap<&str, &chrono::DateTime<chrono::Utc>> =
+            schedule
+                .games
+                .iter()
+                .map(|g| (g.event_slug.as_str(), &g.start_time))
+                .collect();
 
         for (slug, game) in sorted.iter().take(20) {
             let leg_types: String = game
                 .legs
                 .iter()
                 .take(5)
-                .map(|l| l.market_type.as_str())
+                .map(|l| l.game_line.as_str())
                 .collect::<Vec<_>>()
                 .join("+");
-            let kickoff = kickoff_map.get(slug.as_str())
+            let kickoff = kickoff_map
+                .get(slug.as_str())
                 .map(|dt| dt.format("%H:%M UTC").to_string())
                 .unwrap_or_else(|| "??:??".to_string());
-            info!(
-                "  ${:>7.0} | {} legs ({}) | {} | {}",
-                game.total_usdc, game.leg_count, leg_types, kickoff, slug
-            );
-        }
-    }
 
-    /// Log the T5 PLAN for a specific game about to execute.
-    pub fn log_t5_plan(
-        &self,
-        event_slug: &str,
-        game_budget: f64,
-        legs: &[LegAllocation],
-    ) {
-        let total_our: f64 = legs.iter().map(|l| l.our_usdc).sum();
-        info!(
-            "T5 PLAN: {} | game_budget=${:.0} | {} legs | total=${:.0}",
-            event_slug,
-            game_budget,
-            legs.len(),
-            total_our,
-        );
-        for leg in legs {
-            let title_short = if leg.title.len() > 50 {
-                let mut end = 50;
-                while end < leg.title.len() && !leg.title.is_char_boundary(end) {
-                    end += 1;
-                }
-                &leg.title[..end]
+            // Show which lines we'd buy and at what %
+            let allowed = self.sport_sizing.allowed_game_lines(&game.league);
+            let our_lines: Vec<String> = game.legs.iter()
+                .filter(|l| allowed.contains(&l.game_line.as_str()))
+                .map(|l| {
+                    let pct = self.get_line_pct(bankroll, &game.league, &l.game_line);
+                    format!("{}@{:.0}%", l.game_line, pct)
+                })
+                .collect();
+            let our_str = if our_lines.is_empty() {
+                "SKIP".to_string()
             } else {
-                &leg.title
+                our_lines.join("+")
             };
+
             info!(
-                "  ${:>5.0} | {:>6} | {} | Cannae ${:.0} | {}",
-                leg.our_usdc,
-                leg.market_type,
-                title_short,
-                leg.cannae_usdc,
-                leg.tier_label,
+                "  ${:>7.0} | {} legs ({}) | {} | {} | {}",
+                game.total_usdc, game.legs.len(), leg_types, kickoff, our_str, slug
             );
         }
     }

@@ -134,17 +134,17 @@ impl Executor {
         self.execute_inner(signal, risk, logger, cannae_game_total_usdc, taker_mode, market_type_multiplier).await
     }
 
-    /// Execute with proportional sizing: leg_weight × conviction × max_pct
-    pub async fn execute_proportional(
+    /// Execute with flat sizing: bankroll × pct% / price = shares.
+    /// No proportional weighting, no conviction, no Kelly.
+    pub async fn execute_flat(
         &mut self,
         signal: &AggregatedSignal,
         risk: &mut RiskManager,
         logger: &TradeLogger,
-        cannae_game_total_usdc: f64,
         taker_mode: bool,
-        conviction: f64,
+        size_pct: f64,
     ) -> Result<bool> {
-        self.execute_inner(signal, risk, logger, cannae_game_total_usdc, taker_mode, conviction).await
+        self.execute_inner(signal, risk, logger, 0.0, taker_mode, size_pct).await
     }
 
     /// Execute a signal: size it, risk-check it, place the order
@@ -341,12 +341,14 @@ impl Executor {
         };
 
         let is_copy = signal.sources.iter().any(|s| matches!(s, SignalSource::Copy(_)));
-        let size = if is_copy && cannae_game_total_usdc > 0.0 {
-            sizing::proportional_size(risk.bankroll(), &signal_at_exec, &sizing_config, cannae_game_total_usdc, market_type_multiplier)
-        } else if is_copy {
-            sizing::kelly_size(risk.bankroll(), &signal_at_exec, &sizing_config)
+        let size = if is_copy && cannae_game_total_usdc == 0.0 && market_type_multiplier > 0.0 {
+            // Flat sizing: market_type_multiplier is the size_pct from wave budget
+            sizing::flat_size(risk.bankroll(), market_type_multiplier, exec_price)
+        } else if is_copy && cannae_game_total_usdc > 0.0 {
+            // Legacy proportional sizing (fallback)
+            sizing::flat_size(risk.bankroll(), market_type_multiplier, exec_price)
         } else {
-            sizing::kelly_size(risk.bankroll(), &signal_at_exec, &sizing_config)
+            sizing::flat_size(risk.bankroll(), 5.0, exec_price) // fallback 5%
         };
 
         if size <= 0.0 {

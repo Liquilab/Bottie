@@ -105,7 +105,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub schedule: ScheduleConfig,
     #[serde(default)]
-    pub budget: BudgetConfig,
+    pub sport_sizing: SportSizingConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -125,7 +125,7 @@ pub struct ScheduleConfig {
 }
 
 fn default_t_minus() -> u32 {
-    30
+    240
 }
 
 fn default_t5() -> u32 {
@@ -352,24 +352,91 @@ fn default_max_deployment_pct() -> f64 {
     70.0
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct BudgetConfig {
-    /// Sizing multiplier for O/U and spread legs (0.0-1.0). Win legs always get 1.0.
-    /// Default: 0.5 (experiment phase 1)
-    #[serde(default = "default_ou_spread_multiplier")]
-    pub ou_spread_multiplier: f64,
-    /// Minimum cur_price to count a position toward recycling estimate.
-    /// All our bets are sports (resolve <24h), so cur_price >= 0.65 = likely winner returning soon.
-    #[serde(default = "default_recycling_min_price")]
-    pub recycling_min_price: f64,
+/// Sport-specific sizing caps (max % of bankroll per game line).
+/// Budget per line = min(90% bankroll / total_lines_in_wave, sport_cap).
+#[derive(Debug, Clone, Deserialize)]
+pub struct SportSizingConfig {
+    /// Voetbal moneyline (NO underdog / YES favorite). Data: 100% WR, 43% ROI.
+    #[serde(default = "default_voetbal_ml")]
+    pub voetbal_ml_pct: f64,
+    /// Voetbal draw (NO draw). Data: 100% WR, 37% ROI.
+    #[serde(default = "default_voetbal_draw")]
+    pub voetbal_draw_pct: f64,
+    /// NHL moneyline. Data: 65% WR, 16% ROI.
+    #[serde(default = "default_nhl_ml")]
+    pub nhl_ml_pct: f64,
+    /// NBA moneyline. Data: 60% WR, 2-10% ROI (improving).
+    #[serde(default = "default_nba_ml")]
+    pub nba_ml_pct: f64,
+    /// NBA spread. Data: 54% WR, 7% ROI.
+    #[serde(default = "default_nba_spread")]
+    pub nba_spread_pct: f64,
+    /// Minimum bet size in USDC. Below this → skip game.
+    #[serde(default = "default_min_bet_usdc")]
+    pub min_bet_usdc: f64,
 }
 
-fn default_ou_spread_multiplier() -> f64 {
-    0.5
+impl Default for SportSizingConfig {
+    fn default() -> Self {
+        Self {
+            voetbal_ml_pct: 8.0,
+            voetbal_draw_pct: 5.0,
+            nhl_ml_pct: 5.0,
+            nba_ml_pct: 3.0,
+            nba_spread_pct: 3.0,
+            min_bet_usdc: 2.50,
+        }
+    }
 }
 
-fn default_recycling_min_price() -> f64 {
-    0.65
+fn default_voetbal_ml() -> f64 { 8.0 }
+fn default_voetbal_draw() -> f64 { 5.0 }
+fn default_nhl_ml() -> f64 { 5.0 }
+fn default_nba_ml() -> f64 { 3.0 }
+fn default_nba_spread() -> f64 { 3.0 }
+fn default_min_bet_usdc() -> f64 { 2.50 }
+
+impl SportSizingConfig {
+    /// Get the max % cap for a given sport + game line combination.
+    /// Returns None if this sport/game_line combo should be skipped.
+    pub fn cap_for(&self, league: &str, game_line: &str) -> Option<f64> {
+        let is_football = !matches!(league, "nba" | "nhl" | "mlb" | "nfl" | "cbb" | "ncaa");
+
+        if is_football {
+            match game_line {
+                "win" => Some(self.voetbal_ml_pct),
+                "draw" => Some(self.voetbal_draw_pct),
+                _ => None, // spread, totals, btts → skip
+            }
+        } else if league == "nhl" {
+            match game_line {
+                "win" => Some(self.nhl_ml_pct),
+                _ => None, // no spread/totals for NHL
+            }
+        } else if league == "nba" {
+            match game_line {
+                "win" => Some(self.nba_ml_pct),
+                "spread" => Some(self.nba_spread_pct),
+                _ => None, // no totals
+            }
+        } else {
+            None // mlb, nfl, cbb etc — not yet configured
+        }
+    }
+
+    /// List allowed game line types for a given league.
+    pub fn allowed_game_lines(&self, league: &str) -> Vec<&'static str> {
+        let is_football = !matches!(league, "nba" | "nhl" | "mlb" | "nfl" | "cbb" | "ncaa");
+        if is_football {
+            vec!["win", "draw"]
+        } else if league == "nhl" {
+            vec!["win"]
+        } else if league == "nba" {
+            vec!["win", "spread"]
+        } else {
+            vec![]
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

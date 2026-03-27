@@ -296,7 +296,7 @@ async fn copy_trading_loop(
 ) {
     let mut copy_trader = CopyTrader::new(client.clone(), tracker.clone(), config.clone());
     let mut executor = Executor::new(client.clone(), config.clone());
-    let mut budget_planner = budget::BudgetPlanner::new(config.read().await.budget.clone());
+    let mut wave_budget = budget::WaveBudget::new(config.read().await.sport_sizing.clone());
 
     // Seed attempted map from live PM positions (source of truth).
     {
@@ -429,7 +429,7 @@ async fn copy_trading_loop(
         if polls_since_cannae_summary >= cannae_summary_every_n {
             polls_since_cannae_summary = 0;
             // Refresh budget config in case of hot-reload
-            budget_planner.update_config(config.read().await.budget.clone());
+            wave_budget.update_config(config.read().await.sport_sizing.clone());
 
             // Collect Cannae positions (first wallet = Cannae)
             let cannae_positions: Vec<_> = raw_positions
@@ -438,30 +438,13 @@ async fn copy_trading_loop(
                 .flat_map(|(_, _, positions)| positions.clone())
                 .collect();
 
-            budget_planner.refresh_from_positions(&cannae_positions);
+            wave_budget.refresh_from_positions(&cannae_positions);
 
             // Fetch own positions for recycling estimate
             {
-                let funder = client.funder_address();
                 let cash = risk.read().await.bankroll();
-                match client.get_wallet_positions(&funder, 500).await {
-                    Ok(own_pos) => {
-                        let recycling = budget_planner.estimate_recycling(&own_pos);
-                        let eff = cash + recycling;
-                        info!(
-                            "BUDGET: cash=${:.0} + recycling=${:.0} = effective=${:.0} | {} remaining games | game_budget=${:.0}",
-                            cash, recycling, eff,
-                            budget_planner.remaining_games(),
-                            budget_planner.game_budget(eff),
-                        );
-                    }
-                    Err(e) => {
-                        warn!("BUDGET: could not fetch own positions for recycling: {e}");
-                    }
-                }
+                wave_budget.log_flight_board(&game_schedule, cash);
             }
-
-            budget_planner.log_flight_board(&game_schedule);
         }
 
         // --- Two-phase schedule: T-30 discovery + T-5 confirm+buy ---
@@ -515,11 +498,11 @@ async fn copy_trading_loop(
                     // Sort T5 matches by Cannae game total DESC (biggest games first)
                     let mut t5_sorted = t5_matches;
                     t5_sorted.sort_by(|a, b| {
-                        let a_total = budget_planner.cannae_games
+                        let a_total = wave_budget.cannae_games
                             .get(&a.game_event_slug)
                             .map(|g| g.total_usdc)
                             .unwrap_or(0.0);
-                        let b_total = budget_planner.cannae_games
+                        let b_total = wave_budget.cannae_games
                             .get(&b.game_event_slug)
                             .map(|g| g.total_usdc)
                             .unwrap_or(0.0);
@@ -540,7 +523,7 @@ async fn copy_trading_loop(
                         );
                         execute_stable_game(
                             &game, &mut executor, &risk, &logger, &config, true,
-                            &budget_planner,
+                            &wave_budget,
                         ).await;
                         // Always mark as executed — never retry. If the order failed,
                         // retrying every 15 seconds spams the CLOB API and wastes fees.
@@ -558,9 +541,12 @@ async fn copy_trading_loop(
     }
 }
 
-/// Build AggregatedSignals from a game's Cannae positions,
-/// select legs based on config (max_legs_per_event), and execute.
-/// Returns true if at least one order was filled.
+/// Per game: detect hauptbet per game line, flat size, execute.
+///
+/// For each game line (moneyline/draw/spread) allowed by sport config:
+/// 1. Find the hauptbet (largest USDC position per conditionId of that type)
+/// 2. Size: flat % from wave budget (bankroll × pct / price)
+/// 3. Execute via FOK on ask
 async fn execute_stable_game(
     game: &stability::StableGame,
     executor: &mut Executor,
@@ -568,160 +554,110 @@ async fn execute_stable_game(
     logger: &Arc<TradeLogger>,
     config: &SharedConfig,
     taker_mode: bool,
-    budget_planner: &budget::BudgetPlanner,
+    wave_budget: &budget::WaveBudget,
 ) -> bool {
     use crate::copy_trader::CopyTrader;
 
     let cfg = config.read().await;
-    // Fail closed: skip games sourced from wallets not in watchlist config
-    let Some(wallet_cfg) = cfg.copy_trading.watchlist.iter()
+    let sport_sizing = cfg.sport_sizing.clone();
+    let allowed_leagues = cfg.copy_trading.watchlist.iter()
         .find(|w| w.address.eq_ignore_ascii_case(&game.source_wallet))
-    else {
-        warn!(
-            "EXECUTE SKIP: no watchlist config for source wallet {}",
-            game.source_wallet
-        );
-        return false;
-    };
-    let max_legs = wallet_cfg.max_legs_per_event;
-    let allowed_leagues = wallet_cfg.leagues.clone();
-    let allowed_market_types = wallet_cfg.market_types.clone();
+        .map(|w| w.leagues.clone())
+        .unwrap_or_default();
     drop(cfg);
 
-    // League filter: event_slug format is "{league}-{teams}-{date}"
-    let league_prefix = game.event_slug.split('-').next().unwrap_or("");
-    if !allowed_leagues.is_empty() && !allowed_leagues.iter().any(|l| l == league_prefix) {
-        info!(
-            "GAME SKIP: {} not in allowed leagues (prefix={}, allowed={:?})",
-            game.event_slug, league_prefix, allowed_leagues
-        );
+    // League filter
+    let league = game.event_slug.split('-').next().unwrap_or("");
+    if !allowed_leagues.is_empty() && !allowed_leagues.iter().any(|l| l == league) {
         return false;
     }
 
-    // Cannae's total USDC for positions in allowed market types only (for proportional sizing).
-    // Using ALL positions would dilute leg_weight when OU/BTTS is filtered out (e.g. NBA = 60% OU).
-    let cannae_game_total: f64 = game.positions.iter()
-        .filter(|p| {
-            let title = p.title.as_deref().unwrap_or("");
-            let mt = CopyTrader::detect_market_type(title);
-            allowed_market_types.is_empty() || allowed_market_types.iter().any(|a| a == &mt)
-        })
-        .map(|p| p.initial_value_f64())
-        .sum();
-    if cannae_game_total <= 0.0 {
+    // Which game lines are allowed for this sport?
+    let allowed_lines = sport_sizing.allowed_game_lines(league);
+    if allowed_lines.is_empty() {
+        info!("GAME SKIP: {} — no allowed game lines for league {}", game.event_slug, league);
         return false;
     }
 
-    // Group positions by conditionId: best (largest) + second (for conviction ratio)
-    let mut best_per_condition: std::collections::HashMap<
+    // Group all positions by conditionId, pick hauptbet (largest USDC) per conditionId
+    let mut best_per_cid: std::collections::HashMap<
         String,
-        (&crate::clob::types::WalletPosition, Option<&crate::clob::types::WalletPosition>),
+        &crate::clob::types::WalletPosition,
     > = std::collections::HashMap::new();
 
     for pos in &game.positions {
         let cid = pos.condition_id.as_deref().unwrap_or("");
-        if cid.is_empty() {
-            continue;
-        }
-        let entry = best_per_condition.entry(cid.to_string()).or_insert((pos, None));
-        if pos.initial_value_f64() > entry.0.initial_value_f64() {
-            entry.1 = Some(entry.0); // demote current best to second
-            entry.0 = pos;
-        } else if entry.1.is_none() || pos.initial_value_f64() > entry.1.unwrap().initial_value_f64() {
-            entry.1 = Some(pos);
+        if cid.is_empty() { continue; }
+        let entry = best_per_cid.entry(cid.to_string()).or_insert(pos);
+        if pos.initial_value_f64() > entry.initial_value_f64() {
+            *entry = pos;
         }
     }
 
-    // Filter by allowed market types, compute conviction per leg
-    struct LegWithConviction<'a> {
+    // Per allowed game line: find the hauptbet (largest position of that type across all cids)
+    struct GameLineBet<'a> {
         pos: &'a crate::clob::types::WalletPosition,
-        conviction: f64,
+        game_line: String,
+        size_pct: f64,
     }
 
-    let mut game_legs: Vec<LegWithConviction> = Vec::new();
-    for (_cid, (best, second)) in &best_per_condition {
-        let title = best.title.as_deref().unwrap_or("");
-        let detected = CopyTrader::detect_market_type(title);
+    let bankroll = risk.read().await.bankroll();
+    let mut bets: Vec<GameLineBet> = Vec::new();
 
-        if !allowed_market_types.is_empty() && !allowed_market_types.iter().any(|mt| mt == &detected) {
-            info!(
-                "GAME FILTER: skipping '{}' (type={}, allowed={:?})",
-                &title[..title.len().min(60)], detected, allowed_market_types
-            );
-            continue;
+    for &gl in &allowed_lines {
+        // Find the largest hauptbet of this game line type
+        let mut best_for_line: Option<&crate::clob::types::WalletPosition> = None;
+        let mut best_usdc = 0.0_f64;
+
+        for pos in best_per_cid.values() {
+            let title = pos.title.as_deref().unwrap_or("");
+            let detected = CopyTrader::detect_market_type(title);
+            if detected != gl { continue; }
+
+            let usdc = pos.initial_value_f64();
+            if usdc > best_usdc {
+                best_usdc = usdc;
+                best_for_line = Some(pos);
+            }
         }
 
-        // Conviction: best / (best + second) on same conditionId.
-        // Only for football — Cannae hedges YES+NO on draw markets.
-        // US sports (nba/nhl/mlb/nfl) get conviction=1.0 because they have
-        // single-side positions and spurious seconds would halve sizing.
-        let us_prefixes = ["nba-", "nhl-", "mlb-", "nfl-", "cbb-", "ncaa-"];
-        let is_us_sport = us_prefixes.iter().any(|p| game.event_slug.starts_with(p));
-        let conviction = if !is_us_sport {
-            let best_usdc = best.initial_value_f64();
-            let second_usdc = second.map(|s| s.initial_value_f64()).unwrap_or(0.0);
-            if best_usdc + second_usdc > 0.0 {
-                best_usdc / (best_usdc + second_usdc)
-            } else {
-                1.0
+        if let Some(pos) = best_for_line {
+            let pct = wave_budget.get_line_pct(bankroll, league, gl);
+            if pct > 0.0 {
+                bets.push(GameLineBet {
+                    pos,
+                    game_line: gl.to_string(),
+                    size_pct: pct,
+                });
             }
-        } else {
-            1.0
-        };
-
-        game_legs.push(LegWithConviction { pos: best, conviction });
+        }
     }
 
-    // Sort by USDC size descending, apply max_legs limit
-    game_legs.sort_by(|a, b| {
-        b.pos.initial_value_f64()
-            .partial_cmp(&a.pos.initial_value_f64())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    if max_legs > 0 {
-        game_legs.truncate(max_legs);
-    }
-
-    if game_legs.is_empty() {
-        info!("GAME SKIP: {} has no legs after filtering", game.event_slug);
+    if bets.is_empty() {
+        info!("GAME SKIP: {} — no bets after filtering/budget", game.event_slug);
         return false;
     }
 
+    // Log T5 PLAN
     info!(
-        "GAME EXECUTE: {} — {} legs, Cannae game total ${:.0}",
-        game.event_slug, game_legs.len(), cannae_game_total
+        "GAME EXECUTE: {} ({}) — {} game lines",
+        game.event_slug, league, bets.len(),
     );
-
-    // Log T5 PLAN with proportional per-leg allocation
-    {
-        let bankroll = risk.read().await.bankroll();
-        let max_pct = config.read().await.sizing.max_bet_pct / 100.0;
-        let mut total_game_budget = 0.0_f64;
-        let leg_allocations: Vec<budget::LegAllocation> = game_legs.iter().map(|leg| {
-            let title = leg.pos.title.as_deref().unwrap_or("").to_string();
-            let market_type = CopyTrader::detect_market_type(&title);
-            let cannae_usdc = leg.pos.initial_value_f64();
-            let leg_weight = cannae_usdc / cannae_game_total;
-            let our_usdc = bankroll * leg_weight * leg.conviction * max_pct;
-            let our_usdc = if our_usdc < 2.50 { 0.0 } else { our_usdc }; // skip, not bump
-            total_game_budget += our_usdc;
-            let tier_label = format!("{:.0}% weight, {:.0}% conv", leg_weight * 100.0, leg.conviction * 100.0);
-            budget::LegAllocation {
-                title,
-                market_type,
-                cannae_usdc,
-                our_usdc,
-                multiplier: leg.conviction,
-                tier_label,
-            }
-        }).collect();
-        budget_planner.log_t5_plan(&game.event_slug, total_game_budget, &leg_allocations);
+    for bet in &bets {
+        let title = bet.pos.title.as_deref().unwrap_or("");
+        let outcome = bet.pos.outcome.as_deref().unwrap_or("");
+        let usdc = bankroll * bet.size_pct / 100.0;
+        info!(
+            "  T5 PLAN: {} {} | {} | ${:.0} ({:.0}%) | Cannae ${:.0}",
+            outcome, bet.game_line, &title[..title.len().min(50)],
+            usdc, bet.size_pct, bet.pos.initial_value_f64(),
+        );
     }
 
-    // Build AggregatedSignal for each leg and execute
+    // Execute each game line bet
     let mut any_filled = false;
-    for leg in &game_legs {
-        let pos = leg.pos;
+    for bet in &bets {
+        let pos = bet.pos;
         let title = pos.title.as_deref().unwrap_or("").to_string();
         let condition_id = pos.condition_id.as_deref().unwrap_or("").to_string();
         let outcome = pos.outcome.as_deref().unwrap_or("").to_string();
@@ -738,8 +674,6 @@ async fn execute_stable_game(
         let market_type = CopyTrader::detect_market_type(&title);
         let source_size_usdc = pos.initial_value_f64();
         let source_shares = pos.size_f64();
-
-        // Market-anchored confidence: assume 10% edge over market
         let confidence = (price * 1.10).min(0.95);
 
         let agg_signal = signal::AggregatedSignal {
@@ -784,17 +718,18 @@ async fn execute_stable_game(
             source_shares,
         };
 
-        // Proportional sizing: pass conviction and game total to executor
+        // Flat sizing: bankroll × pct / price
         let mut risk_guard = risk.write().await;
         let label = if taker_mode { "T5" } else { "GAME" };
-        let result = executor.execute_proportional(
+        let result = executor.execute_flat(
             &agg_signal, &mut risk_guard, &logger,
-            cannae_game_total, taker_mode, leg.conviction,
+            taker_mode, bet.size_pct,
         ).await;
         match result {
             Ok(filled) => {
                 if filled {
-                    info!("{} FILLED: {}", label, agg_signal.market_title);
+                    info!("{} FILLED: {} {} {}", label, bet.game_line,
+                        agg_signal.outcome, agg_signal.market_title);
                     any_filled = true;
                 }
             }
