@@ -168,19 +168,18 @@ pub fn sport_tags_from_watchlist(watchlist: &[WatchlistEntry]) -> Vec<String> {
     tags.into_iter().collect()
 }
 
-/// T-30 Discovery: For games starting in ~30 min window, check all wallet positions
-/// and store snapshots. Returns newly discovered WatchedGames.
-pub async fn discover_t30(
+/// Continuous discovery: check ALL upcoming games (next 24h) for Cannae positions.
+/// Runs every poll cycle. Only returns games not already in watched_games.
+/// Hauptbet is NOT determined here — only at T-5.
+pub async fn discover_continuous(
     client: &ClobClient,
     schedule: &GameSchedule,
     watchlist: &[WatchlistEntry],
-    t_minus_minutes: u32,
+    _t_minus_minutes: u32,
     already_watched: &HashSet<String>,
 ) -> Vec<WatchedGame> {
-    // Games starting between 25 and 35 min from now (centred on t_minus_minutes)
-    let window_lo = (t_minus_minutes as i64) - 5;
-    let window_hi = (t_minus_minutes as i64) + 5;
-    let upcoming = schedule.games_starting_between(window_lo, window_hi);
+    // All games starting in the next 24 hours
+    let upcoming = schedule.games_starting_within(24 * 60);
 
     if upcoming.is_empty() {
         return Vec::new();
@@ -249,7 +248,7 @@ pub async fn discover_t30(
             }
 
             info!(
-                "T30 DISCOVER: {} has {} positions in {} (kickoff {} UTC, ~{}min)",
+                "DISCOVER: {} has {} positions in {} (kickoff {} UTC, ~{}min)",
                 wallet.name,
                 event_positions.len(),
                 event_slug,

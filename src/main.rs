@@ -314,7 +314,7 @@ async fn copy_trading_loop(
 
     // Two-phase schedule state
     let mut game_schedule = scheduler::GameSchedule::new();
-    let mut watched_games: Vec<scheduler::WatchedGame> = Vec::new(); // T-30 discovered, waiting for T-5
+    let mut watched_games: Vec<scheduler::WatchedGame> = Vec::new(); // continuously discovered, waiting for T-5
     let mut t5_executed: HashSet<String> = HashSet::new(); // event_slugs already bought
 
     // RUS-278: Pre-computed ROI cache — refreshed every 20 polls (~5 min), NOT per candidate.
@@ -448,7 +448,7 @@ async fn copy_trading_loop(
             }
         }
 
-        // --- Two-phase schedule: T-30 discovery + T-5 confirm+buy ---
+        // --- Continuous discovery + T-5 confirm+buy ---
         {
             let (schedule_cfg, watchlist) = {
                 let c = config.read().await;
@@ -465,13 +465,13 @@ async fn copy_trading_loop(
                 if !sport_tags.is_empty() {
                     // Schedule already refreshed above (before CANNAE GAMES log)
 
-                    // 2. T-30 Discovery: find games starting in ~30 min, check wallets, add to watched_games
+                    // 2. Continuous discovery: find ALL upcoming games where Cannae has positions
                     let already_watched: HashSet<String> = watched_games.iter()
                         .map(|g| g.event_slug.clone())
                         .chain(t5_executed.iter().cloned())
                         .collect();
 
-                    let new_watched = scheduler::discover_t30(
+                    let new_watched = scheduler::discover_continuous(
                         &client,
                         &game_schedule,
                         &watchlist,
@@ -481,7 +481,7 @@ async fn copy_trading_loop(
 
                     if !new_watched.is_empty() {
                         info!(
-                            "T30 DISCOVERED: {} new games to watch",
+                            "DISCOVERED: {} new games to watch",
                             new_watched.len()
                         );
                         watched_games.extend(new_watched);
@@ -518,7 +518,7 @@ async fn copy_trading_loop(
                             source_name: t5_match.wallet_name.clone(),
                         };
                         info!(
-                            "T5 EXECUTE: {} from {} ({} positions, T-30 had {})",
+                            "T5 EXECUTE: {} from {} ({} positions, discovery had {})",
                             game.event_slug, game.source_name,
                             t5_match.positions.len(), t5_match.t30_position_count,
                         );
