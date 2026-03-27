@@ -184,28 +184,28 @@ impl ClobClient {
     ) -> Result<PostOrderResponse> {
         let sig_type: u8 = 2; // Gnosis Safe
 
-        // Round price to tick size (0.01) and size to 2 decimals.
-        // Micro-amounts are computed directly without intermediate rounding
-        // to match the CLOB API's expected precision (6 decimal places).
-        let price = (price * 100.0).round() / 100.0;
-        let size = (size * 100.0).round() / 100.0;
+        // Round price to tick size (0.01 = 1 cent).
+        // The CLOB computes price from maker_amount/taker_amount.
+        // To ensure the ratio lands on a tick, compute amounts from price_cents.
+        let price_cents = (price * 100.0).ceil() as u64; // e.g. 57ct
+        let price = price_cents as f64 / 100.0; // clean 0.57
+        let size = (size * 100.0).floor() / 100.0; // round down shares
 
         let (maker_amount, taker_amount) = match side {
             Side::Buy => {
-                // maker_amount (USDC) must have max 2 decimal precision (cents)
-                // taker_amount (shares) must have max 4 decimal precision
-                let usdc = (price * size * 100.0).round() / 100.0; // round to cents
-                let shares = (size * 10000.0).round() / 10000.0; // round to 4 decimals
-                let maker_raw = (usdc * CTF_DECIMAL_FACTOR).round() as u128;
-                let taker_raw = (shares * CTF_DECIMAL_FACTOR).round() as u128;
-                (U256::from(maker_raw), U256::from(taker_raw))
+                // For a BUY at price P for S shares:
+                // maker_amount (USDC) = price_cents * size_micro / 100
+                // taker_amount (shares) = size_micro
+                // This guarantees maker/taker = price exactly.
+                let size_micro = (size * CTF_DECIMAL_FACTOR).round() as u128;
+                let maker_micro = (price_cents as u128) * size_micro / 100;
+                (U256::from(maker_micro), U256::from(size_micro))
             }
             Side::Sell => {
-                let shares = (size * 10000.0).round() / 10000.0;
-                let usdc = (price * size * 100.0).round() / 100.0;
-                let maker_raw = (shares * CTF_DECIMAL_FACTOR).round() as u128;
-                let taker_raw = (usdc * CTF_DECIMAL_FACTOR).round() as u128;
-                (U256::from(maker_raw), U256::from(taker_raw))
+                let size_micro = (size * CTF_DECIMAL_FACTOR).round() as u128;
+                let maker_micro = size_micro; // selling shares
+                let taker_micro = (price_cents as u128) * size_micro / 100;
+                (U256::from(maker_micro), U256::from(taker_micro))
             }
         };
 
