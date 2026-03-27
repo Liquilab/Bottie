@@ -653,10 +653,11 @@ async fn execute_stable_game(
 
         // Conviction: best / (best + second) on same conditionId.
         // Only for football — Cannae hedges YES+NO on draw markets.
-        // US sports wallets typically have 1 side per condition, but spurious
-        // second-side positions would halve sizing for no reason.
-        let is_football = allowed_market_types.iter().any(|mt| mt == "draw");
-        let conviction = if is_football {
+        // US sports (nba/nhl/mlb/nfl) get conviction=1.0 because they have
+        // single-side positions and spurious seconds would halve sizing.
+        let us_prefixes = ["nba-", "nhl-", "mlb-", "nfl-", "cbb-", "ncaa-"];
+        let is_us_sport = us_prefixes.iter().any(|p| game.event_slug.starts_with(p));
+        let conviction = if !is_us_sport {
             let best_usdc = best.initial_value_f64();
             let second_usdc = second.map(|s| s.initial_value_f64()).unwrap_or(0.0);
             if best_usdc + second_usdc > 0.0 {

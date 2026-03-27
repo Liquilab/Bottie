@@ -36,57 +36,16 @@ copy_trading:
     - efl
     - tur
     - uef
+    - nba
+    - nhl
+    - mlb
+    - nfl
+    - fif
     market_types:
     - win
     - draw
+    - spread
     max_legs_per_event: 0
-    min_price: 0.4
-    max_price: 0.95
-  - address: '0xee613b3fc183ee44f9da9c05f53e2da107e3debf'
-    name: Sovereign
-    weight: 1.0
-    market_types:
-    - ou
-    leagues:
-    - nba
-    - cbb
-    - ucl
-    max_legs_per_event: 1
-    min_price: 0.4
-    max_price: 0.95
-    sports:
-    - all
-  - address: '0x6a72f61820b26b1fe4d956e17b6dc2a1ea3033ee'
-    name: kch123
-    weight: 1.0
-    sports:
-    - all
-    leagues:
-    - nba
-    - nhl
-    - ucl
-    market_types:
-    - spread
-    - ou
-    max_legs_per_event: 2
-    min_price: 0.4
-    max_price: 0.95
-  - address: '0x339a0e5aea39a7db5cea5b0003abab33c78c1eae'
-    name: Tokidoki
-    weight: 1.0
-    sports:
-    - all
-    leagues:
-    - nba
-    - nhl
-    - ncaa
-    - mlb
-    - nfl
-    - cbb
-    market_types:
-    - ou
-    - spread
-    max_legs_per_event: 2
     min_price: 0.4
     max_price: 0.95
   consensus:
@@ -116,7 +75,7 @@ odds_arb:
   min_edge_pct: 3.0
 sizing:
   kelly_fraction: 0.25
-  max_bet_pct: 8.0
+  max_bet_pct: 5.0
   copy_base_size_pct: 20.0
   min_price: 0.4
   max_price: 0.95

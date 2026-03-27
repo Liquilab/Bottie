@@ -319,10 +319,11 @@ pub async fn confirm_and_execute_t5(
 
     for game in &due_games {
         for (wallet_addr, t30_positions) in &game.wallet_snapshots {
-            // Per-wallet T-30 reference: only match this wallet's own snapshot
-            let t30_keys: HashSet<String> = t30_positions
+            // Per-wallet T-30 reference: collect conditionIds (not position keys)
+            // so that new sides/positions Cannae added after T-30 are included.
+            let t30_condition_ids: HashSet<String> = t30_positions
                 .iter()
-                .map(|p| p.position_key())
+                .filter_map(|p| p.condition_id.clone())
                 .collect();
 
             let wallet_cfg = match watchlist.iter()
@@ -337,13 +338,16 @@ pub async fn confirm_and_execute_t5(
                 None => continue,
             };
 
-            // Filter current positions to those matching this wallet's T-30 snapshot
+            // Filter current positions to those matching this game's conditionIds
+            // (not exact position keys — Cannae may have added new sides after T-30)
             let current_game_positions: Vec<WalletPosition> = current_all.iter()
                 .filter(|p| {
                     if p.size_f64() <= 0.0 { return false; }
                     let cur = p.cur_price_f64();
                     if cur <= 0.01 || cur >= 0.99 { return false; }
-                    t30_keys.contains(&p.position_key())
+                    p.condition_id.as_ref()
+                        .map(|cid| t30_condition_ids.contains(cid))
+                        .unwrap_or(false)
                 })
                 .cloned()
                 .collect();
