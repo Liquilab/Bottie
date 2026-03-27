@@ -35,10 +35,11 @@ copy_trading:
     - spl
     - efl
     - tur
+    - uef
     market_types:
-    - spread
     - win
-    max_legs_per_event: 2
+    - draw
+    max_legs_per_event: 0
     min_price: 0.4
     max_price: 0.95
   - address: '0xee613b3fc183ee44f9da9c05f53e2da107e3debf'
@@ -115,7 +116,7 @@ odds_arb:
   min_edge_pct: 3.0
 sizing:
   kelly_fraction: 0.25
-  max_bet_pct: 3.0
+  max_bet_pct: 8.0
   copy_base_size_pct: 20.0
   min_price: 0.4
   max_price: 0.95
@@ -129,6 +130,7 @@ risk:
   max_daily_loss_pct: 15.0
   min_bankroll: 50.0
   max_open_bets: 200
+  max_deployment_pct: 90.0
 autoresearch:
   interval_hours: 24
   min_backtest_trades: 20
@@ -139,6 +141,9 @@ autoresearch_params:
   sport_multipliers: {}
   timing_rules: []
   active_strategies: []
+budget:
+  ou_spread_multiplier: 0.5
+  recycling_min_price: 0.65
 schedule:
   enabled: true
   t_minus_minutes: 30

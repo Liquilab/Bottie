@@ -51,6 +51,7 @@ from intelligence.sizing_model import analyze_sizing_model
 from intelligence.event_menu import analyze_event_selection
 from intelligence.entry_price import analyze_entry_prices
 from intelligence.odds_edge import collect_odds, analyze_odds_edge
+from intelligence.first_principles import analyze_first_principles
 from curator import curate_playbook, load_playbook, save_playbook
 from dag import (
     load_dag,
@@ -100,6 +101,9 @@ async def intelligence_cycle():
     log.info("  Running odds edge analysis...")
     odds_edge = analyze_odds_edge(dataset)
 
+    log.info("  Running first principles analysis...")
+    first_principles = analyze_first_principles(dataset)
+
     # --- 4. Collect fresh odds (budget-aware) ---
     log.info("\n--- Phase 4: Odds Collection ---")
     _collect_odds_if_needed(dataset)
@@ -114,6 +118,7 @@ async def intelligence_cycle():
         "sizing": sizing,
         "temporal": temporal,
         "odds_edge": odds_edge,
+        "first_principles": first_principles,
     }
 
     # Save reports
@@ -404,10 +409,39 @@ def _send_telegram_report(report: dict, playbook: str = ""):
             lines.append(f"  Winners: {ev.get('avg_edge_winners', 0):+.1%} | Losers: {ev.get('avg_edge_losers', 0):+.1%}")
         lines.append("")
 
+    # --- First Principles ---
+    fp = report.get("first_principles", {})
+    if fp and not fp.get("insufficient_data"):
+        # Return decomposition
+        rd = fp.get("return_decomposition", {})
+        by_mt = rd.get("by_market_type", {})
+        if by_mt:
+            lines.append("*Rendement Decompositie:*")
+            for mt, d in sorted(by_mt.items(), key=lambda x: -x[1].get("pnl", 0)):
+                lines.append(f"  {mt:8s} {d['pnl_contribution_pct']:+5.1f}% van PnL | WR={d['wr']:.0%} | payoff={d.get('payoff_ratio', 0):.1f}x | {d.get('verdict', '')}")
+            lines.append("")
+
+        # Actionable rules
+        rules = fp.get("actionable_rules", [])
+        if rules:
+            lines.append("*First Principles Regels:*")
+            for r in rules[:4]:
+                lines.append(f"  {r['rule']}: {r['reason']}")
+            lines.append("")
+
+        # Edge stability
+        es = fp.get("edge_stability", {})
+        if es and not es.get("insufficient_data"):
+            trend_emoji = {"DECLINING": "↘", "IMPROVING": "↗", "STABLE": "→"}.get(es.get("trend", ""), "?")
+            lines.append(f"*Edge Stabiliteit:* {trend_emoji} {es['trend']} (vroeg={es['early_wr']:.0%} → recent={es['recent_wr']:.0%})")
+            if es.get("alert"):
+                lines.append(f"  ⚠ ALERT: edge is dalend!")
+            lines.append("")
+
     # --- Edge Decay ---
     decay = report.get("quant_analysis", {}).get("edge_decay", {})
     if decay.get("trend"):
-        lines.append(f"*Edge Trend:* {decay['trend']} (1st half WR={decay.get('first_half_wr', 0):.0%} → 2nd half={decay.get('second_half_wr', 0):.0%})")
+        lines.append(f"*Edge Trend (quant):* {decay['trend']} (1st half WR={decay.get('first_half_wr', 0):.0%} → 2nd half={decay.get('second_half_wr', 0):.0%})")
 
     # --- Alerts ---
     alerts = report.get("quant_analysis", {}).get("alerts", [])

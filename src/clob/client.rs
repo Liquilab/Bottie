@@ -5,7 +5,7 @@ use alloy_signer_local::PrivateKeySigner;
 use anyhow::{Context, Result};
 use rand::Rng;
 use reqwest::Client;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::{BotConfig, CLOB_API, CTF_DECIMAL_FACTOR, DATA_API, GAMMA_API, ZERO_ADDRESS};
 use crate::signing::eip712::{sign_clob_auth, sign_order, ClobAuthData, OrderData};

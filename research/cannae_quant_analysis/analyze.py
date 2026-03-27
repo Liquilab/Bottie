@@ -39,6 +39,10 @@ RAW_FILE = DATA / "activity_raw.jsonl"
 EVENT_CACHE = DATA / "events_cache.json"
 REPORT_FILE = BASE / "report.json"
 
+# Historical CSV data (pre-collected, append-only master)
+TRADES_DIR = BASE.parent / "cannae_trades"
+MASTER_FILE = DATA / "cannae_master.jsonl"
+
 # ---------- Config ----------
 
 def load_cannae_address():
@@ -673,8 +677,130 @@ def generate_recommendations(report: dict) -> list:
 
 # ---------- Data Collection (importable) ----------
 
+def _load_historical_bets() -> list:
+    """Load pre-collected historical data from CSVs into resolved bet format.
+
+    Sources:
+    - cannae_closed_full.csv: resolved positions with PnL (primary)
+    - cannae_all_trades.csv: individual trades (supplements with timestamps)
+
+    Returns list of bet dicts in the same format as build_resolved_bets().
+    """
+    import csv
+
+    closed_csv = TRADES_DIR / "cannae_closed_full.csv"
+    trades_csv = TRADES_DIR / "cannae_all_trades.csv"
+
+    if not closed_csv.exists():
+        log.warning(f"No historical data: {closed_csv}")
+        return []
+
+    # Load individual trades for timestamp info
+    trade_timestamps = defaultdict(list)
+    if trades_csv.exists():
+        with open(trades_csv) as f:
+            for row in csv.DictReader(f):
+                cid = row.get("condition_id", "")
+                ts = int(row.get("timestamp", 0) or 0)
+                if cid and ts:
+                    trade_timestamps[cid].append(ts)
+
+    # Load closed positions (resolved bets with PnL)
+    bets = []
+    seen_cids = set()
+    with open(closed_csv) as f:
+        for row in csv.DictReader(f):
+            cid = row.get("condition_id", "")
+            if not cid or cid in seen_cids:
+                continue
+            seen_cids.add(cid)
+
+            title = row.get("title", "")
+            event_slug = row.get("event_slug", "")
+            avg_price = float(row.get("avg_price", 0) or 0)
+            total_bought = float(row.get("total_bought", 0) or 0)
+            realized_pnl = float(row.get("realized_pnl", 0) or 0)
+            cur_price = float(row.get("cur_price", 0) or 0)
+            won = int(row.get("won", -1) or -1)
+
+            # Determine result
+            if won == 1:
+                result = "WIN"
+            elif won == 0:
+                result = "LOSS"
+            elif cur_price <= 0.05:
+                result = "LOSS"
+            elif cur_price >= 0.95:
+                result = "WIN"
+            else:
+                continue  # unresolved, skip
+
+            cost = total_bought * avg_price if avg_price > 0 else total_bought
+            if result == "WIN":
+                pnl = total_bought - cost  # shares - cost
+            else:
+                pnl = -cost
+
+            # Use realized_pnl from CSV if available and makes sense
+            if realized_pnl != 0:
+                pnl = realized_pnl
+
+            timestamps = trade_timestamps.get(cid, [])
+            if timestamps:
+                first_ts = min(timestamps)
+                last_ts = max(timestamps)
+            else:
+                # CSV 'timestamp' is scrape time, NOT trade time — unreliable.
+                # Use end_date (game date) as proxy for chronological ordering.
+                end_date = row.get("end_date", "")
+                if end_date:
+                    try:
+                        from datetime import datetime as _dt
+                        ed = _dt.fromisoformat(end_date.replace("Z", "+00:00"))
+                        first_ts = int(ed.timestamp())
+                        last_ts = first_ts
+                    except Exception:
+                        first_ts = int(row.get("timestamp", 0) or 0)
+                        last_ts = first_ts
+                else:
+                    first_ts = int(row.get("timestamp", 0) or 0)
+                    last_ts = first_ts
+
+            bets.append({
+                "cid": cid,
+                "title": title,
+                "event_slug": event_slug.split("-more-markets")[0] if event_slug else "",
+                "outcome": row.get("outcome", ""),
+                "mt": classify_market_type(title),
+                "league": detect_league(event_slug),
+                "cost": cost,
+                "shares": total_bought,
+                "avg_price": round(avg_price, 4),
+                "result": result,
+                "pnl": round(pnl, 2),
+                "n_trades": len(timestamps) if timestamps else 1,
+                "first_ts": first_ts,
+                "last_ts": last_ts,
+                "source": "historical_csv",
+            })
+
+    log.info(f"Historical data: {len(bets)} resolved bets from CSVs")
+    return bets
+
+
+def _merge_bets(historical: list, api_bets: list) -> list:
+    """Merge historical CSV bets with fresh API bets. API wins on conflicts."""
+    by_cid = {}
+    for b in historical:
+        by_cid[b["cid"]] = b
+    # API data overwrites historical (fresher)
+    for b in api_bets:
+        by_cid[b["cid"]] = b
+    return list(by_cid.values())
+
+
 def collect_cannae_data(address: str = None, client: httpx.Client = None) -> dict:
-    """Collect all Cannae data — importable by intelligence modules.
+    """Collect all Cannae data — historical CSVs + fresh API.
 
     Returns dict with: trades, redeems, positions, all_bets, resolved, open_bets, event_cache
     """
@@ -685,6 +811,11 @@ def collect_cannae_data(address: str = None, client: httpx.Client = None) -> dic
         client = httpx.Client(headers=UA)
 
     try:
+        # 1. Load historical CSV data
+        log.info("Loading historical CSV data...")
+        historical_bets = _load_historical_bets()
+
+        # 2. Fetch fresh API data
         log.info("Fetching activity (trades + redeems)...")
         trades = fetch_activity(client, address, "trade")
         redeems = fetch_activity(client, address, "redeem")
@@ -696,12 +827,25 @@ def collect_cannae_data(address: str = None, client: httpx.Client = None) -> dic
 
         save_raw(trades + redeems)
 
-        all_bets = build_resolved_bets(trades, redeems, positions)
+        # 3. Build bets from API data
+        api_bets = build_resolved_bets(trades, redeems, positions)
+        api_resolved = [b for b in api_bets if b["result"] in ("WIN", "LOSS")]
+        api_open = [b for b in api_bets if b["result"] == "OPEN"]
+        log.info(f"API bets: {len(api_bets)} ({len(api_resolved)} resolved, {len(api_open)} open)")
+
+        # 4. Merge: historical resolved + API resolved (API wins on conflicts)
+        merged_resolved = _merge_bets(
+            [b for b in historical_bets if b["result"] in ("WIN", "LOSS")],
+            api_resolved,
+        )
+        # All bets = merged resolved + API open (open only from API, never from CSV)
+        all_bets = merged_resolved + api_open
+
         resolved = [b for b in all_bets if b["result"] in ("WIN", "LOSS")]
         open_bets = [b for b in all_bets if b["result"] == "OPEN"]
-        log.info(f"Total bets: {len(all_bets)} (resolved: {len(resolved)}, open: {len(open_bets)})")
+        log.info(f"MERGED total: {len(all_bets)} bets ({len(resolved)} resolved, {len(open_bets)} open)")
 
-        # Event metadata
+        # 5. Event metadata
         event_cache = {}
         if EVENT_CACHE.exists():
             event_cache = json.loads(EVENT_CACHE.read_text())
@@ -765,6 +909,28 @@ def main():
     decay = analyze_edge_decay(resolved)
     hauptbet = analyze_hauptbet(resolved)
 
+    # --- Intelligence modules (reverse engineering) ---
+    intelligence = {}
+    try:
+        import sys
+        sys.path.insert(0, str(BASE.parent))
+        from intelligence.conviction_model import analyze_conviction
+        from intelligence.game_selection import analyze_game_selection
+        from intelligence.hedge_structure import analyze_hedge_structure
+        from intelligence.predictive_model import build_predictive_model
+        from intelligence.first_principles import analyze_first_principles
+
+        log.info("Running intelligence modules...")
+        intelligence["first_principles"] = analyze_first_principles(dataset)
+        intelligence["conviction"] = analyze_conviction(dataset)
+        intelligence["game_selection"] = analyze_game_selection(dataset)
+        intelligence["hedge_structure"] = analyze_hedge_structure(dataset)
+        intelligence["predictive_model"] = build_predictive_model(dataset)
+        log.info(f"Intelligence modules complete: {len(intelligence)} modules")
+    except Exception as e:
+        log.warning(f"Intelligence modules failed: {e}")
+        intelligence["error"] = str(e)
+
     # --- Build report ---
     ts_range = sorted(b["first_ts"] for b in resolved if b["first_ts"])
     report = {
@@ -784,6 +950,7 @@ def main():
         "leg_correlation": correlation,
         "edge_decay": decay,
         "hauptbet_analysis": hauptbet,
+        "intelligence": intelligence,
         "alerts": generate_alerts({"overall": overall, "by_league": by_league, "timing": timing, "leg_correlation": correlation}),
         "recommendations": generate_recommendations({"overall": overall, "by_league": by_league, "timing": timing, "leg_correlation": correlation}),
     }
@@ -816,6 +983,35 @@ def main():
     log.info(f"\nSizing signal: {'Q4 WR=' + str(sizing.get('Q4_large',{}).get('wr','?')) + ' vs Q1 WR=' + str(sizing.get('Q1_small',{}).get('wr','?')) if not sizing.get('insufficient_data') else 'insufficient data'}")
     log.info(f"Leg correlation: {correlation}")
     log.info(f"Edge decay trend: {decay.get('trend', 'unknown')}")
+
+    # Intelligence summary
+    if intelligence and "error" not in intelligence:
+        log.info("\n" + "=" * 80)
+        log.info("INTELLIGENCE — CANNAE REVERSE ENGINEERING")
+        log.info("=" * 80)
+        conv = intelligence.get("conviction", {})
+        if conv.get("conviction_patterns"):
+            log.info("Conviction patterns:")
+            for pat, data in conv["conviction_patterns"].items():
+                log.info(f"  {pat:20s}: {data['games']:>3d} games, WR={data['wr']:.0%}, ROI={data['roi']:.0%}")
+        if conv.get("rules"):
+            for rule in conv["rules"]:
+                log.info(f"  Rule: {rule.get('rule','?')} — {rule.get('description', '')}")
+
+        hedge = intelligence.get("hedge_structure", {})
+        if hedge.get("winning_structures"):
+            log.info("\nWinning structures:")
+            for s in hedge["winning_structures"][:5]:
+                log.info(f"  {s['structure']:30s}: {s['games']:>3d} games, ROI={s['roi']:.0%}, PnL=${s['pnl']:.0f}")
+
+        pred = intelligence.get("predictive_model", {})
+        if pred.get("backtest"):
+            bt = pred["backtest"]
+            log.info(f"\nPredictive backtest: {bt.get('accuracy',0):.0%} accuracy ({bt.get('predicted_correct',0)}/{bt.get('total_trades',0)} trades)")
+        if pred.get("model_rules"):
+            log.info("Model rules:")
+            for rule in pred["model_rules"]:
+                log.info(f"  {rule.get('rule','?')}: {rule.get('description','')}")
 
     if report["alerts"]:
         log.warning("\nALERTS:")

@@ -4,6 +4,7 @@ use anyhow::Result;
 use tracing::{info, warn};
 
 use crate::clob::client::{ClobClient, OrderType, Side};
+use crate::clob::types::PostOrderResponse;
 use crate::config::SharedConfig;
 use crate::logger::{TradeLog, TradeLogger};
 use crate::risk::{RiskDecision, RiskManager};
@@ -86,8 +87,11 @@ impl Executor {
                 Err(_) => continue,
             };
 
-            // Skip phantom fills
-            if trade.get("result").and_then(|v| v.as_str()) == Some("phantom") {
+            // Only seed open positions (result=null). Resolved/sold trades must not
+            // block re-buying the same event. Phantoms are also skipped.
+            let result = trade.get("result");
+            let is_open = result.is_none() || result == Some(&serde_json::Value::Null);
+            if !is_open {
                 continue;
             }
 
@@ -114,10 +118,10 @@ impl Executor {
         logger: &TradeLogger,
         cannae_game_total_usdc: f64,
     ) -> Result<bool> {
-        self.execute_inner(signal, risk, logger, cannae_game_total_usdc, false).await
+        self.execute_inner(signal, risk, logger, cannae_game_total_usdc, false, 1.0).await
     }
 
-    /// Execute with game context and taker mode (FOK on ask price)
+    /// Execute with game context, taker mode (FOK on ask price), and market-type multiplier
     pub async fn execute_with_game_context_taker(
         &mut self,
         signal: &AggregatedSignal,
@@ -125,8 +129,22 @@ impl Executor {
         logger: &TradeLogger,
         cannae_game_total_usdc: f64,
         taker_mode: bool,
+        market_type_multiplier: f64,
     ) -> Result<bool> {
-        self.execute_inner(signal, risk, logger, cannae_game_total_usdc, taker_mode).await
+        self.execute_inner(signal, risk, logger, cannae_game_total_usdc, taker_mode, market_type_multiplier).await
+    }
+
+    /// Execute with proportional sizing: leg_weight × conviction × max_pct
+    pub async fn execute_proportional(
+        &mut self,
+        signal: &AggregatedSignal,
+        risk: &mut RiskManager,
+        logger: &TradeLogger,
+        cannae_game_total_usdc: f64,
+        taker_mode: bool,
+        conviction: f64,
+    ) -> Result<bool> {
+        self.execute_inner(signal, risk, logger, cannae_game_total_usdc, taker_mode, conviction).await
     }
 
     /// Execute a signal: size it, risk-check it, place the order
@@ -136,7 +154,7 @@ impl Executor {
         risk: &mut RiskManager,
         logger: &TradeLogger,
     ) -> Result<bool> {
-        self.execute_inner(signal, risk, logger, 0.0, false).await
+        self.execute_inner(signal, risk, logger, 0.0, false, 1.0).await
     }
 
     async fn execute_inner(
@@ -146,6 +164,7 @@ impl Executor {
         logger: &TradeLogger,
         cannae_game_total_usdc: f64,
         taker_mode: bool,
+        market_type_multiplier: f64,
     ) -> Result<bool> {
         // Read config values we need, then drop the lock immediately (N6: avoid holding
         // RwLock across HTTP await points which blocks config hot-reload)
@@ -187,14 +206,10 @@ impl Executor {
         }
 
         // Dedup against LIVE PM positions (source of truth, not trade log).
-        // Two checks in one API call:
-        // 1. condition_id: blocks exact duplicates + contradictions
-        // 2. event_slug + market_type: blocks same-type bets on same event
-        //    (e.g. ORL -13.5 spread + ORL -12.5 spread = blocked)
-        //    But spread + ou on same event = allowed (different market_type)
+        // Block exact condition_id duplicates and contradictions only.
+        // Multiple legs of same market_type on same event ARE allowed (e.g. O/U 2.5 + O/U 1.5).
         {
             let funder = self.client.funder_address();
-            let signal_market_type = crate::copy_trader::CopyTrader::detect_market_type(&signal.market_title);
             match self.client.get_wallet_positions(&funder, 500).await {
                 Ok(positions) => {
                     for pos in &positions {
@@ -203,7 +218,6 @@ impl Executor {
                         }
                         let pos_cid = pos.condition_id.as_deref().unwrap_or("");
 
-                        // Check 1: exact condition_id match
                         if pos_cid == signal.condition_id {
                             let pos_outcome = pos.outcome.as_deref().unwrap_or("");
                             if pos_outcome.to_lowercase() == signal.outcome.to_lowercase() {
@@ -218,27 +232,6 @@ impl Executor {
                                 );
                             }
                             return Ok(false);
-                        }
-
-                        // Check 2 (RUS-283): event_slug + market_type dedup
-                        let pos_event = pos.event_slug.as_deref()
-                            .or(pos.slug.as_deref())
-                            .unwrap_or("")
-                            .trim_end_matches("-more-markets");
-                        if !signal.event_slug.is_empty()
-                            && !pos_event.is_empty()
-                            && pos_event == signal.event_slug
-                        {
-                            let pos_title = pos.title.as_deref().unwrap_or("");
-                            let pos_mt = crate::copy_trader::CopyTrader::detect_market_type(pos_title);
-                            if pos_mt == signal_market_type {
-                                info!(
-                                    "SKIP DEDUP: already have {} bet on {} (have: {}, signal: {})",
-                                    signal_market_type, signal.event_slug,
-                                    pos_title, signal.market_title
-                                );
-                                return Ok(false);
-                            }
                         }
                     }
                 }
@@ -269,19 +262,7 @@ impl Executor {
                         );
                         return Ok(false);
                     }
-                    // Only add 1ct buffer when top-of-book is too thin for our order.
-                    // Estimate order size: ~$15 / ask_price (typical copy trade).
-                    let est_shares = 15.0 / ask;
-                    let need_sweep = depth < est_shares * 1.5; // 50% margin
-                    if need_sweep {
-                        info!(
-                            "ASK+1ct: {} has only {:.0}sh at {:.0}ct (need ~{:.0}sh)",
-                            signal.market_title, depth, ask * 100.0, est_shares
-                        );
-                        (ask + 0.01_f64).min(0.99)
-                    } else {
-                        ask
-                    }
+                    ask
                 }
                 Ok((ask, _)) => {
                     warn!(
@@ -361,9 +342,8 @@ impl Executor {
 
         let is_copy = signal.sources.iter().any(|s| matches!(s, SignalSource::Copy(_)));
         let size = if is_copy && cannae_game_total_usdc > 0.0 {
-            sizing::copy_trade_size(risk.bankroll(), &signal_at_exec, &sizing_config, cannae_game_total_usdc)
+            sizing::proportional_size(risk.bankroll(), &signal_at_exec, &sizing_config, cannae_game_total_usdc, market_type_multiplier)
         } else if is_copy {
-            // Fallback: no game context, use old kelly sizing
             sizing::kelly_size(risk.bankroll(), &signal_at_exec, &sizing_config)
         } else {
             sizing::kelly_size(risk.bankroll(), &signal_at_exec, &sizing_config)
@@ -510,6 +490,50 @@ impl Executor {
                             .await?
                     } else {
                         return Err(e);
+                    }
+                // Sports FOK: 400 "fully filled or killed" = order in 3s delay.
+                // Wait 5s, check PM positions, retry if not filled.
+                } else if taker_mode && err_str.contains("fully filled or killed") {
+                    info!(
+                        "FOK DELAYED: {} — waiting 5s then checking PM positions",
+                        signal.market_title
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+                    // Check if we now hold this position
+                    let funder = self.client.funder_address();
+                    let has_position = match self.client.get_wallet_positions(&funder, 500).await {
+                        Ok(positions) => positions.iter().any(|p| {
+                            p.condition_id.as_deref() == Some(&signal.condition_id)
+                                && p.size_f64() > 0.01
+                        }),
+                        Err(_) => false,
+                    };
+
+                    if has_position {
+                        info!("FOK VERIFIED: {} — position confirmed in PM", signal.market_title);
+                        // Return a synthetic filled response
+                        PostOrderResponse {
+                            order_id: None,
+                            id: None,
+                            status: Some("delayed-verified".to_string()),
+                            skipped: None,
+                            size_matched: Some(format!("{:.2}", size)),
+                            success: Some(true),
+                            error_msg: None,
+                        }
+                    } else {
+                        info!("FOK RETRY: {} — not in PM, retrying", signal.market_title);
+                        match self.client
+                            .create_and_post_order(&signal.token_id, exec_price, size, side, order_type, fee_bps)
+                            .await
+                        {
+                            Ok(r) => r,
+                            Err(e2) => {
+                                warn!("FOK RETRY FAILED: {} — {}", signal.market_title, e2);
+                                return Err(e2);
+                            }
+                        }
                     }
                 } else {
                     return Err(e);

@@ -249,10 +249,11 @@ pub async fn discover_t30(
             }
 
             info!(
-                "T30 DISCOVER: {} has {} positions in {} (starts in ~{}min)",
+                "T30 DISCOVER: {} has {} positions in {} (kickoff {} UTC, ~{}min)",
                 wallet.name,
                 event_positions.len(),
                 event_slug,
+                game_ref.start_time.format("%H:%M"),
                 game_ref.start_time.signed_duration_since(Utc::now()).num_minutes(),
             );
 

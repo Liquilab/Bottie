@@ -58,23 +58,21 @@ pub fn kelly_size(
     shares
 }
 
-/// Size for copy trades — Proportional shares sizing.
+/// Proportional copy-trade sizing.
 ///
-/// Copies Cannae's exact shares distribution within a game, scaled to our budget.
+/// Formula: bankroll × leg_weight × conviction × max_pct
+///   - leg_weight = cannae_leg_usdc / cannae_game_total (how much of game Cannae puts here)
+///   - conviction = best_usdc / (best_usdc + second_usdc) per conditionId
+///   - max_pct = 8% (from config.max_bet_pct)
 ///
-/// Logic:
-///   factor = game_budget / cannae_game_total_usdc
-///   our_shares = cannae_shares × factor
-///   our_usdc = our_shares × price
-///
-/// Game budget: $50 (normal) or $100 (if Cannae's game total > $100K)
-///
+/// Skip if result < $2.50 (PM minimum).
 /// Returns shares (not USDC).
-pub fn copy_trade_size(
+pub fn proportional_size(
     bankroll: f64,
     signal: &AggregatedSignal,
     config: &SizingConfig,
     cannae_game_total_usdc: f64,
+    conviction: f64,
 ) -> f64 {
     let price = signal.price;
 
@@ -82,53 +80,49 @@ pub fn copy_trade_size(
         return 0.0;
     }
 
-    if cannae_game_total_usdc <= 0.0 || signal.source_shares <= 0.0 {
+    if cannae_game_total_usdc <= 0.0 || signal.source_size_usdc <= 0.0 {
         return 0.0;
     }
 
-    // Tiered sizing: scale with Cannae's game total as confidence signal.
-    // Data (173 resolved bets, Jan-Mar 2026):
-    //   Q1 <$68:    70% WR, +89% ROI
-    //   Q2 $68-480: 86% WR, +72% ROI
-    //   Q3 $480-1879: 91% WR, +80% ROI
-    //   Q4 >$1879:  93% WR, +57% ROI
-    let pct = if cannae_game_total_usdc < 100.0 {
-        0.010 // 1.0% — low confidence
-    } else if cannae_game_total_usdc < 500.0 {
-        0.020 // 2.0% — base
-    } else if cannae_game_total_usdc < 2000.0 {
-        0.030 // 3.0% — high confidence
-    } else {
-        0.040 // 4.0% — very high confidence (93% WR)
-    };
-    let leg_budget = bankroll * pct;
-    let our_shares = leg_budget / price;
-    let our_usdc = leg_budget;
+    // leg_weight: proportion of Cannae's game total on this leg
+    let leg_weight = signal.source_size_usdc / cannae_game_total_usdc;
 
-    // Floor at $2.50 minimum bet
-    let (final_shares, final_usdc) = if our_usdc < 2.50 {
-        let min_shares = 2.50 / price;
-        (min_shares, 2.50)
-    } else {
-        (our_shares, our_usdc)
-    };
+    // max_pct from config (8% = 0.08)
+    let max_pct = config.max_bet_pct / 100.0;
+
+    // our_usdc = bankroll × leg_weight × conviction × max_pct
+    let our_usdc = bankroll * leg_weight * conviction * max_pct;
+
+    // Skip if below $2.50 minimum (not bump — skip)
+    if our_usdc < 2.50 {
+        return 0.0;
+    }
 
     // Never bet more than available cash
-    if final_usdc > bankroll {
+    if our_usdc > bankroll {
         return 0.0;
     }
 
+    let shares = our_usdc / price;
+
     // Enforce PM minimum: 5 shares
-    if final_shares < 5.0 {
+    if shares < 5.0 {
         if bankroll >= 5.0 * price {
             return 5.0;
         }
         return 0.0;
     }
 
-    if final_usdc < MIN_ORDER_VALUE {
-        return 0.0;
-    }
+    shares
+}
 
-    final_shares
+/// Backward-compatible wrapper — used by non-game-context paths.
+pub fn copy_trade_size(
+    bankroll: f64,
+    signal: &AggregatedSignal,
+    config: &SizingConfig,
+    cannae_game_total_usdc: f64,
+) -> f64 {
+    // Default: full conviction, treat source_size_usdc as leg weight
+    proportional_size(bankroll, signal, config, cannae_game_total_usdc, 1.0)
 }

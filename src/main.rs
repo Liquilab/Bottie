@@ -1,3 +1,4 @@
+mod budget;
 mod clob;
 mod config;
 mod copy_trader;
@@ -295,36 +296,21 @@ async fn copy_trading_loop(
 ) {
     let mut copy_trader = CopyTrader::new(client.clone(), tracker.clone(), config.clone());
     let mut executor = Executor::new(client.clone(), config.clone());
-    let mut stability_tracker = stability::StabilityTracker::new();
+    let mut budget_planner = budget::BudgetPlanner::new(config.read().await.budget.clone());
 
     // Seed attempted map from live PM positions (source of truth).
-    // Also seed stability tracker with events we already hold.
     {
         let funder = client.funder_address();
         match client.get_wallet_positions(&funder, 500).await {
             Ok(positions) => {
                 executor.seed_from_positions(&positions);
-                // RUS-266: also seed from trades.jsonl — PM API inconsistently returns positions
-                executor.seed_from_trade_log(std::path::Path::new("data/trades.jsonl"));
-                // Seed stability tracker: events we already hold should never re-enter
-                let our_events = positions
-                    .iter()
-                    .filter(|p| p.size_f64() > 0.01)
-                    .filter_map(|p| {
-                        p.event_slug
-                            .clone()
-                            .or_else(|| p.slug.clone())
-                            .map(|s| s.trim_end_matches("-more-markets").to_string())
-                    })
-                    .filter(|s| !s.is_empty());
-                stability_tracker.seed_emitted(our_events);
+                // PM positions = source of truth. Trade log NOT used for seeding:
+                // sold positions still have result=null in trades.jsonl, blocking re-buys.
             }
             Err(e) => tracing::warn!("could not seed from PM positions: {e}"),
         }
     }
     let mut polls_since_sync: u32 = 0;
-    let mut polls_since_stability_log: u32 = 0;
-    let mut emit_cooldown: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
 
     // Two-phase schedule state
     let mut game_schedule = scheduler::GameSchedule::new();
@@ -334,6 +320,10 @@ async fn copy_trading_loop(
     // RUS-278: Pre-computed ROI cache — refreshed every 20 polls (~5 min), NOT per candidate.
     let mut roi_cache: HashMap<(String, String), f64> = HashMap::new();
     let mut polls_since_roi_refresh: u32 = 20; // Force immediate refresh on first cycle
+
+    // Cannae position summary: log every ~30 min (120 polls × 15s = 30 min)
+    let cannae_summary_every_n: u32 = 120;
+    let mut polls_since_cannae_summary: u32 = cannae_summary_every_n; // Force immediate on first cycle
 
     loop {
         let poll_interval = {
@@ -415,102 +405,63 @@ async fn copy_trading_loop(
             );
         }
 
-        // Read stability config
-        let (stability_window, stability_threshold) = {
-            let c = config.read().await;
-            (
-                c.copy_trading.stability_window_minutes,
-                c.copy_trading.stability_threshold_pct,
-            )
-        };
-
-        // Poll for new copy signals + raw wallet positions
+        // Poll for new copy signals
         let (_copy_signals, raw_positions) = copy_trader.poll().await;
 
-        // Build our current event_slugs (from PM positions already seeded at startup
-        // + any events the stability tracker has already emitted)
-        // We use the executor's attempted set indirectly through seed_from_positions.
-        // For stability: get our own current positions to know which events to skip.
-        let our_event_slugs: std::collections::HashSet<String> = {
-            let funder = client.funder_address();
-            match client.get_wallet_positions(&funder, 500).await {
-                Ok(positions) => positions
-                    .iter()
-                    .filter(|p| p.size_f64() > 0.01)
-                    .filter_map(|p| {
-                        p.event_slug
-                            .clone()
-                            .or_else(|| p.slug.clone())
-                            .map(|s| s.trim_end_matches("-more-markets").to_string())
-                    })
-                    .filter(|s| !s.is_empty())
-                    .collect(),
-                Err(_) => std::collections::HashSet::new(),
-            }
-        };
-
-        // Feed wallet positions into stability tracker (with per-wallet league filter)
+        // Ensure schedule is fresh before CANNAE GAMES log (needs kickoff times)
         {
-            let c = config.read().await;
-            for (addr, name, positions) in &raw_positions {
-                // Fail closed: skip wallets not in watchlist config
-                let Some(wallet_cfg) = c.copy_trading.watchlist.iter()
-                    .find(|w| w.address.eq_ignore_ascii_case(addr))
-                else {
-                    warn!("STABILITY SKIP: no watchlist config for source wallet {}", addr);
-                    continue;
+            let schedule_cfg = config.read().await.schedule.clone();
+            if schedule_cfg.enabled && game_schedule.needs_refresh(schedule_cfg.refresh_interval_minutes as i64) {
+                let watchlist = config.read().await.copy_trading.watchlist.clone();
+                let sport_tags = if schedule_cfg.sport_tags.is_empty() {
+                    scheduler::sport_tags_from_watchlist(&watchlist)
+                } else {
+                    schedule_cfg.sport_tags.clone()
                 };
-                let wallet_leagues = wallet_cfg.leagues.clone();
-
-                // RUS-281: Pre-filter futures noise before stability tracker
-                let futures_kw = &["division", "conference", "champion", "winner", "mvp",
-                    "season", "playoff", "finals", "award", "rookie", "win total"];
-                let filtered_positions: Vec<_> = positions.iter()
-                    .filter(|p| {
-                        let title = p.title.as_deref().unwrap_or("").to_lowercase();
-                        let slug = p.event_slug.as_deref()
-                            .or(p.slug.as_deref())
-                            .unwrap_or("").to_lowercase();
-                        !futures_kw.iter().any(|kw| title.contains(kw) || slug.contains(kw))
-                    })
-                    .cloned()
-                    .collect();
-
-                stability_tracker.update(
-                    addr,
-                    name,
-                    &filtered_positions,
-                    &our_event_slugs,
-                    stability_threshold,
-                    &wallet_leagues,
-                );
+                if !sport_tags.is_empty() {
+                    scheduler::refresh_schedule(&client, &sport_tags, &mut game_schedule).await;
+                }
             }
         }
 
-        // Collect ALL fetched positions for stability check (to get current data)
-        let all_cannae_positions: Vec<crate::clob::types::WalletPosition> = raw_positions
-            .iter()
-            .flat_map(|(_, _, positions)| positions.clone())
-            .collect();
+        // Periodic Cannae position summary + budget refresh: every ~30 min
+        polls_since_cannae_summary += 1;
+        if polls_since_cannae_summary >= cannae_summary_every_n {
+            polls_since_cannae_summary = 0;
+            // Refresh budget config in case of hot-reload
+            budget_planner.update_config(config.read().await.budget.clone());
 
-        // Stability tracker: update + prune only (for pending status logging).
-        // Execution is DISABLED — only T-30/T-5 scheduler buys.
-        // Stability used to buy immediately when positions stabilized, even for
-        // games days away. T-30/T-5 buys at the right time (30min before start).
-        stability_tracker.prune_stale();
+            // Collect Cannae positions (first wallet = Cannae)
+            let cannae_positions: Vec<_> = raw_positions
+                .iter()
+                .filter(|(_, name, _)| name.eq_ignore_ascii_case("Cannae"))
+                .flat_map(|(_, _, positions)| positions.clone())
+                .collect();
 
-        // Log pending stability status periodically (every 20 polls = ~5 min)
-        polls_since_stability_log += 1;
-        if polls_since_stability_log >= 20 {
-            polls_since_stability_log = 0;
-            let pending = stability_tracker.pending_count();
-            if pending > 0 {
-                let summary = stability_tracker.pending_summary();
-                for (slug, wait_mins, is_stable) in &summary {
-                    let state = if *is_stable { "stable" } else { "filling" };
-                    info!("STABILITY PENDING: {} ({}min, {})", slug, wait_mins, state);
+            budget_planner.refresh_from_positions(&cannae_positions);
+
+            // Fetch own positions for recycling estimate
+            {
+                let funder = client.funder_address();
+                let cash = risk.read().await.bankroll();
+                match client.get_wallet_positions(&funder, 500).await {
+                    Ok(own_pos) => {
+                        let recycling = budget_planner.estimate_recycling(&own_pos);
+                        let eff = cash + recycling;
+                        info!(
+                            "BUDGET: cash=${:.0} + recycling=${:.0} = effective=${:.0} | {} remaining games | game_budget=${:.0}",
+                            cash, recycling, eff,
+                            budget_planner.remaining_games(),
+                            budget_planner.game_budget(eff),
+                        );
+                    }
+                    Err(e) => {
+                        warn!("BUDGET: could not fetch own positions for recycling: {e}");
+                    }
                 }
             }
+
+            budget_planner.log_flight_board(&game_schedule);
         }
 
         // --- Two-phase schedule: T-30 discovery + T-5 confirm+buy ---
@@ -528,14 +479,7 @@ async fn copy_trading_loop(
                 };
 
                 if !sport_tags.is_empty() {
-                    // 1. Refresh schedule if stale
-                    if game_schedule.needs_refresh(schedule_cfg.refresh_interval_minutes as i64) {
-                        scheduler::refresh_schedule(
-                            &client,
-                            &sport_tags,
-                            &mut game_schedule,
-                        ).await;
-                    }
+                    // Schedule already refreshed above (before CANNAE GAMES log)
 
                     // 2. T-30 Discovery: find games starting in ~30 min, check wallets, add to watched_games
                     let already_watched: HashSet<String> = watched_games.iter()
@@ -568,7 +512,21 @@ async fn copy_trading_loop(
                         &t5_executed,
                     ).await;
 
-                    for t5_match in &t5_matches {
+                    // Sort T5 matches by Cannae game total DESC (biggest games first)
+                    let mut t5_sorted = t5_matches;
+                    t5_sorted.sort_by(|a, b| {
+                        let a_total = budget_planner.cannae_games
+                            .get(&a.game_event_slug)
+                            .map(|g| g.total_usdc)
+                            .unwrap_or(0.0);
+                        let b_total = budget_planner.cannae_games
+                            .get(&b.game_event_slug)
+                            .map(|g| g.total_usdc)
+                            .unwrap_or(0.0);
+                        b_total.partial_cmp(&a_total).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+
+                    for t5_match in &t5_sorted {
                         let game = stability::StableGame {
                             event_slug: t5_match.game_event_slug.clone(),
                             positions: t5_match.positions.clone(),
@@ -582,6 +540,7 @@ async fn copy_trading_loop(
                         );
                         execute_stable_game(
                             &game, &mut executor, &risk, &logger, &config, true,
+                            &budget_planner,
                         ).await;
                         // Always mark as executed — never retry. If the order failed,
                         // retrying every 15 seconds spams the CLOB API and wastes fees.
@@ -599,52 +558,9 @@ async fn copy_trading_loop(
     }
 }
 
-/// Check if Cannae has recent trades on any conditionId in this event.
-/// Returns true if Cannae is still actively trading this event.
-async fn cannae_still_trading(
-    client: &ClobClient,
-    cannae_address: &str,
-    game: &stability::StableGame,
-    cooldown_minutes: u64,
-) -> bool {
-    let since = chrono::Utc::now()
-        .checked_sub_signed(chrono::Duration::minutes(cooldown_minutes as i64))
-        .unwrap_or_else(chrono::Utc::now);
-    let since_unix = since.timestamp();
-
-    let trades = match client.get_trades_since(cannae_address, since_unix, 10).await {
-        Ok(t) => t,
-        Err(e) => {
-            warn!("trades check failed for {}: {} — allowing emit", game.event_slug, e);
-            return false; // On error: allow emit (don't block on API failure)
-        }
-    };
-
-    let event_cids: std::collections::HashSet<String> = game.positions.iter()
-        .filter_map(|p| p.condition_id.clone())
-        .collect();
-
-    for trade in &trades {
-        if let Some(cid) = &trade.condition_id {
-            if event_cids.contains(cid) {
-                let age_mins = trade.timestamp_secs()
-                    .map(|ts| (chrono::Utc::now().timestamp() - ts) / 60)
-                    .unwrap_or(0);
-                info!(
-                    "STABILITY WAIT: {} — Cannae traded {}min ago on cid={}...",
-                    game.event_slug, age_mins, &cid[..12.min(cid.len())]
-                );
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-/// Build AggregatedSignals from a stable game's Cannae positions,
+/// Build AggregatedSignals from a game's Cannae positions,
 /// select legs based on config (max_legs_per_event), and execute.
-/// Execute a stable game. Returns true if at least one order was filled.
+/// Returns true if at least one order was filled.
 async fn execute_stable_game(
     game: &stability::StableGame,
     executor: &mut Executor,
@@ -652,6 +568,7 @@ async fn execute_stable_game(
     logger: &Arc<TradeLogger>,
     config: &SharedConfig,
     taker_mode: bool,
+    budget_planner: &budget::BudgetPlanner,
 ) -> bool {
     use crate::copy_trader::CopyTrader;
 
@@ -675,16 +592,30 @@ async fn execute_stable_game(
     let league_prefix = game.event_slug.split('-').next().unwrap_or("");
     if !allowed_leagues.is_empty() && !allowed_leagues.iter().any(|l| l == league_prefix) {
         info!(
-            "STABILITY SKIP: {} not in allowed leagues (prefix={}, allowed={:?})",
+            "GAME SKIP: {} not in allowed leagues (prefix={}, allowed={:?})",
             game.event_slug, league_prefix, allowed_leagues
         );
         return false;
     }
 
-    // Group positions by conditionId, keep largest per condition
+    // Cannae's total USDC for positions in allowed market types only (for proportional sizing).
+    // Using ALL positions would dilute leg_weight when OU/BTTS is filtered out (e.g. NBA = 60% OU).
+    let cannae_game_total: f64 = game.positions.iter()
+        .filter(|p| {
+            let title = p.title.as_deref().unwrap_or("");
+            let mt = CopyTrader::detect_market_type(title);
+            allowed_market_types.is_empty() || allowed_market_types.iter().any(|a| a == &mt)
+        })
+        .map(|p| p.initial_value_f64())
+        .sum();
+    if cannae_game_total <= 0.0 {
+        return false;
+    }
+
+    // Group positions by conditionId: best (largest) + second (for conviction ratio)
     let mut best_per_condition: std::collections::HashMap<
         String,
-        &crate::clob::types::WalletPosition,
+        (&crate::clob::types::WalletPosition, Option<&crate::clob::types::WalletPosition>),
     > = std::collections::HashMap::new();
 
     for pos in &game.positions {
@@ -692,74 +623,104 @@ async fn execute_stable_game(
         if cid.is_empty() {
             continue;
         }
-        let existing = best_per_condition.get(cid);
-        // RUS-260 Fix B: Compare on $ value (initial_value), not shares.
-        // Cheap legs have more shares per dollar, biasing toward them.
-        if existing.is_none() || pos.initial_value_f64() > existing.unwrap().initial_value_f64() {
-            best_per_condition.insert(cid.to_string(), pos);
+        let entry = best_per_condition.entry(cid.to_string()).or_insert((pos, None));
+        if pos.initial_value_f64() > entry.0.initial_value_f64() {
+            entry.1 = Some(entry.0); // demote current best to second
+            entry.0 = pos;
+        } else if entry.1.is_none() || pos.initial_value_f64() > entry.1.unwrap().initial_value_f64() {
+            entry.1 = Some(pos);
         }
     }
 
-    // Hauptbet selection: best per condition, filtered by allowed market types
-    let mut game_legs: Vec<&crate::clob::types::WalletPosition> = best_per_condition
-        .values()
-        .copied()
-        .filter(|pos| {
-            if allowed_market_types.is_empty() {
-                return true;
+    // Filter by allowed market types, compute conviction per leg
+    struct LegWithConviction<'a> {
+        pos: &'a crate::clob::types::WalletPosition,
+        conviction: f64,
+    }
+
+    let mut game_legs: Vec<LegWithConviction> = Vec::new();
+    for (_cid, (best, second)) in &best_per_condition {
+        let title = best.title.as_deref().unwrap_or("");
+        let detected = CopyTrader::detect_market_type(title);
+
+        if !allowed_market_types.is_empty() && !allowed_market_types.iter().any(|mt| mt == &detected) {
+            info!(
+                "GAME FILTER: skipping '{}' (type={}, allowed={:?})",
+                &title[..title.len().min(60)], detected, allowed_market_types
+            );
+            continue;
+        }
+
+        // Conviction: best / (best + second) on same conditionId.
+        // Only for football — Cannae hedges YES+NO on draw markets.
+        // US sports wallets typically have 1 side per condition, but spurious
+        // second-side positions would halve sizing for no reason.
+        let is_football = allowed_market_types.iter().any(|mt| mt == "draw");
+        let conviction = if is_football {
+            let best_usdc = best.initial_value_f64();
+            let second_usdc = second.map(|s| s.initial_value_f64()).unwrap_or(0.0);
+            if best_usdc + second_usdc > 0.0 {
+                best_usdc / (best_usdc + second_usdc)
+            } else {
+                1.0
             }
-            let title = pos.title.as_deref().unwrap_or("");
-            let detected = CopyTrader::detect_market_type(title);
-            let allowed = allowed_market_types.iter().any(|mt| mt == &detected);
-            if !allowed {
-                info!(
-                    "STABILITY FILTER: skipping leg '{}' (type={}, allowed={:?})",
-                    &title[..title.len().min(60)],
-                    detected,
-                    allowed_market_types
-                );
-            }
-            allowed
-        })
-        .collect();
+        } else {
+            1.0
+        };
+
+        game_legs.push(LegWithConviction { pos: best, conviction });
+    }
 
     // Sort by USDC size descending, apply max_legs limit
     game_legs.sort_by(|a, b| {
-        b.initial_value_f64()
-            .partial_cmp(&a.initial_value_f64())
+        b.pos.initial_value_f64()
+            .partial_cmp(&a.pos.initial_value_f64())
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     if max_legs > 0 {
         game_legs.truncate(max_legs);
     }
 
-    // Need at least 1 leg
     if game_legs.is_empty() {
-        info!(
-            "STABILITY SKIP: {} has no legs after conditionId grouping",
-            game.event_slug,
-        );
-        return false;
-    }
-
-    // Cannae's total USDC for SELECTED legs only (not all positions).
-    // We size based on what we actually bet on — if we only take the hauptbet,
-    // the full game_budget goes to that single leg.
-    let cannae_selected_total: f64 = game_legs.iter().map(|p| p.initial_value_f64()).sum();
-    if cannae_selected_total <= 0.0 {
+        info!("GAME SKIP: {} has no legs after filtering", game.event_slug);
         return false;
     }
 
     info!(
-        "STABILITY EXECUTE: {} — {} legs, Cannae selected ${:.0}",
-        game.event_slug,
-        game_legs.len(),
-        cannae_selected_total
+        "GAME EXECUTE: {} — {} legs, Cannae game total ${:.0}",
+        game.event_slug, game_legs.len(), cannae_game_total
     );
+
+    // Log T5 PLAN with proportional per-leg allocation
+    {
+        let bankroll = risk.read().await.bankroll();
+        let max_pct = config.read().await.sizing.max_bet_pct / 100.0;
+        let mut total_game_budget = 0.0_f64;
+        let leg_allocations: Vec<budget::LegAllocation> = game_legs.iter().map(|leg| {
+            let title = leg.pos.title.as_deref().unwrap_or("").to_string();
+            let market_type = CopyTrader::detect_market_type(&title);
+            let cannae_usdc = leg.pos.initial_value_f64();
+            let leg_weight = cannae_usdc / cannae_game_total;
+            let our_usdc = bankroll * leg_weight * leg.conviction * max_pct;
+            let our_usdc = if our_usdc < 2.50 { 0.0 } else { our_usdc }; // skip, not bump
+            total_game_budget += our_usdc;
+            let tier_label = format!("{:.0}% weight, {:.0}% conv", leg_weight * 100.0, leg.conviction * 100.0);
+            budget::LegAllocation {
+                title,
+                market_type,
+                cannae_usdc,
+                our_usdc,
+                multiplier: leg.conviction,
+                tier_label,
+            }
+        }).collect();
+        budget_planner.log_t5_plan(&game.event_slug, total_game_budget, &leg_allocations);
+    }
 
     // Build AggregatedSignal for each leg and execute
     let mut any_filled = false;
-    for pos in &game_legs {
+    for leg in &game_legs {
+        let pos = leg.pos;
         let title = pos.title.as_deref().unwrap_or("").to_string();
         let condition_id = pos.condition_id.as_deref().unwrap_or("").to_string();
         let outcome = pos.outcome.as_deref().unwrap_or("").to_string();
@@ -822,13 +783,13 @@ async fn execute_stable_game(
             source_shares,
         };
 
+        // Proportional sizing: pass conviction and game total to executor
         let mut risk_guard = risk.write().await;
-        let label = if taker_mode { "T5" } else { "STABILITY" };
-        let result = if taker_mode {
-            executor.execute_with_game_context_taker(&agg_signal, &mut risk_guard, &logger, cannae_selected_total, true).await
-        } else {
-            executor.execute_with_game_context(&agg_signal, &mut risk_guard, &logger, cannae_selected_total).await
-        };
+        let label = if taker_mode { "T5" } else { "GAME" };
+        let result = executor.execute_proportional(
+            &agg_signal, &mut risk_guard, &logger,
+            cannae_game_total, taker_mode, leg.conviction,
+        ).await;
         match result {
             Ok(filled) => {
                 if filled {

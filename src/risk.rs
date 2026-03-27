@@ -72,6 +72,21 @@ impl RiskManager {
             ));
         }
 
+        // Check deployment limit: don't commit more than max_deployment_pct of bankroll
+        if self.config.max_deployment_pct > 0.0 {
+            let max_deployed = self.initial_bankroll * self.config.max_deployment_pct / 100.0;
+            let currently_deployed = self.initial_bankroll - self.bankroll;
+            if currently_deployed + size_usdc > max_deployed {
+                return RiskDecision::Rejected(format!(
+                    "deployment ${:.0}+${:.0} exceeds {:.0}% limit (${:.0})",
+                    currently_deployed,
+                    size_usdc,
+                    self.config.max_deployment_pct,
+                    max_deployed
+                ));
+            }
+        }
+
         RiskDecision::Allowed
     }
 

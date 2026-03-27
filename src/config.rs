@@ -104,6 +104,8 @@ pub struct AppConfig {
     pub autoresearch_params: AutoresearchParams,
     #[serde(default)]
     pub schedule: ScheduleConfig,
+    #[serde(default)]
+    pub budget: BudgetConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -340,6 +342,34 @@ pub struct RiskConfig {
     pub max_daily_loss_pct: f64,
     pub min_bankroll: f64,
     pub max_open_bets: u32,
+    /// Max percentage of bankroll that can be deployed (cash committed to open positions).
+    /// 0 = disabled (no limit). Default: 70%.
+    #[serde(default = "default_max_deployment_pct")]
+    pub max_deployment_pct: f64,
+}
+
+fn default_max_deployment_pct() -> f64 {
+    70.0
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct BudgetConfig {
+    /// Sizing multiplier for O/U and spread legs (0.0-1.0). Win legs always get 1.0.
+    /// Default: 0.5 (experiment phase 1)
+    #[serde(default = "default_ou_spread_multiplier")]
+    pub ou_spread_multiplier: f64,
+    /// Minimum cur_price to count a position toward recycling estimate.
+    /// All our bets are sports (resolve <24h), so cur_price >= 0.65 = likely winner returning soon.
+    #[serde(default = "default_recycling_min_price")]
+    pub recycling_min_price: f64,
+}
+
+fn default_ou_spread_multiplier() -> f64 {
+    0.5
+}
+
+fn default_recycling_min_price() -> f64 {
+    0.65
 }
 
 #[derive(Debug, Clone, Deserialize)]
