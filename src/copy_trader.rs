@@ -102,29 +102,12 @@ impl CopyTrader {
         let mut signals = Vec::new();
         let mut total_new = 0u32;
 
-        // Tiered polling: determine which wallets to poll this cycle
-        let warm_every_n = if poll_interval > 0 {
-            (warm_interval / poll_interval).max(1)
-        } else {
-            4
-        };
+        // Poll ALL wallets every cycle (no tiered polling — Cannae is the only wallet)
         let now = Utc::now();
-        let hot_cutoff = chrono::Duration::minutes(consensus_window_mins as i64);
 
         let active_wallets: Vec<_> = watchlist
             .iter()
             .filter(|(_, _, w, _, _, _, _, _)| *w > 0.0)
-            .filter(|(addr, _, _, _, _, _, _, _)| {
-                Self::should_poll_wallet(
-                    addr,
-                    self.poll_count,
-                    warm_every_n,
-                    consensus_window_mins,
-                    &self.last_signal_time,
-                    &self.prev_positions,
-                    now,
-                )
-            })
             .collect();
 
         // Phase 1: Fetch wallet positions in parallel (configurable batch size)

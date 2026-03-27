@@ -175,7 +175,8 @@ impl WaveBudget {
             Some(c) => c,
             None => return 0.0,
         };
-        let pct = cap.min(self.cached_budget_pct);
+        // Use the sport cap directly (no wave-based budget reduction)
+        let pct = cap;
         let usdc = bankroll * pct / 100.0;
         if usdc < self.sport_sizing.min_bet_usdc {
             return 0.0;
@@ -190,17 +191,13 @@ impl WaveBudget {
         game_line: &str,
         schedule: Option<&crate::scheduler::GameSchedule>,
     ) -> f64 {
-        // Sport-specific cap
+        // Sport-specific cap (no wave-based budget reduction)
         let cap = match self.sport_sizing.cap_for(league, game_line) {
             Some(c) => c,
             None => return 0.0,
         };
 
-        // Budget-driven limit (wave-aware)
-        let budget_pct = self.line_budget_pct_with_schedule(bankroll, schedule);
-
-        // Use the smaller of cap and budget
-        let pct = cap.min(budget_pct);
+        let pct = cap;
 
         // Check minimum bet
         let usdc = bankroll * pct / 100.0;
