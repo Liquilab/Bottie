@@ -253,6 +253,8 @@ impl Executor {
         let exec_price = if !signal.token_id.is_empty() {
             match self.client.get_best_ask_with_depth(&signal.token_id).await {
                 Ok((ask, depth)) if ask > 0.0 && ask < 1.0 => {
+                    // Round to tick size (0.01) — PM rejects prices like 0.5002
+                    let ask = (ask * 100.0).ceil() / 100.0;
                     if ask > signal.price * 1.25 {
                         info!(
                             "SKIP: price moved too much for {} (was {:.0}ct, now {:.0}ct)",
