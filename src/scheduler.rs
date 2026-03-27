@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::clob::client::ClobClient;
@@ -8,7 +10,7 @@ use crate::clob::types::{GammaSportsEvent, WalletPosition};
 use crate::config::WatchlistEntry;
 
 /// An upcoming game parsed from the Gamma API
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpcomingGame {
     pub event_slug: String,
     pub title: String,
@@ -29,6 +31,35 @@ impl GameSchedule {
         Self {
             games: Vec::new(),
             last_refresh: DateTime::UNIX_EPOCH,
+        }
+    }
+
+    /// Load schedule from disk (best-effort, returns empty on failure)
+    pub fn load_from_disk(path: &Path) -> Self {
+        match std::fs::read_to_string(path) {
+            Ok(data) => match serde_json::from_str::<Vec<UpcomingGame>>(&data) {
+                Ok(games) => {
+                    info!("SCHED: loaded {} games from disk cache", games.len());
+                    Self { games, last_refresh: DateTime::UNIX_EPOCH }
+                }
+                Err(e) => {
+                    warn!("SCHED: failed to parse disk cache: {}", e);
+                    Self::new()
+                }
+            }
+            Err(_) => Self::new(),
+        }
+    }
+
+    /// Save schedule to disk (best-effort, logs warning on failure)
+    pub fn save_to_disk(&self, path: &Path) {
+        match serde_json::to_string(&self.games) {
+            Ok(data) => {
+                if let Err(e) = std::fs::write(path, data) {
+                    warn!("SCHED: failed to write disk cache: {}", e);
+                }
+            }
+            Err(e) => warn!("SCHED: failed to serialize schedule: {}", e),
         }
     }
 
@@ -112,6 +143,7 @@ pub async fn refresh_schedule(
     let count = games.len();
     schedule.games = games;
     schedule.last_refresh = Utc::now();
+    schedule.save_to_disk(Path::new("data/schedule_cache.json"));
     info!("SCHED: schedule refreshed -- {} upcoming games from {} tags", count, sport_tags.len());
 }
 
@@ -313,80 +345,69 @@ pub fn confirm_and_execute_t5(
         wallet_positions.insert(addr.to_lowercase(), positions.clone());
     }
 
+    // Strip "-more-markets" for slug matching
+    let strip_more = |s: &str| s.trim_end_matches("-more-markets").to_string();
+
     for game in &due_games {
-        for (wallet_addr, t30_positions) in &game.wallet_snapshots {
-            // Per-wallet T-30 reference: collect conditionIds (not position keys)
-            // so that new sides/positions Cannae added after T-30 are included.
-            let t30_condition_ids: HashSet<String> = t30_positions
-                .iter()
-                .filter_map(|p| p.condition_id.clone())
-                .collect();
+        let game_slug_base = strip_more(&game.event_slug);
 
-            let wallet_cfg = match watchlist.iter()
-                .find(|w| w.address.to_lowercase() == *wallet_addr)
-            {
-                Some(w) => w,
-                None => continue,
-            };
+        // Find wallet config from first snapshot entry
+        let wallet_addr = match game.wallet_snapshots.keys().next() {
+            Some(a) => a.clone(),
+            None => continue,
+        };
+        let wallet_cfg = match watchlist.iter()
+            .find(|w| w.address.to_lowercase() == wallet_addr)
+        {
+            Some(w) => w,
+            None => continue,
+        };
 
-            let current_all = match wallet_positions.get(wallet_addr) {
-                Some(p) => p,
-                None => continue,
-            };
+        let current_all = match wallet_positions.get(&wallet_addr) {
+            Some(p) => p,
+            None => continue,
+        };
 
-            // Filter current positions to those matching this game's conditionIds
-            // (not exact position keys — Cannae may have added new sides after T-30)
-            let current_game_positions: Vec<WalletPosition> = current_all.iter()
-                .filter(|p| {
-                    if p.size_f64() <= 0.0 { return false; }
-                    let cur = p.cur_price_f64();
-                    if cur <= 0.01 || cur >= 0.99 { return false; }
-                    p.condition_id.as_ref()
-                        .map(|cid| t30_condition_ids.contains(cid))
-                        .unwrap_or(false)
-                })
-                .cloned()
-                .collect();
+        // Match positions by eventSlug (fresh data, no T-30 snapshot needed)
+        let current_game_positions: Vec<WalletPosition> = current_all.iter()
+            .filter(|p| {
+                if p.size_f64() <= 0.0 { return false; }
+                let cur = p.cur_price_f64();
+                if cur <= 0.01 || cur >= 0.99 { return false; }
+                p.event_slug.as_ref()
+                    .map(|slug| strip_more(slug) == game_slug_base)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
 
-            if current_game_positions.is_empty() {
-                info!(
-                    "T5 SKIP: {} no longer has positions in {} (had {} at T-30)",
-                    wallet_cfg.name, game.event_slug, t30_positions.len()
-                );
-                continue;
-            }
-
-            let mins_to_start = game.start_time.signed_duration_since(now).num_minutes();
+        if current_game_positions.is_empty() {
             info!(
-                "T5 CONFIRMED: {} still has {} positions in {} (T-30: {}, starts in {}min)",
-                wallet_cfg.name,
-                current_game_positions.len(),
-                game.event_slug,
-                t30_positions.len(),
-                mins_to_start,
+                "T5 SKIP: {} no positions for {} in current data",
+                wallet_cfg.name, game.event_slug
             );
-
-            matches.push(T5Match {
-                wallet_name: wallet_cfg.name.clone(),
-                wallet_address: wallet_addr.clone(),
-                game_event_slug: game.event_slug.clone(),
-                positions: current_game_positions,
-                t30_position_count: t30_positions.len(),
-            });
+            continue;
         }
+
+        let mins_to_start = game.start_time.signed_duration_since(now).num_minutes();
+        info!(
+            "T5 CONFIRMED: {} has {} positions in {} (starts in {}min)",
+            wallet_cfg.name,
+            current_game_positions.len(),
+            game.event_slug,
+            mins_to_start,
+        );
+
+        matches.push(T5Match {
+            wallet_name: wallet_cfg.name.clone(),
+            wallet_address: wallet_addr.clone(),
+            game_event_slug: game.event_slug.clone(),
+            positions: current_game_positions,
+            t30_position_count: 0, // no longer tracking T-30 count
+        });
     }
 
     matches
-}
-
-// --- Legacy support: keep T30Match for backward compatibility ---
-
-/// Match for T-30 check: a wallet position that matches an upcoming game
-pub struct T30Match {
-    pub wallet_name: String,
-    pub wallet_address: String,
-    pub game_event_slug: String,
-    pub positions: Vec<WalletPosition>,
 }
 
 #[cfg(test)]

@@ -313,7 +313,7 @@ async fn copy_trading_loop(
     let mut polls_since_sync: u32 = 0;
 
     // Two-phase schedule state
-    let mut game_schedule = scheduler::GameSchedule::new();
+    let mut game_schedule = scheduler::GameSchedule::load_from_disk(std::path::Path::new("data/schedule_cache.json"));
     let mut watched_games: Vec<scheduler::WatchedGame> = Vec::new(); // continuously discovered, waiting for T-5
     let mut t5_executed: HashSet<String> = HashSet::new(); // event_slugs already bought
 
