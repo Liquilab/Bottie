@@ -44,6 +44,7 @@ copy_trading:
     - nhl
     - mlb
     - nfl
+    - fif
     market_types: []
     max_legs_per_event: 0
     min_price: 0.4
