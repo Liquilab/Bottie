@@ -171,12 +171,13 @@ pub fn sport_tags_from_watchlist(watchlist: &[WatchlistEntry]) -> Vec<String> {
 /// Continuous discovery: check ALL upcoming games (next 24h) for Cannae positions.
 /// Runs every poll cycle. Only returns games not already in watched_games.
 /// Hauptbet is NOT determined here — only at T-5.
-pub async fn discover_continuous(
-    client: &ClobClient,
+///
+/// Uses pre-fetched positions from the poll loop (no extra API calls).
+pub fn discover_continuous_from_positions(
     schedule: &GameSchedule,
     watchlist: &[WatchlistEntry],
-    _t_minus_minutes: u32,
     already_watched: &HashSet<String>,
+    raw_positions: &[(String, String, Vec<WalletPosition>)],  // (address, name, positions)
 ) -> Vec<WatchedGame> {
     // All games starting in the next 24 hours
     let upcoming = schedule.games_starting_within(24 * 60);
@@ -204,21 +205,18 @@ pub async fn discover_continuous(
         game_by_slug.insert(game.event_slug.clone(), game);
     }
 
-    // For each wallet, fetch positions and check for matches
+    // Use pre-fetched positions (from poll loop, already paginated)
     let mut watched_games: HashMap<String, WatchedGame> = HashMap::new();
 
-    for wallet in watchlist {
-        let positions = match client.get_wallet_positions(&wallet.address, 500).await {
-            Ok(p) => p,
-            Err(e) => {
-                warn!("T30 DISCOVER: failed to fetch positions for {}: {}", wallet.name, e);
-                continue;
-            }
+    for (wallet_addr, wallet_name, positions) in raw_positions {
+        let wallet = match watchlist.iter().find(|w| w.address.eq_ignore_ascii_case(wallet_addr)) {
+            Some(w) => w,
+            None => continue,
         };
 
         // Group matching positions by event_slug
         let mut by_event: HashMap<String, Vec<WalletPosition>> = HashMap::new();
-        for pos in &positions {
+        for pos in positions {
             if pos.size_f64() <= 0.0 {
                 continue;
             }
@@ -249,7 +247,7 @@ pub async fn discover_continuous(
 
             info!(
                 "DISCOVER: {} has {} positions in {} (kickoff {} UTC, ~{}min)",
-                wallet.name,
+                wallet_name,
                 event_positions.len(),
                 event_slug,
                 game_ref.start_time.format("%H:%M"),
@@ -267,7 +265,7 @@ pub async fn discover_continuous(
                 }
             });
 
-            watched.wallet_snapshots.insert(wallet.address.to_lowercase(), event_positions);
+            watched.wallet_snapshots.insert(wallet_addr.to_lowercase(), event_positions);
         }
     }
 

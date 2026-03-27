@@ -471,13 +471,12 @@ async fn copy_trading_loop(
                         .chain(t5_executed.iter().cloned())
                         .collect();
 
-                    let new_watched = scheduler::discover_continuous(
-                        &client,
+                    let new_watched = scheduler::discover_continuous_from_positions(
                         &game_schedule,
                         &watchlist,
-                        schedule_cfg.t_minus_minutes,
                         &already_watched,
-                    ).await;
+                        &raw_positions,
+                    );
 
                     if !new_watched.is_empty() {
                         info!(
