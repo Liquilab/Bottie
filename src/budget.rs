@@ -19,6 +19,8 @@ pub struct WaveBudget {
     pub sport_sizing: SportSizingConfig,
     /// Cannae games: event_slug → CannaeGameInfo
     pub cannae_games: BTreeMap<String, CannaeGameInfo>,
+    /// Cached budget pct per line (refreshed every cycle with schedule data)
+    cached_budget_pct: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +42,7 @@ impl WaveBudget {
         Self {
             sport_sizing,
             cannae_games: BTreeMap::new(),
+            cached_budget_pct: 5.0, // default until first refresh
         }
     }
 
@@ -114,27 +117,87 @@ impl WaveBudget {
     }
 
     /// Calculate the per-line budget percentage.
-    /// Returns min(90% bankroll / total_lines, sport_cap) for each game line.
+    /// Uses schedule to count only games kicking off in the next 8 hours (one wave).
+    /// Falls back to count_filtered_lines if no schedule data.
     ///
     /// bankroll = current cash (automatically includes recycled capital).
     pub fn line_budget_pct(&self, bankroll: f64) -> f64 {
-        let total_lines = self.count_filtered_lines().max(1) as f64;
-        let deployment_cap = 90.0; // 90% of bankroll max
-        let even_split = deployment_cap / total_lines;
-        even_split // caller applies min(even_split, sport_cap) per line
+        self.line_budget_pct_with_schedule(bankroll, None)
+    }
+
+    pub fn line_budget_pct_with_schedule(
+        &self,
+        bankroll: f64,
+        schedule: Option<&crate::scheduler::GameSchedule>,
+    ) -> f64 {
+        // Count games with kickoff in next 8 hours from schedule
+        let wave_lines = if let Some(sched) = schedule {
+            let upcoming = sched.games_starting_within(480); // 8 hours
+            let upcoming_slugs: std::collections::HashSet<&str> = upcoming.iter()
+                .map(|g| g.event_slug.as_str())
+                .collect();
+            // Count filtered lines only for upcoming games
+            let mut count = 0;
+            for (slug, game) in &self.cannae_games {
+                if !upcoming_slugs.contains(slug.as_str()) {
+                    continue;
+                }
+                let allowed = self.sport_sizing.allowed_game_lines(&game.league);
+                let mut seen_types: Vec<&str> = Vec::new();
+                for leg in &game.legs {
+                    let gl = leg.game_line.as_str();
+                    if allowed.contains(&gl) && !seen_types.contains(&gl) {
+                        seen_types.push(gl);
+                        count += 1;
+                    }
+                }
+            }
+            count
+        } else {
+            self.count_filtered_lines()
+        };
+
+        let total_lines = wave_lines.max(1) as f64;
+        let deployment_cap = 90.0;
+        deployment_cap / total_lines
+    }
+
+    /// Refresh cached budget pct from schedule (call every poll cycle).
+    pub fn refresh_budget(&mut self, bankroll: f64, schedule: &crate::scheduler::GameSchedule) {
+        self.cached_budget_pct = self.line_budget_pct_with_schedule(bankroll, Some(schedule));
     }
 
     /// Get the sizing percentage for a specific game line.
+    /// Uses cached budget pct (refreshed every cycle via refresh_budget).
     /// Returns 0.0 if the game line should be skipped.
     pub fn get_line_pct(&self, bankroll: f64, league: &str, game_line: &str) -> f64 {
+        let cap = match self.sport_sizing.cap_for(league, game_line) {
+            Some(c) => c,
+            None => return 0.0,
+        };
+        let pct = cap.min(self.cached_budget_pct);
+        let usdc = bankroll * pct / 100.0;
+        if usdc < self.sport_sizing.min_bet_usdc {
+            return 0.0;
+        }
+        pct
+    }
+
+    pub fn get_line_pct_with_schedule(
+        &self,
+        bankroll: f64,
+        league: &str,
+        game_line: &str,
+        schedule: Option<&crate::scheduler::GameSchedule>,
+    ) -> f64 {
         // Sport-specific cap
         let cap = match self.sport_sizing.cap_for(league, game_line) {
             Some(c) => c,
-            None => return 0.0, // this game line not allowed for this sport
+            None => return 0.0,
         };
 
-        // Budget-driven limit
-        let budget_pct = self.line_budget_pct(bankroll);
+        // Budget-driven limit (wave-aware)
+        let budget_pct = self.line_budget_pct_with_schedule(bankroll, schedule);
 
         // Use the smaller of cap and budget
         let pct = cap.min(budget_pct);
@@ -156,11 +219,12 @@ impl WaveBudget {
 
         let total_budget: f64 = self.cannae_games.values().map(|g| g.total_usdc).sum();
         let filtered_lines = self.count_filtered_lines();
-        let budget_pct = self.line_budget_pct(bankroll);
+        let budget_pct = self.line_budget_pct_with_schedule(bankroll, Some(schedule));
+        let upcoming = schedule.games_starting_within(480);
 
         info!(
-            "BUDGET: bankroll=${:.0} | {} games, {} lines | {:.1}%/line (before caps)",
-            bankroll, self.cannae_games.len(), filtered_lines, budget_pct,
+            "BUDGET: bankroll=${:.0} | {} upcoming (8h), {} lines | {:.1}%/line (before caps)",
+            bankroll, upcoming.len(), filtered_lines, budget_pct,
         );
         info!(
             "CANNAE GAMES: {} events, ${:.0} total",
@@ -202,7 +266,7 @@ impl WaveBudget {
             let our_lines: Vec<String> = game.legs.iter()
                 .filter(|l| allowed.contains(&l.game_line.as_str()))
                 .map(|l| {
-                    let pct = self.get_line_pct(bankroll, &game.league, &l.game_line);
+                    let pct = self.get_line_pct_with_schedule(bankroll, &game.league, &l.game_line, Some(schedule));
                     format!("{}@{:.0}%", l.game_line, pct)
                 })
                 .collect();

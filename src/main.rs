@@ -443,6 +443,7 @@ async fn copy_trading_loop(
             // Fetch own positions for recycling estimate
             {
                 let cash = risk.read().await.bankroll();
+                wave_budget.refresh_budget(cash, &game_schedule);
                 wave_budget.log_flight_board(&game_schedule, cash);
             }
         }
