@@ -638,6 +638,40 @@ async fn execute_stable_game(
         return false;
     }
 
+    // Conviction check: for moneyline ("win"), if there are multiple hauptbets
+    // they must point the same direction. E.g. "Germany YES" + "Switzerland NO" = OK (both back Germany).
+    // But "Germany YES" + "Switzerland YES" = contradictory = SKIP all moneyline bets.
+    {
+        let ml_bets: Vec<&GameLineBet> = bets.iter().filter(|b| b.game_line == "win").collect();
+        if ml_bets.len() >= 2 {
+            // Check if outcomes are consistent: all YES or all NO = contradictory (backing different teams).
+            // Mixed YES+NO = consistent (backing the same team from different angles).
+            let yes_count = ml_bets.iter().filter(|b| {
+                b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("Yes")
+            }).count();
+            let no_count = ml_bets.len() - yes_count;
+
+            if yes_count > 1 || no_count > 1 {
+                // Multiple YES or multiple NO = ambiguous, might be OK (e.g. two NO bets = backing draw or other team)
+                // But if ALL are YES = betting on multiple teams to win = contradictory
+                if yes_count == ml_bets.len() {
+                    info!(
+                        "CONVICTION SKIP: {} — {} moneyline bets ALL backing YES (contradictory)",
+                        game.event_slug, ml_bets.len(),
+                    );
+                    // Remove moneyline bets, keep draw/spread
+                    bets.retain(|b| b.game_line != "win");
+                }
+            }
+            // YES + NO mix = one side backs a team, other hedges = conviction OK
+        }
+    }
+
+    if bets.is_empty() {
+        info!("GAME SKIP: {} — no bets after conviction check", game.event_slug);
+        return false;
+    }
+
     // Log T5 PLAN
     info!(
         "GAME EXECUTE: {} ({}) — {} game lines",
