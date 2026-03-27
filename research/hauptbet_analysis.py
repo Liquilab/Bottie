@@ -251,21 +251,17 @@ def build_game_hauptbets(legs: list) -> list:
                 by_cid[leg["cid"]].append(leg)
 
             # Per conditionId: hauptbet = largest cost side
+            # Only use hauptbet's own cost and PnL (we don't copy the hedge)
             cid_hauptbets = []
             for cid, sides in by_cid.items():
                 sides.sort(key=lambda s: -s["cost"])
                 haupt = sides[0]
-                total_cost = sum(s["cost"] for s in sides)
-                total_pnl = sum(s["pnl"] for s in sides) if sides[0]["result"] != "OPEN" else 0
-                # Deduplicate: for API data, pnl is cid-level and same for all outcomes
-                # Use the first side's pnl (which is cid-level pnl)
-                # For CSV data, pnl is per-outcome, so sum is correct
                 cid_hauptbets.append({
                     "cid": cid,
                     "outcome": haupt["outcome"],
-                    "cost": total_cost,
+                    "cost": haupt["cost"],
                     "haupt_cost": haupt["cost"],
-                    "pnl": total_pnl,
+                    "pnl": haupt["pnl"] if haupt["result"] != "OPEN" else 0,
                     "result": haupt["result"],
                     "title": haupt["title"],
                     "first_ts": haupt["first_ts"],
