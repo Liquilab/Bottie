@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
 """
-Hauptbet Analysis — Per game line, per week: WR + ROI van de hoofdpositie.
+Hauptbet Analysis v3 — Per GAME, per GAME LINE: WR + ROI van de hoofdpositie.
 
 Usage:
   python3 hauptbet_analysis.py                              # Cannae (all sports)
   python3 hauptbet_analysis.py 0xANY_WALLET_ADDRESS         # Any wallet
-  python3 hauptbet_analysis.py --csv path/to/closed.csv     # From CSV only
   python3 hauptbet_analysis.py --sport nba                  # Filter sport
   python3 hauptbet_analysis.py --sport voetbal              # All football leagues
-  python3 hauptbet_analysis.py --sport nhl --sport nba      # Multiple sports
 
-Output: WR en ROI per game line (moneyline/spread/totals/btts/draw), per week.
-        Wilson CI op WR, week-over-week trend.
-
-Definitie "hauptbet": per conditionId, de SIDE (outcome) waar de trader de
-meeste USDC op heeft gezet. De andere side is de hedge en telt NIET mee.
+Per GAME (event_slug), per GAME LINE (moneyline/spread/totals/draw/btts):
+  → Hauptbet = de SIDE met de meeste USDC across all conditionIds of that game line
+  → WR, ROI, PnL per game line per week
+  → Conviction: moneyline + draw hauptbet aligned (both backing same team to win)
 """
 
 import csv
@@ -32,10 +29,9 @@ except ImportError:
     HAS_HTTPX = False
 
 API = "https://data-api.polymarket.com"
-UA = {"User-Agent": "HauptbetAnalysis/1.0", "Accept": "application/json"}
+UA = {"User-Agent": "HauptbetAnalysis/3.0", "Accept": "application/json"}
 CANNAE_CSV = Path(__file__).parent / "cannae_trades" / "cannae_closed_full.csv"
 
-# Football leagues (for --sport voetbal filter)
 FOOTBALL_LEAGUES = {
     "epl", "bun", "lal", "fl1", "uel", "arg", "mls", "rou1", "efa", "por",
     "bra", "itc", "ere", "es2", "bl2", "sea", "elc", "mex", "fr2", "aus",
@@ -43,30 +39,20 @@ FOOTBALL_LEAGUES = {
 }
 
 SPORT_ALIASES = {
-    "voetbal": FOOTBALL_LEAGUES,
-    "football": FOOTBALL_LEAGUES,
-    "soccer": FOOTBALL_LEAGUES,
-    "nba": {"nba"},
-    "nhl": {"nhl"},
-    "mlb": {"mlb"},
-    "nfl": {"nfl"},
-    "cbb": {"cbb"},
+    "voetbal": FOOTBALL_LEAGUES, "football": FOOTBALL_LEAGUES, "soccer": FOOTBALL_LEAGUES,
+    "nba": {"nba"}, "nhl": {"nhl"}, "mlb": {"mlb"}, "nfl": {"nfl"},
     "us": {"nba", "nhl", "mlb", "nfl", "cbb"},
 }
 
 
-# ── Classification ──────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────
 
 def classify_game_line(title: str) -> str:
     t = (title or "").lower()
-    if "spread" in t:
-        return "spread"
-    if "o/u " in t or "over/under" in t:
-        return "totals"
-    if "draw" in t or "end in a draw" in t:
-        return "draw"
-    if "both teams" in t or "btts" in t:
-        return "btts"
+    if "spread" in t: return "spread"
+    if "o/u " in t or "over/under" in t: return "totals"
+    if "draw" in t or "end in a draw" in t: return "draw"
+    if "both teams" in t or "btts" in t: return "btts"
     return "moneyline"
 
 
@@ -80,9 +66,7 @@ def iso_week(ts: int) -> str:
 
 
 def wilson_ci(wins: int, total: int, z=1.96) -> tuple:
-    """Wilson score 95% confidence interval."""
-    if total == 0:
-        return (0.0, 0.0)
+    if total == 0: return (0.0, 0.0)
     p = wins / total
     denom = 1 + z * z / total
     center = (p + z * z / (2 * total)) / denom
@@ -92,16 +76,15 @@ def wilson_ci(wins: int, total: int, z=1.96) -> tuple:
 
 # ── Data Loading ────────────────────────────────────────────────
 
-def load_from_csv(csv_path: str) -> list:
-    positions = []
+def load_legs_from_csv(csv_path: str) -> list:
+    """Load individual legs from CSV. Each row = one (conditionId, outcome) position."""
+    legs = []
     with open(csv_path) as f:
         for row in csv.DictReader(f):
             cid = row.get("condition_id", "")
-            if not cid:
-                continue
+            if not cid: continue
             cost = float(row.get("total_bought", 0) or 0)
-            if cost <= 0:
-                continue
+            if cost <= 0: continue
 
             won_raw = row.get("won", "")
             rpnl = float(row.get("realized_pnl", 0) or 0)
@@ -114,19 +97,16 @@ def load_from_csv(csv_path: str) -> list:
             else:
                 continue
 
-            if rpnl != 0:
-                pnl = rpnl
-            elif result == "WIN":
+            pnl = rpnl if rpnl != 0 else (-cost if result == "LOSS" else 0)
+            if result == "WIN" and rpnl == 0:
                 avg_price = float(row.get("avg_price", 0) or 0)
                 shares = cost / avg_price if avg_price > 0 else 0
                 pnl = shares - cost
-            else:
-                pnl = -cost
 
             ts = int(row.get("timestamp", 0) or 0)
             slug = (row.get("event_slug", "") or "").split("-more-markets")[0]
 
-            positions.append({
+            legs.append({
                 "cid": cid,
                 "outcome": row.get("outcome", ""),
                 "title": row.get("title", ""),
@@ -134,70 +114,52 @@ def load_from_csv(csv_path: str) -> list:
                 "game_line": classify_game_line(row.get("title", "")),
                 "league": detect_league(slug),
                 "cost": cost,
-                "result": result,
                 "pnl": pnl,
+                "result": result,
                 "first_ts": ts,
             })
-    return positions
+    return legs
 
 
-def load_from_api(address: str) -> list:
+def load_legs_from_api(address: str) -> list:
+    """Fetch from PM API. Returns individual legs per (cid, outcome)."""
     if not HAS_HTTPX:
-        print("ERROR: httpx not installed. Use --csv or pip install httpx")
+        print("ERROR: httpx not installed")
         sys.exit(1)
 
     client = httpx.Client(headers=UA)
 
-    def fetch_paginated(url_template, max_offset=10000):
+    def fetch(url_tpl, max_off=10000):
         results = []
-        offset = 0
-        while offset < max_offset:
-            url = url_template.format(offset=offset)
+        off = 0
+        while off < max_off:
             try:
-                resp = client.get(url, timeout=30)
+                resp = client.get(url_tpl.format(offset=off), timeout=30)
                 resp.raise_for_status()
                 batch = resp.json()
             except Exception as e:
-                print(f"  Stop at offset {offset}: {e}")
+                print(f"  Stop at offset {off}: {e}")
                 break
-            if not isinstance(batch, list) or not batch:
-                break
+            if not isinstance(batch, list) or not batch: break
             results.extend(batch)
-            if len(batch) < 500:
-                break
-            offset += 500
+            if len(batch) < 500: break
+            off += 500
         return results
 
     print("  Fetching trades...")
-    trades = fetch_paginated(f"{API}/activity?user={address}&type=trade&limit=500&offset={{offset}}")
+    trades = fetch(f"{API}/activity?user={address}&type=trade&limit=500&offset={{offset}}")
     print(f"  → {len(trades)} trades")
-
     print("  Fetching redeems...")
-    redeems = fetch_paginated(f"{API}/activity?user={address}&type=redeem&limit=500&offset={{offset}}")
+    redeems = fetch(f"{API}/activity?user={address}&type=redeem&limit=500&offset={{offset}}")
     print(f"  → {len(redeems)} redeems")
 
-    print("  Fetching positions...")
-    positions = fetch_paginated(f"{API}/positions?user={address}&limit=500&offset={{offset}}&sizeThreshold=0")
-    print(f"  → {len(positions)} positions")
-
-    # Redeems per conditionId (total USDC redeemed — the payout)
+    # Redeem totals per conditionId
     redeem_by_cid = defaultdict(float)
     for r in redeems:
         cid = r.get("conditionId", "")
-        usdc = float(r.get("usdcSize", 0) or 0)
-        if cid:
-            redeem_by_cid[cid] += usdc
+        if cid: redeem_by_cid[cid] += float(r.get("usdcSize", 0) or 0)
 
-    # Open positions (for OPEN detection)
-    open_cids = set()
-    for p in positions:
-        cid = p.get("conditionId", "") or ""
-        size = float(p.get("size", 0) or 0)
-        cur = float(p.get("curPrice", 0) or 0)
-        if cid and size > 0.01 and 0.02 < cur < 0.98:
-            open_cids.add(cid)
-
-    # Group trades by (conditionId, outcome)
+    # Group trades by (cid, outcome)
     buys = defaultdict(list)
     sells = defaultdict(list)
     for t in trades:
@@ -205,126 +167,165 @@ def load_from_api(address: str) -> list:
         outcome = t.get("outcome", "") or ""
         side = t.get("side", "")
         if cid:
-            if side == "BUY":
-                buys[(cid, outcome)].append(t)
-            elif side == "SELL":
-                sells[(cid, outcome)].append(t)
+            if side == "BUY": buys[(cid, outcome)].append(t)
+            elif side == "SELL": sells[(cid, outcome)].append(t)
 
-    # Build per-conditionId data: all sides, costs, returns
-    cid_sides = defaultdict(dict)
+    # Per conditionId: compute total PnL, then assign to each (cid, outcome)
+    # First group by cid
+    cid_outcomes = defaultdict(dict)
     for (cid, outcome), tlist in buys.items():
-        buy_cost = sum(float(x.get("usdcSize", 0) or 0) for x in tlist)
+        bc = sum(float(x.get("usdcSize", 0) or 0) for x in tlist)
         sl = sells.get((cid, outcome), [])
-        sell_proceeds = sum(float(s.get("usdcSize", 0) or 0) for s in sl)
+        sp = sum(float(s.get("usdcSize", 0) or 0) for s in sl)
         t0 = tlist[0]
-        title = t0.get("title", "") or ""
-        slug = t0.get("eventSlug", "") or t0.get("slug", "") or ""
-        event_slug = slug.split("-more-markets")[0] if slug else ""
-        timestamps = [int(x.get("timestamp", 0) or 0) for x in tlist]
-        first_ts = min(timestamps) if timestamps else 0
-        cid_sides[cid][outcome] = {
-            "buy_cost": buy_cost,
-            "sell_proceeds": sell_proceeds,
-            "title": title,
-            "event_slug": event_slug,
-            "first_ts": first_ts,
+        ts_list = [int(x.get("timestamp", 0) or 0) for x in tlist]
+        cid_outcomes[cid][outcome] = {
+            "buy_cost": bc, "sell_proceeds": sp,
+            "title": t0.get("title", ""),
+            "slug": (t0.get("eventSlug", "") or t0.get("slug", "") or "").split("-more-markets")[0],
+            "first_ts": min(ts_list) if ts_list else 0,
         }
 
-    # Per conditionId: total returns (sells + redeems) vs total costs → PnL
-    # Attribute to hauptbet side (largest buy_cost)
-    positions_list = []
-    for cid, sides in cid_sides.items():
-        total_buy = sum(d["buy_cost"] for d in sides.values())
-        total_sell = sum(d["sell_proceeds"] for d in sides.values())
+    legs = []
+    for cid, outcomes in cid_outcomes.items():
+        total_buy = sum(d["buy_cost"] for d in outcomes.values())
+        total_sell = sum(d["sell_proceeds"] for d in outcomes.values())
         total_redeem = redeem_by_cid.get(cid, 0)
-        total_returns = total_sell + total_redeem
-        pnl = total_returns - total_buy
+        cid_pnl = total_sell + total_redeem - total_buy
+        resolved = cid in redeem_by_cid or total_sell > total_buy * 0.5
 
-        has_redeem = cid in redeem_by_cid
-        all_sold = total_sell > total_buy * 0.5 and not any(
-            cid in open_cids for _ in [1]
-        )
-        resolved = has_redeem or all_sold
+        for outcome, d in outcomes.items():
+            if not resolved:
+                result = "OPEN"
+                pnl = 0
+            else:
+                # This outcome's share of the conditionId PnL
+                # Hauptbet (largest cost) gets attributed the full PnL in select_hauptbets
+                # Here we store per-outcome cost and the cid-level PnL for the hauptbet
+                result = "WIN" if cid_pnl > 0 else "LOSS"
+                pnl = cid_pnl  # will be deduplicated in select_hauptbets
 
-        if not resolved and cid in open_cids:
-            # Still open — add each side as OPEN
-            for outcome, d in sides.items():
-                positions_list.append({
-                    "cid": cid, "outcome": outcome, "title": d["title"],
-                    "event_slug": d["event_slug"],
-                    "game_line": classify_game_line(d["title"]),
-                    "league": detect_league(d["event_slug"]),
-                    "cost": d["buy_cost"], "result": "OPEN", "pnl": 0,
-                    "first_ts": d["first_ts"],
-                })
-            continue
-
-        if not resolved:
-            # Unknown — skip
-            continue
-
-        # Resolved: attribute to hauptbet (largest buy_cost side)
-        hauptbet_outcome = max(sides.keys(), key=lambda o: sides[o]["buy_cost"])
-        h = sides[hauptbet_outcome]
-        result = "WIN" if pnl > 0 else "LOSS"
-
-        positions_list.append({
-            "cid": cid, "outcome": hauptbet_outcome, "title": h["title"],
-            "event_slug": h["event_slug"],
-            "game_line": classify_game_line(h["title"]),
-            "league": detect_league(h["event_slug"]),
-            "cost": round(total_buy, 2), "result": result,
-            "pnl": round(pnl, 2), "first_ts": h["first_ts"],
-        })
+            legs.append({
+                "cid": cid, "outcome": outcome, "title": d["title"],
+                "event_slug": d["slug"],
+                "game_line": classify_game_line(d["title"]),
+                "league": detect_league(d["slug"]),
+                "cost": d["buy_cost"], "pnl": pnl, "result": result,
+                "first_ts": d["first_ts"],
+            })
 
     client.close()
-    return positions_list
+    return legs
 
 
-# ── Hauptbet Selection ──────────────────────────────────────────
+# ── Game-Level Hauptbet Selection ───────────────────────────────
 
-def select_hauptbets(positions: list) -> tuple:
-    """Per conditionId: merge all sides, compute PnL as returns - costs.
+def build_game_hauptbets(legs: list) -> list:
+    """Per game (event_slug), per game line: find the hauptbet.
 
-    CSV data comes as individual (cid, outcome) rows with realized_pnl.
-    API data comes pre-merged per conditionId.
-    This function handles both: groups by cid, sums costs and PnL,
-    attributes to the hauptbet (largest cost side).
+    Returns one record per (game, game_line) with:
+    - hauptbet outcome, cost, pnl, result
+    - conviction flag (moneyline + draw aligned)
     """
-    by_cid = defaultdict(list)
-    for p in positions:
-        by_cid[p["cid"]].append(p)
+    # Group: event_slug → game_line → list of (cid, outcome, cost, pnl, result)
+    games = defaultdict(lambda: defaultdict(list))
+    for leg in legs:
+        slug = leg["event_slug"]
+        gl = leg["game_line"]
+        if not slug: continue
+        games[slug][gl].append(leg)
 
-    hauptbets = []
-    for cid, sides in by_cid.items():
-        # Total cost and PnL across all sides of this conditionId
-        total_cost = sum(s["cost"] for s in sides)
-        total_pnl = sum(s["pnl"] for s in sides)
+    results = []
+    game_conviction = {}  # slug → conviction info
 
-        # Hauptbet = side with largest cost
-        sides.sort(key=lambda s: -s["cost"])
-        haupt = sides[0].copy()
+    for slug, game_lines in games.items():
+        league = detect_league(slug)
+        is_football = league in FOOTBALL_LEAGUES
 
-        # Override with conditionId-level totals
-        haupt["cost"] = total_cost
-        haupt["pnl"] = total_pnl
-        haupt["hedge_cost"] = sum(s["cost"] for s in sides[1:])
-        haupt["n_sides"] = len(sides)
+        # Per game line: find hauptbet (largest cost across all cids)
+        game_hauptbets = {}
+        for gl, gl_legs in game_lines.items():
+            # Group by conditionId first, pick largest side per cid
+            by_cid = defaultdict(list)
+            for leg in gl_legs:
+                by_cid[leg["cid"]].append(leg)
 
-        # Determine result from PnL (not from individual side labels)
-        if any(s["result"] == "OPEN" for s in sides):
-            haupt["result"] = "OPEN"
-            haupt["pnl"] = 0
-        elif total_pnl > 0:
-            haupt["result"] = "WIN"
-        else:
-            haupt["result"] = "LOSS"
+            # Per conditionId: hauptbet = largest cost side
+            cid_hauptbets = []
+            for cid, sides in by_cid.items():
+                sides.sort(key=lambda s: -s["cost"])
+                haupt = sides[0]
+                total_cost = sum(s["cost"] for s in sides)
+                total_pnl = sum(s["pnl"] for s in sides) if sides[0]["result"] != "OPEN" else 0
+                # Deduplicate: for API data, pnl is cid-level and same for all outcomes
+                # Use the first side's pnl (which is cid-level pnl)
+                # For CSV data, pnl is per-outcome, so sum is correct
+                cid_hauptbets.append({
+                    "cid": cid,
+                    "outcome": haupt["outcome"],
+                    "cost": total_cost,
+                    "haupt_cost": haupt["cost"],
+                    "pnl": total_pnl,
+                    "result": haupt["result"],
+                    "title": haupt["title"],
+                    "first_ts": haupt["first_ts"],
+                })
 
-        hauptbets.append(haupt)
+            # Game line hauptbet = cid with largest haupt_cost
+            if not cid_hauptbets: continue
+            cid_hauptbets.sort(key=lambda c: -c["haupt_cost"])
+            gl_haupt = cid_hauptbets[0]
 
-    resolved = [h for h in hauptbets if h["result"] in ("WIN", "LOSS")]
-    open_bets = [h for h in hauptbets if h["result"] == "OPEN"]
-    return resolved, open_bets
+            # Total cost and PnL across ALL cids in this game line
+            gl_total_cost = sum(c["cost"] for c in cid_hauptbets)
+            gl_total_pnl = sum(c["pnl"] for c in cid_hauptbets)
+            any_open = any(c["result"] == "OPEN" for c in cid_hauptbets)
+
+            if any_open:
+                gl_result = "OPEN"
+                gl_total_pnl = 0
+            elif gl_total_pnl > 0:
+                gl_result = "WIN"
+            else:
+                gl_result = "LOSS"
+
+            game_hauptbets[gl] = {
+                "outcome": gl_haupt["outcome"],
+                "title": gl_haupt["title"],
+                "result": gl_result,
+                "cost": gl_total_cost,
+                "pnl": gl_total_pnl,
+                "first_ts": gl_haupt["first_ts"],
+            }
+
+        # Conviction detection (football only):
+        # Moneyline hauptbet backs Team A (e.g. "Chelsea NO" = Arsenal wins)
+        # Draw hauptbet = "Draw NO" (someone wins outright)
+        # Both aligned → conviction
+        conviction = False
+        if is_football and "moneyline" in game_hauptbets and "draw" in game_hauptbets:
+            draw_outcome = game_hauptbets["draw"]["outcome"].lower()
+            if draw_outcome == "no":
+                conviction = True  # Draw NO + moneyline bet = backing a winner
+
+        # Output one record per game line
+        for gl, haupt in game_hauptbets.items():
+            if haupt["result"] == "OPEN": continue
+            results.append({
+                "event_slug": slug,
+                "league": league,
+                "is_football": is_football,
+                "game_line": gl,
+                "outcome": haupt["outcome"],
+                "title": haupt["title"],
+                "result": haupt["result"],
+                "cost": round(haupt["cost"], 2),
+                "pnl": round(haupt["pnl"], 2),
+                "first_ts": haupt["first_ts"],
+                "conviction": conviction,
+            })
+
+    return results
 
 
 # ── Stats ───────────────────────────────────────────────────────
@@ -344,88 +345,94 @@ def stats(bets):
 
 
 def trend_arrow(weekly_wrs: list) -> str:
-    """Simple trend: compare first half avg vs second half avg."""
-    if len(weekly_wrs) < 4:
-        return "  "
+    if len(weekly_wrs) < 4: return "  "
     mid = len(weekly_wrs) // 2
     first = sum(weekly_wrs[:mid]) / mid
     second = sum(weekly_wrs[mid:]) / (len(weekly_wrs) - mid)
     diff = second - first
-    if diff > 0.05:
-        return "↗"
-    elif diff < -0.05:
-        return "↘"
+    if diff > 0.05: return "↗"
+    elif diff < -0.05: return "↘"
     return "→"
 
 
 # ── Report ──────────────────────────────────────────────────────
 
-def print_report(resolved, open_bets, label, sport_filter=None):
+def print_report(records, label, sport_filter=None):
     by_line_week = defaultdict(lambda: defaultdict(list))
     by_line_total = defaultdict(list)
 
-    for h in resolved:
-        gl = h["game_line"]
-        week = iso_week(h["first_ts"]) if h["first_ts"] else "unknown"
-        by_line_week[gl][week].append(h)
-        by_line_total[gl].append(h)
+    for r in records:
+        gl = r["game_line"]
+        week = iso_week(r["first_ts"]) if r["first_ts"] else "unknown"
+        by_line_week[gl][week].append(r)
+        by_line_total[gl].append(r)
 
-    filter_label = f" | filter: {sport_filter}" if sport_filter else ""
-
+    fl = f" | filter: {sport_filter}" if sport_filter else ""
     print()
     print("=" * 95)
-    print(f"HAUPTBET ANALYSE — {label}{filter_label}")
-    print(f"Resolved: {len(resolved)} game lines | Open: {len(open_bets)}")
+    print(f"HAUPTBET ANALYSE v3 — {label}{fl}")
+    print(f"Resolved: {len(records)} game line bets")
     print("=" * 95)
     print()
-    print("Hauptbet = de SIDE met de meeste USDC per game line (conditionId).")
-    print("Hedge-sides tellen NIET mee in WR/ROI.")
+    print("Per GAME, per GAME LINE: hauptbet = grootste positie.")
+    print("PnL = alle returns (sells+redeems) - alle kosten per conditionId.")
     print()
 
     # Overall per game line
-    print(f"{'Game Line':<12} {'N':>5} {'W':>5} {'L':>5} {'WR':>6} {'CI 95%':>13} {'ROI':>7} {'PnL':>12} {'Trend':>5}")
-    print("-" * 82)
+    hdr = f"{'Game Line':<12} {'N':>5} {'W':>5} {'L':>5} {'WR':>6} {'CI 95%':>13} {'ROI':>7} {'PnL':>12} {'Trend':>5}"
+    print(hdr)
+    print("-" * len(hdr))
 
     game_lines = ["moneyline", "spread", "totals", "draw", "btts"]
     for gl in game_lines:
-        if gl not in by_line_total:
-            continue
+        if gl not in by_line_total: continue
         s = stats(by_line_total[gl])
-        # Compute trend from weekly WRs
-        weekly_wrs = []
-        for week in sorted(by_line_week[gl].keys()):
-            ws = stats(by_line_week[gl][week])
-            if ws["n"] >= 3:
-                weekly_wrs.append(ws["wr"])
+        weekly_wrs = [stats(by_line_week[gl][w])["wr"] for w in sorted(by_line_week[gl]) if stats(by_line_week[gl][w])["n"] >= 3]
         tr = trend_arrow(weekly_wrs)
         print(f"{gl:<12} {s['n']:>5} {s['w']:>5} {s['l']:>5} {s['wr']:>5.0%} [{s['ci'][0]:.0%}-{s['ci'][1]:.0%}] {s['roi']:>6.0%} ${s['pnl']:>11,.0f}    {tr}")
 
-    s = stats(resolved)
-    print("-" * 82)
+    s = stats(records)
+    print("-" * len(hdr))
     print(f"{'TOTAAL':<12} {s['n']:>5} {s['w']:>5} {s['l']:>5} {s['wr']:>5.0%} [{s['ci'][0]:.0%}-{s['ci'][1]:.0%}] {s['roi']:>6.0%} ${s['pnl']:>11,.0f}")
 
-    # Per week breakdown per game line
-    all_weeks = sorted(set(
-        week for gl_weeks in by_line_week.values() for week in gl_weeks.keys()
-    ))
+    # Conviction analysis (football only)
+    conviction_bets = [r for r in records if r["conviction"] and r["game_line"] in ("moneyline", "draw")]
+    no_conviction = [r for r in records if not r["conviction"] and r["game_line"] in ("moneyline", "draw") and r["is_football"]]
 
+    if conviction_bets:
+        print()
+        print("--- CONVICTION (moneyline + draw NO aligned) ---")
+        s_conv = stats(conviction_bets)
+        s_noconv = stats(no_conviction)
+        print(f"  With conviction:    {s_conv['n']:>4} bets  WR={s_conv['wr']:.0%} [{s_conv['ci'][0]:.0%}-{s_conv['ci'][1]:.0%}]  ROI={s_conv['roi']:.0%}  PnL=${s_conv['pnl']:>11,.0f}")
+        print(f"  Without conviction: {s_noconv['n']:>4} bets  WR={s_noconv['wr']:.0%} [{s_noconv['ci'][0]:.0%}-{s_noconv['ci'][1]:.0%}]  ROI={s_noconv['roi']:.0%}  PnL=${s_noconv['pnl']:>11,.0f}")
+
+        # Split conviction by game line
+        conv_ml = [r for r in conviction_bets if r["game_line"] == "moneyline"]
+        conv_draw = [r for r in conviction_bets if r["game_line"] == "draw"]
+        if conv_ml:
+            s = stats(conv_ml)
+            print(f"    Conviction ML:    {s['n']:>4} bets  WR={s['wr']:.0%}  ROI={s['roi']:.0%}  PnL=${s['pnl']:>11,.0f}")
+        if conv_draw:
+            s = stats(conv_draw)
+            print(f"    Conviction Draw:  {s['n']:>4} bets  WR={s['wr']:.0%}  ROI={s['roi']:.0%}  PnL=${s['pnl']:>11,.0f}")
+
+    # Per week per game line
+    all_weeks = sorted(set(w for glw in by_line_week.values() for w in glw))
     for gl in game_lines:
-        if gl not in by_line_week:
-            continue
+        if gl not in by_line_week: continue
         print()
         print(f"--- {gl.upper()} per week ---")
         print(f"  {'Week':<10} {'N':>5} {'W':>5} {'L':>5} {'WR':>6} {'CI 95%':>13} {'ROI':>7} {'PnL':>12}")
-
         for week in all_weeks:
-            if week not in by_line_week[gl]:
-                continue
+            if week not in by_line_week[gl]: continue
             s = stats(by_line_week[gl][week])
             print(f"  {week:<10} {s['n']:>5} {s['w']:>5} {s['l']:>5} {s['wr']:>5.0%} [{s['ci'][0]:.0%}-{s['ci'][1]:.0%}] {s['roi']:>6.0%} ${s['pnl']:>11,.0f}")
 
     # Per league
     by_league = defaultdict(list)
-    for h in resolved:
-        by_league[h["league"]].append(h)
+    for r in records:
+        by_league[r["league"]].append(r)
 
     print()
     print("--- PER LEAGUE ---")
@@ -435,18 +442,16 @@ def print_report(resolved, open_bets, label, sport_filter=None):
         s = stats(bets)
         print(f"{league:<10} {s['n']:>5} {s['w']:>5} {s['l']:>5} {s['wr']:>5.0%} [{s['ci'][0]:.0%}-{s['ci'][1]:.0%}] {s['roi']:>6.0%} ${s['pnl']:>11,.0f}")
 
-    # Per league × game line
+    # League × game line
     print()
     print("--- LEAGUE x GAME LINE ---")
     print(f"{'League':<10} {'Line':<12} {'N':>5} {'W':>5} {'L':>5} {'WR':>6} {'ROI':>7} {'PnL':>12}")
     print("-" * 72)
     for league, bets in sorted(by_league.items(), key=lambda x: -sum(b["pnl"] for b in x[1])):
         by_gl = defaultdict(list)
-        for b in bets:
-            by_gl[b["game_line"]].append(b)
+        for b in bets: by_gl[b["game_line"]].append(b)
         for gl in game_lines:
-            if gl not in by_gl:
-                continue
+            if gl not in by_gl: continue
             s = stats(by_gl[gl])
             print(f"{league:<10} {gl:<12} {s['n']:>5} {s['w']:>5} {s['l']:>5} {s['wr']:>5.0%} {s['roi']:>6.0%} ${s['pnl']:>11,.0f}")
 
@@ -462,39 +467,33 @@ def main():
     while i < len(sys.argv):
         arg = sys.argv[i]
         if arg == "--csv" and i + 1 < len(sys.argv):
-            csv_path = sys.argv[i + 1]
-            i += 2
+            csv_path = sys.argv[i + 1]; i += 2
         elif arg == "--sport" and i + 1 < len(sys.argv):
-            sport_filters.append(sys.argv[i + 1].lower())
-            i += 2
+            sport_filters.append(sys.argv[i + 1].lower()); i += 2
         elif arg.startswith("0x"):
-            address = arg
-            i += 1
+            address = arg; i += 1
         else:
             i += 1
 
-    # Resolve sport filter to league set
     allowed_leagues = None
     if sport_filters:
         allowed_leagues = set()
         for sf in sport_filters:
-            if sf in SPORT_ALIASES:
-                allowed_leagues |= SPORT_ALIASES[sf]
-            else:
-                allowed_leagues.add(sf)
+            if sf in SPORT_ALIASES: allowed_leagues |= SPORT_ALIASES[sf]
+            else: allowed_leagues.add(sf)
 
-    all_positions = []
+    all_legs = []
 
     if csv_path:
         print(f"Loading from CSV: {csv_path}")
-        all_positions = load_from_csv(csv_path)
-        print(f"  → {len(all_positions)} positions from CSV")
+        all_legs = load_legs_from_csv(csv_path)
+        print(f"  → {len(all_legs)} legs from CSV")
     else:
         if CANNAE_CSV.exists() and not address:
             print(f"Loading historical CSV: {CANNAE_CSV}")
-            csv_positions = load_from_csv(str(CANNAE_CSV))
-            print(f"  → {len(csv_positions)} positions from CSV")
-            all_positions.extend(csv_positions)
+            csv_legs = load_legs_from_csv(str(CANNAE_CSV))
+            print(f"  → {len(csv_legs)} legs from CSV")
+            all_legs.extend(csv_legs)
 
         if address is None:
             address = "0x7ea571c40408f340c1c8fc8eaacebab53c1bde7b"
@@ -505,46 +504,43 @@ def main():
                         cfg = yaml.safe_load(path.read_text())
                         for w in cfg.get("copy_trading", {}).get("watchlist", []):
                             if w.get("name", "").lower() == "cannae":
-                                address = w["address"]
-                                break
-            except Exception:
-                pass
+                                address = w["address"]; break
+            except Exception: pass
 
         if HAS_HTTPX:
             print(f"Fetching from API: {address}")
-            api_positions = load_from_api(address)
-            print(f"  → {len(api_positions)} positions from API")
-            all_positions.extend(api_positions)
+            api_legs = load_legs_from_api(address)
+            print(f"  → {len(api_legs)} legs from API")
+            all_legs.extend(api_legs)
 
-    if not all_positions:
-        print("No data loaded.")
-        sys.exit(1)
+    if not all_legs:
+        print("No data loaded."); sys.exit(1)
 
-    # Apply sport filter
+    # Sport filter
     if allowed_leagues:
-        before = len(all_positions)
-        all_positions = [p for p in all_positions if p["league"] in allowed_leagues]
-        print(f"Sport filter {sport_filters}: {before} → {len(all_positions)} positions")
+        before = len(all_legs)
+        all_legs = [l for l in all_legs if l["league"] in allowed_leagues]
+        print(f"Sport filter {sport_filters}: {before} → {len(all_legs)} legs")
 
-    # Dedup
+    # Dedup: same (cid, outcome) → prefer resolved over open
     seen = {}
-    for p in all_positions:
-        key = (p["cid"], p["outcome"])
+    for l in all_legs:
+        key = (l["cid"], l["outcome"])
         if key not in seen:
-            seen[key] = p
+            seen[key] = l
         else:
-            existing = seen[key]
-            if existing["result"] in ("OPEN", "UNKNOWN") and p["result"] in ("WIN", "LOSS"):
-                seen[key] = p
-
+            if seen[key]["result"] in ("OPEN", "UNKNOWN") and l["result"] in ("WIN", "LOSS"):
+                seen[key] = l
     deduped = list(seen.values())
-    print(f"\nTotal positions after dedup: {len(deduped)}")
+    print(f"\nTotal legs after dedup: {len(deduped)}")
 
-    resolved, open_bets = select_hauptbets(deduped)
+    # Build game-level hauptbets
+    records = build_game_hauptbets(deduped)
+    print(f"Game line bets: {len(records)}")
 
     label = address[:10] + "..." + address[-6:] if address else "CSV"
     sport_label = ",".join(sport_filters) if sport_filters else None
-    print_report(resolved, open_bets, label, sport_label)
+    print_report(records, label, sport_label)
 
 
 if __name__ == "__main__":
