@@ -215,6 +215,7 @@ pub fn discover_continuous_from_positions(
         };
 
         // Group matching positions by event_slug
+        // Match on condition_id first, fall back to position's own eventSlug
         let mut by_event: HashMap<String, Vec<WalletPosition>> = HashMap::new();
         for pos in positions {
             if pos.size_f64() <= 0.0 {
@@ -224,10 +225,17 @@ pub fn discover_continuous_from_positions(
             if cur <= 0.01 || cur >= 0.99 {
                 continue;
             }
-            if let Some(cid) = &pos.condition_id {
-                if let Some(event_slug) = cid_to_event.get(cid) {
-                    by_event.entry(event_slug.clone()).or_default().push(pos.clone());
-                }
+            // Try condition_id match first
+            let matched_slug = pos.condition_id.as_ref()
+                .and_then(|cid| cid_to_event.get(cid).cloned())
+                // Fall back: use position's own eventSlug if it matches a scheduled game
+                .or_else(|| {
+                    pos.event_slug.as_ref()
+                        .filter(|slug| game_by_slug.contains_key(slug.as_str()))
+                        .cloned()
+                });
+            if let Some(event_slug) = matched_slug {
+                by_event.entry(event_slug).or_default().push(pos.clone());
             }
         }
 
