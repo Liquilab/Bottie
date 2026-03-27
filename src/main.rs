@@ -594,7 +594,38 @@ async fn execute_stable_game(
         }
     }
 
-    // Per allowed game line: find the hauptbet (largest position of that type across all cids)
+    // Collect ALL hauptbets per conditionId with their game line type and outcome
+    struct HauptbetInfo<'a> {
+        pos: &'a crate::clob::types::WalletPosition,
+        game_line: String,
+        outcome_is_yes: bool,
+        usdc: f64,
+    }
+
+    let mut all_hauptbets: Vec<HauptbetInfo> = Vec::new();
+    for pos in best_per_cid.values() {
+        let title = pos.title.as_deref().unwrap_or("");
+        let gl = CopyTrader::detect_market_type(title);
+        let outcome = pos.outcome.as_deref().unwrap_or("");
+        let is_yes = outcome.eq_ignore_ascii_case("Yes")
+            || (!outcome.eq_ignore_ascii_case("No") && !outcome.eq_ignore_ascii_case("Under") && !outcome.eq_ignore_ascii_case("Over"));
+        all_hauptbets.push(HauptbetInfo {
+            pos,
+            game_line: gl,
+            outcome_is_yes: is_yes,
+            usdc: pos.initial_value_f64(),
+        });
+    }
+
+    // Separate by game line type
+    let ml_bets: Vec<&HauptbetInfo> = all_hauptbets.iter().filter(|h| h.game_line == "win").collect();
+    let draw_bets: Vec<&HauptbetInfo> = all_hauptbets.iter().filter(|h| h.game_line == "draw").collect();
+    let spread_bets: Vec<&HauptbetInfo> = all_hauptbets.iter().filter(|h| h.game_line == "spread").collect();
+
+    // Find the overall largest position (determines mode)
+    let overall_largest = all_hauptbets.iter().max_by(|a, b| a.usdc.partial_cmp(&b.usdc).unwrap_or(std::cmp::Ordering::Equal));
+    let is_football = !matches!(league, "nba" | "nhl" | "mlb" | "nfl" | "cbb" | "ncaa");
+
     struct GameLineBet<'a> {
         pos: &'a crate::clob::types::WalletPosition,
         game_line: String,
@@ -604,77 +635,116 @@ async fn execute_stable_game(
     let bankroll = risk.read().await.bankroll();
     let mut bets: Vec<GameLineBet> = Vec::new();
 
-    for &gl in &allowed_lines {
-        // Find the largest hauptbet of this game line type
-        let mut best_for_line: Option<&crate::clob::types::WalletPosition> = None;
-        let mut best_usdc = 0.0_f64;
+    if is_football {
+        // Football conviction logic:
+        // 1. Find ML hauptbet (largest "win" position)
+        // 2. Find Draw hauptbet (largest "draw" position)
+        // 3. Determine mode based on which is the overall largest
 
-        for pos in best_per_cid.values() {
-            let title = pos.title.as_deref().unwrap_or("");
-            let detected = CopyTrader::detect_market_type(title);
-            if detected != gl { continue; }
+        let ml_hauptbet = ml_bets.iter().max_by(|a, b| a.usdc.partial_cmp(&b.usdc).unwrap_or(std::cmp::Ordering::Equal));
+        let draw_hauptbet = draw_bets.iter().max_by(|a, b| a.usdc.partial_cmp(&b.usdc).unwrap_or(std::cmp::Ordering::Equal));
 
-            let usdc = pos.initial_value_f64();
-            if usdc > best_usdc {
-                best_usdc = usdc;
-                best_for_line = Some(pos);
-            }
-        }
+        // Collect all ML NO bets (for draw mode: Team X NO + Team Y NO)
+        let ml_no_bets: Vec<&&HauptbetInfo> = ml_bets.iter().filter(|h| !h.outcome_is_yes).collect();
+        // Collect ML YES bets
+        let ml_yes_bets: Vec<&&HauptbetInfo> = ml_bets.iter().filter(|h| h.outcome_is_yes).collect();
 
-        if let Some(pos) = best_for_line {
-            let pct = wave_budget.get_line_pct(bankroll, league, gl);
-            if pct > 0.0 {
-                bets.push(GameLineBet {
-                    pos,
-                    game_line: gl.to_string(),
-                    size_pct: pct,
-                });
-            }
-        }
-    }
+        let draw_is_largest = if let (Some(d), Some(m)) = (draw_hauptbet, ml_hauptbet) {
+            d.usdc > m.usdc
+        } else {
+            false
+        };
 
-    if bets.is_empty() {
-        info!("GAME SKIP: {} — no bets after filtering/budget", game.event_slug);
-        return false;
-    }
+        let mode;
 
-    // Conviction check: for moneyline ("win"), if there are multiple hauptbets
-    // they must point the same direction. E.g. "Germany YES" + "Switzerland NO" = OK (both back Germany).
-    // But "Germany YES" + "Switzerland YES" = contradictory = SKIP all moneyline bets.
-    {
-        let ml_bets: Vec<&GameLineBet> = bets.iter().filter(|b| b.game_line == "win").collect();
-        if ml_bets.len() >= 2 {
-            // Check if outcomes are consistent: all YES or all NO = contradictory (backing different teams).
-            // Mixed YES+NO = consistent (backing the same team from different angles).
-            let yes_count = ml_bets.iter().filter(|b| {
-                b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("Yes")
-            }).count();
-            let no_count = ml_bets.len() - yes_count;
-
-            if yes_count > 1 || no_count > 1 {
-                // Multiple YES or multiple NO = ambiguous, might be OK (e.g. two NO bets = backing draw or other team)
-                // But if ALL are YES = betting on multiple teams to win = contradictory
-                if yes_count == ml_bets.len() {
-                    info!(
-                        "CONVICTION SKIP: {} — {} moneyline bets ALL backing YES (contradictory)",
-                        game.event_slug, ml_bets.len(),
-                    );
-                    // Remove moneyline bets, keep draw/spread
-                    bets.retain(|b| b.game_line != "win");
+        if draw_is_largest {
+            // DRAW MODE: Draw YES is the largest bet in the game
+            // → Buy Draw YES + all ML NOs (Team X NO + Team Y NO)
+            mode = "DRAW";
+            if let Some(d) = draw_hauptbet {
+                if d.outcome_is_yes {
+                    let pct = wave_budget.get_line_pct(bankroll, league, "draw");
+                    if pct > 0.0 {
+                        bets.push(GameLineBet { pos: d.pos, game_line: "draw".to_string(), size_pct: pct });
+                    }
                 }
             }
-            // YES + NO mix = one side backs a team, other hedges = conviction OK
+            // Add all ML NO bets (at draw wins, NO also wins)
+            for no_bet in &ml_no_bets {
+                let pct = wave_budget.get_line_pct(bankroll, league, "win");
+                if pct > 0.0 {
+                    bets.push(GameLineBet { pos: no_bet.pos, game_line: "win".to_string(), size_pct: pct });
+                }
+            }
+        } else if let Some(ml) = ml_hauptbet {
+            // ML is largest. Check for conviction.
+            // Conviction: ML Team X YES + at least one ML Team Y NO + Draw NO
+            let has_ml_no = !ml_no_bets.is_empty();
+            let has_draw_no = draw_hauptbet.map(|d| !d.outcome_is_yes).unwrap_or(false);
+
+            if ml.outcome_is_yes && has_ml_no && has_draw_no {
+                // CONVICTION: Team X YES + Team Y NO + Draw NO → all back Team X winning
+                mode = "CONVICTION";
+                // Buy ML hauptbet (Team X YES)
+                let pct = wave_budget.get_line_pct(bankroll, league, "win");
+                if pct > 0.0 {
+                    bets.push(GameLineBet { pos: ml.pos, game_line: "win".to_string(), size_pct: pct });
+                }
+                // Buy all ML NOs
+                for no_bet in &ml_no_bets {
+                    let pct = wave_budget.get_line_pct(bankroll, league, "win");
+                    if pct > 0.0 {
+                        bets.push(GameLineBet { pos: no_bet.pos, game_line: "win".to_string(), size_pct: pct });
+                    }
+                }
+                // Buy Draw NO
+                if let Some(d) = draw_hauptbet {
+                    let pct = wave_budget.get_line_pct(bankroll, league, "draw");
+                    if pct > 0.0 {
+                        bets.push(GameLineBet { pos: d.pos, game_line: "draw".to_string(), size_pct: pct });
+                    }
+                }
+            } else {
+                // STANDARD: just buy ML hauptbet
+                mode = "STANDARD";
+                let pct = wave_budget.get_line_pct(bankroll, league, "win");
+                if pct > 0.0 {
+                    bets.push(GameLineBet { pos: ml.pos, game_line: "win".to_string(), size_pct: pct });
+                }
+            }
+        } else {
+            mode = "SKIP";
+        }
+
+        if !bets.is_empty() {
+            info!("GAME MODE: {} → {} ({} bets)", game.event_slug, mode, bets.len());
+        }
+    } else {
+        // US sports: simple — buy hauptbet per allowed game line (no conviction logic)
+        for &gl in &allowed_lines {
+            let best = match gl {
+                "win" => ml_bets.iter().max_by(|a, b| a.usdc.partial_cmp(&b.usdc).unwrap_or(std::cmp::Ordering::Equal)),
+                "spread" => spread_bets.iter().max_by(|a, b| a.usdc.partial_cmp(&b.usdc).unwrap_or(std::cmp::Ordering::Equal)),
+                "draw" => draw_bets.iter().max_by(|a, b| a.usdc.partial_cmp(&b.usdc).unwrap_or(std::cmp::Ordering::Equal)),
+                _ => None,
+            };
+            if let Some(h) = best {
+                let pct = wave_budget.get_line_pct(bankroll, league, gl);
+                if pct > 0.0 {
+                    bets.push(GameLineBet { pos: h.pos, game_line: gl.to_string(), size_pct: pct });
+                }
+            }
         }
     }
 
     if bets.is_empty() {
-        info!("GAME SKIP: {} — no bets after conviction check", game.event_slug);
+        info!("GAME SKIP: {} — no bets after conviction logic", game.event_slug);
         return false;
     }
 
     // Log T5 PLAN
     info!(
-        "GAME EXECUTE: {} ({}) — {} game lines",
+        "GAME EXECUTE: {} ({}) — {} bets",
         game.event_slug, league, bets.len(),
     );
     for bet in &bets {
