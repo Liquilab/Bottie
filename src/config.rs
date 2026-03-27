@@ -371,6 +371,12 @@ pub struct SportSizingConfig {
     /// NBA spread. Data: 54% WR, 7% ROI.
     #[serde(default = "default_nba_spread")]
     pub nba_spread_pct: f64,
+    /// FIF (FIFA WCQ/friendlies) moneyline. Data: 22% WR, -91% ROI on 9 bets. Experimental.
+    #[serde(default = "default_fif_ml")]
+    pub fif_ml_pct: f64,
+    /// FIF draw.
+    #[serde(default = "default_fif_draw")]
+    pub fif_draw_pct: f64,
     /// Minimum bet size in USDC. Below this → skip game.
     #[serde(default = "default_min_bet_usdc")]
     pub min_bet_usdc: f64,
@@ -384,6 +390,8 @@ impl Default for SportSizingConfig {
             nhl_ml_pct: 5.0,
             nba_ml_pct: 3.0,
             nba_spread_pct: 3.0,
+            fif_ml_pct: 0.0,
+            fif_draw_pct: 0.0,
             min_bet_usdc: 2.50,
         }
     }
@@ -394,6 +402,8 @@ fn default_voetbal_draw() -> f64 { 5.0 }
 fn default_nhl_ml() -> f64 { 5.0 }
 fn default_nba_ml() -> f64 { 3.0 }
 fn default_nba_spread() -> f64 { 3.0 }
+fn default_fif_ml() -> f64 { 0.0 }
+fn default_fif_draw() -> f64 { 0.0 }
 fn default_min_bet_usdc() -> f64 { 2.50 }
 
 impl SportSizingConfig {
@@ -402,11 +412,18 @@ impl SportSizingConfig {
     pub fn cap_for(&self, league: &str, game_line: &str) -> Option<f64> {
         let is_football = !matches!(league, "nba" | "nhl" | "mlb" | "nfl" | "cbb" | "ncaa");
 
-        if is_football {
+        if league == "fif" {
+            // FIFA WCQ/friendlies — separate caps (experimental, default 0 = off)
+            match game_line {
+                "win" if self.fif_ml_pct > 0.0 => Some(self.fif_ml_pct),
+                "draw" if self.fif_draw_pct > 0.0 => Some(self.fif_draw_pct),
+                _ => None,
+            }
+        } else if is_football {
             match game_line {
                 "win" => Some(self.voetbal_ml_pct),
                 "draw" => Some(self.voetbal_draw_pct),
-                _ => None, // spread, totals, btts → skip
+                _ => None,
             }
         } else if league == "nhl" {
             match game_line {
@@ -427,7 +444,12 @@ impl SportSizingConfig {
     /// List allowed game line types for a given league.
     pub fn allowed_game_lines(&self, league: &str) -> Vec<&'static str> {
         let is_football = !matches!(league, "nba" | "nhl" | "mlb" | "nfl" | "cbb" | "ncaa");
-        if is_football {
+        if league == "fif" {
+            let mut v = vec![];
+            if self.fif_ml_pct > 0.0 { v.push("win"); }
+            if self.fif_draw_pct > 0.0 { v.push("draw"); }
+            v
+        } else if is_football {
             vec!["win", "draw"]
         } else if league == "nhl" {
             vec!["win"]

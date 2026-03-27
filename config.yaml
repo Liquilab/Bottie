@@ -107,6 +107,8 @@ sport_sizing:
   nhl_ml_pct: 5.0
   nba_ml_pct: 3.0
   nba_spread_pct: 3.0
+  fif_ml_pct: 1.0
+  fif_draw_pct: 1.0
   min_bet_usdc: 2.50
 schedule:
   enabled: true
