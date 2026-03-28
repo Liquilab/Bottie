@@ -41,7 +41,7 @@ Deployment cap 90% geldt per moment, niet cumulatief.
 | `config.rs` | All config structs, hot-reload |
 
 ## Operationeel
-- VPS: Vultr root@45.76.38.183
+- VPS: Vultr root@78.141.222.227 (ssh -T, credentials in .env)
 - Binary: `/opt/bottie/bottie-bin` (systemd service)
 - Build ALTIJD op VPS: `source ~/.cargo/env && cargo build --release`
 - Config: `/opt/bottie/config.yaml` (hot-reloadable)

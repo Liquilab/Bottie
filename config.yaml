@@ -82,7 +82,7 @@ sizing:
   max_price: 0.95
   portfolio_reference_usdc: 800
 take_profit:
-  enabled: true
+  enabled: false
   min_delta: 0.05
   safety_threshold: 0.95
   cancel_timeout_secs: 60
