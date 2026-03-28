@@ -503,6 +503,25 @@ impl ClobClient {
         Ok((status, size_matched))
     }
 
+    // --- Cancel order ---
+
+    pub async fn cancel_order(&self, order_id: &str) -> Result<()> {
+        let path = "/order";
+        let body = serde_json::json!({ "orderID": order_id }).to_string();
+        let req = self.l2_request(
+            self.http.delete(format!("{CLOB_API}{path}")),
+            "DELETE",
+            path,
+            Some(&body),
+        )?;
+        req.header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     // --- Current best ask price ---
 
     /// Fetch the current best ask for a token from the CLOB orderbook.

@@ -41,7 +41,7 @@ git -C <PROJECT_ROOT> branch --show-current
 - Haal actieve tickets op
 
 **E. Production checks** (Bottie VPS):
-SSH: `sshpass -p 'T[b5%{i}o#JMJWUD' ssh -o StrictHostKeyChecking=no root@45.76.38.183`
+SSH: `export SSHPASS='}4nUzoFa#{67argr' && sshpass -e ssh -T -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@78.141.222.227`
 
 1. **Portfolio (PM API — source of truth)**:
 ```bash
@@ -67,6 +67,13 @@ Gebruik `bankroll=` uit STATUS regel voor cash. Totaal portfolio = positions val
 
 **⚠️ NOOIT de WR/PnL/trade count uit de STATUS log gebruiken — deze zijn onbetrouwbaar door phantom fills.**
 **Portfolio waarde = PM /value (posities) + bankroll (cash). ALTIJD optellen!**
+
+3. **Overnight W/L** (trades.jsonl — source of truth voor resolved trades):
+```bash
+jq -r 'select(.resolved_at != null and .resolved_at > "YYYY-MM-DDT22:00") | [.resolved_at[11:16], .result, (.pnl // 0 | tostring), .market_title[0:45], .outcome, (.size_usdc | tostring)] | @tsv' /opt/bottie/data/trades.jsonl | sort | column -t -s $'\t'
+```
+Vervang `YYYY-MM-DD` door de datum van gisteren. Dit toont alle resolved trades (win/loss/take_profit/auto_sell) sinds 22:00.
+Tel W/L op uit de output. **Dit is de enige betrouwbare bron voor W/L en PnL.**
 
 ### Stap 2: Presenteer Briefing
 

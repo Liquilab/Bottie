@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use crate::clob::client::ClobClient;
+use crate::clob::client::{ClobClient, OrderType, Side};
 use crate::logger::TradeLogger;
 use crate::risk::RiskManager;
 use crate::wallet_tracker::WalletTracker;
@@ -33,12 +33,23 @@ pub async fn resolver_loop(
     let mut check_state: HashMap<String, MarketCheckState> = HashMap::new();
     // Track recent failed sell attempts to avoid retrying every cycle
     let mut tp_cooldown: HashMap<String, DateTime<Utc>> = HashMap::new();
+    let mut auto_sell_cooldown: HashMap<String, DateTime<Utc>> = HashMap::new();
+    let mut auto_sell_pending: HashMap<String, String> = HashMap::new();
 
     loop {
         // Phantom sync FIRST — catch false fills before resolution resolves them as win/loss
         sync_phantoms(&client, &logger, &risk).await;
 
         check_resolutions(&client, &logger, &risk, &tracker, &mut check_state).await;
+
+        // Auto-sell: sell open positions when best bid >= min_bid (e.g. 98ct)
+        // Frees cash before PM resolution (2-4 hour delay after game end)
+        {
+            let cfg = config.read().await;
+            if cfg.auto_sell.enabled {
+                auto_sell_check(&client, &logger, &risk, cfg.auto_sell.min_bid, &mut auto_sell_cooldown, &mut auto_sell_pending).await;
+            }
+        }
 
         // Take-profit DISABLED — need data lake analysis first (RUS-234)
         // let tp_config = config.read().await.take_profit.clone();
@@ -74,6 +85,185 @@ fn check_interval(end_date: Option<&DateTime<Utc>>) -> Duration {
     } else {
         // > 3 days: check every hour
         Duration::from_secs(3600)
+    }
+}
+
+/// Truncate a string to at most `max` bytes, but always on a char boundary.
+fn truncate_title(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Auto-sell positions when best bid >= min_bid (e.g. 0.98).
+/// Frees cash immediately instead of waiting 2-4h for PM resolution.
+async fn auto_sell_check(
+    client: &ClobClient,
+    logger: &TradeLogger,
+    risk: &Arc<RwLock<RiskManager>>,
+    min_bid: f64,
+    cooldown: &mut HashMap<String, DateTime<Utc>>,
+    pending_sell_orders: &mut HashMap<String, String>,
+) {
+    let mut trades = logger.load_all();
+
+    // Find open live positions with a token_id
+    let open_indices: Vec<usize> = trades.iter().enumerate()
+        .filter(|(_, t)| t.filled && t.result.is_none() && !t.dry_run && !t.token_id.is_empty())
+        .map(|(i, _)| i)
+        .collect();
+
+    if open_indices.is_empty() {
+        return;
+    }
+
+    let mut sold_meta: Vec<(String, String, f64)> = Vec::new();
+
+    for &idx in &open_indices {
+        let token_id = trades[idx].token_id.clone();
+        let shares = trades[idx].size_shares;
+        let title = trades[idx].market_title.clone();
+        let short_title = truncate_title(&title, 50);
+
+        // 5 min cooldown after failed/partial sell
+        if let Some(last) = cooldown.get(&token_id) {
+            if Utc::now().signed_duration_since(*last) < chrono::Duration::minutes(5) {
+                continue;
+            }
+        }
+
+        // Check best bid
+        let best_bid = match client.get_best_bid(&token_id).await {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+
+        if best_bid < min_bid {
+            continue;
+        }
+
+        // Sell at best_bid (not min_bid) for accurate PnL and price improvement
+        let sell_price = best_bid;
+
+        info!(
+            "AUTO SELL: {} | bid={:.0}ct | selling {:.1} shares @ {:.0}ct",
+            short_title, best_bid * 100.0, shares, sell_price * 100.0
+        );
+
+        // Cancel any pending sell order from a previous attempt before placing a new one
+        if let Some(prev_order_id) = pending_sell_orders.remove(&token_id) {
+            if let Err(e) = client.cancel_order(&prev_order_id).await {
+                warn!("AUTO SELL: failed to cancel previous order {}: {}", &prev_order_id[..prev_order_id.len().min(12)], e);
+                // Continue anyway — the old order might have filled or expired
+            }
+        }
+
+        // Get fee rate — retry with parsed fee from error if needed
+        let fee_bps = client.get_fee_rate_bps(&token_id).await.unwrap_or(0);
+
+        let (resp, actual_fee) = match client.create_and_post_order(
+            &token_id, sell_price, shares, Side::Sell, OrderType::GTC, fee_bps,
+        ).await {
+            Ok(r) => (r, fee_bps),
+            Err(e) => {
+                let err_str = e.to_string();
+                // Fee retry: parse correct fee from error message
+                if let Some(idx_fee) = err_str.find("taker fee: ")
+                    .or_else(|| err_str.find("maker fee: "))
+                {
+                    let fee_str = &err_str[idx_fee + 11..];
+                    let end = fee_str.find(|c: char| !c.is_ascii_digit()).unwrap_or(fee_str.len());
+                    if let Ok(correct_fee) = fee_str[..end].parse::<u32>() {
+                        info!("AUTO SELL: retrying with fee={} (was {})", correct_fee, fee_bps);
+                        match client.create_and_post_order(
+                            &token_id, sell_price, shares, Side::Sell, OrderType::GTC, correct_fee,
+                        ).await {
+                            Ok(r) => (r, correct_fee),
+                            Err(e2) => {
+                                warn!("AUTO SELL ERROR (retry): {} | {}", truncate_title(&title, 40), e2);
+                                cooldown.insert(token_id.clone(), Utc::now());
+                                continue;
+                            }
+                        }
+                    } else {
+                        warn!("AUTO SELL ERROR: {} | {}", truncate_title(&title, 40), e);
+                        cooldown.insert(token_id.clone(), Utc::now());
+                        continue;
+                    }
+                } else {
+                    warn!("AUTO SELL ERROR: {} | {}", truncate_title(&title, 40), e);
+                    cooldown.insert(token_id.clone(), Utc::now());
+                    continue;
+                }
+            }
+        };
+
+        if resp.is_filled() {
+            let filled = resp.filled_size();
+            // Partial fill: if < 95% filled, cooldown + retry next cycle
+            if filled > 0.0 && filled < shares * 0.95 {
+                warn!(
+                    "AUTO SELL PARTIAL: {} | {:.1}/{:.1} shares",
+                    truncate_title(&title, 40), filled, shares
+                );
+                // Track order ID so we can cancel it before retrying
+                if let Some(oid) = resp.effective_id() {
+                    pending_sell_orders.insert(token_id.clone(), oid.to_string());
+                }
+                cooldown.insert(token_id.clone(), Utc::now());
+                continue;
+            }
+
+            let actual = if filled > 0.0 { filled } else { shares };
+            let sell_usdc = actual * sell_price;
+            let fee_cost = sell_usdc * (actual_fee as f64 / 10000.0);
+            let profit = sell_usdc - fee_cost - trades[idx].size_usdc;
+            let roi = profit / trades[idx].size_usdc * 100.0;
+            let wallet = trades[idx].copy_wallet.clone().unwrap_or_default();
+            let sport = trades[idx].sport.clone();
+
+            trades[idx].result = Some("take_profit".to_string());
+            trades[idx].pnl = Some(profit);
+            trades[idx].actual_pnl = Some(profit);
+            trades[idx].sell_price = Some(sell_price);
+            trades[idx].exit_type = Some("auto_sell".to_string());
+            trades[idx].resolved_at = Some(Utc::now());
+
+            sold_meta.push((wallet, sport, profit));
+
+            info!(
+                "AUTO SELL FILLED: {} | profit=${:.2} ({:.0}%) | {:.1} shares @ {:.0}ct",
+                truncate_title(&title, 40), profit, roi, actual, sell_price * 100.0
+            );
+        } else {
+            // GTC not filled — track order ID for cancellation on next attempt
+            if let Some(oid) = resp.effective_id() {
+                pending_sell_orders.insert(token_id.clone(), oid.to_string());
+            }
+            warn!("AUTO SELL NOT FILLED: {} (bid may have moved, GTC order placed)", truncate_title(&title, 40));
+            cooldown.insert(token_id.clone(), Utc::now());
+        }
+
+        // Rate limit between sells
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    if !sold_meta.is_empty() {
+        logger.rewrite_all(trades);
+        let mut r = risk.write().await;
+        for (wallet, sport, pnl) in &sold_meta {
+            r.record_trade_closed_with_context(
+                *pnl,
+                if wallet.is_empty() { None } else { Some(wallet.as_str()) },
+                sport,
+            );
+        }
+        info!("auto-sell: sold {} positions at {}ct+", sold_meta.len(), (min_bid * 100.0) as u32);
     }
 }
 

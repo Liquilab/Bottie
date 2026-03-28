@@ -99,6 +99,8 @@ pub struct AppConfig {
     pub risk: RiskConfig,
     #[serde(default)]
     pub take_profit: TakeProfitConfig,
+    #[serde(default)]
+    pub auto_sell: AutoSellConfig,
     pub autoresearch: AutoresearchConfig,
     #[serde(default)]
     pub autoresearch_params: AutoresearchParams,
@@ -158,6 +160,26 @@ impl Default for TakeProfitConfig {
         }
     }
 }
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AutoSellConfig {
+    #[serde(default = "auto_sell_default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "auto_sell_default_min_bid")]
+    pub min_bid: f64,
+}
+
+impl Default for AutoSellConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_bid: 0.98,
+        }
+    }
+}
+
+fn auto_sell_default_enabled() -> bool { false }
+fn auto_sell_default_min_bid() -> f64 { 0.98 }
 
 fn tp_default_enabled() -> bool { true }
 fn tp_default_min_delta() -> f64 { 0.05 }
