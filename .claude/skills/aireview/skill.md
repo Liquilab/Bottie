@@ -76,17 +76,17 @@ TMP="/Users/koen/Projects/ Bottie/tmp/aireview"
 
 ### 1b: Live data van VPS
 
-**SSH naar `root@45.76.38.183`** — haal ALLE data op:
+**SSH naar `root@78.141.222.227`** — haal ALLE data op:
 
 ```bash
 # 1. Trade log (alle trades)
-ssh root@45.76.38.183 "cat /root/Projects/Bottie/data/trades.jsonl" > $TMP/trades.jsonl 2>/dev/null
+ssh root@78.141.222.227 "cat /root/Projects/Bottie/data/trades.jsonl" > $TMP/trades.jsonl 2>/dev/null
 
 # 2. Hypothesis log (alle autoresearch resultaten)
-ssh root@45.76.38.183 "cat /root/Projects/Bottie/research/hypotheses/*.json 2>/dev/null" > $TMP/hypotheses.json
+ssh root@78.141.222.227 "cat /root/Projects/Bottie/research/hypotheses/*.json 2>/dev/null" > $TMP/hypotheses.json
 
 # 3. Bot status
-ssh root@45.76.38.183 "python3 -c \"
+ssh root@78.141.222.227 "python3 -c \"
 import json
 from pathlib import Path
 

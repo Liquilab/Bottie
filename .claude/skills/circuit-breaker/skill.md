@@ -27,10 +27,10 @@ Detecteert anomalieën en beschermt de bankroll tegen runaway losses, API failur
 ## Stap 1: Loss Anomalie Detectie
 
 ```bash
-scp root@45.76.38.183:/opt/bottie/data/trades.jsonl /tmp/bottie_cb.jsonl
+scp root@78.141.222.227:/opt/bottie/data/trades.jsonl /tmp/bottie_cb.jsonl
 
 # Check verliezen afgelopen 24u vs gemiddelde
-ssh root@45.76.38.183 'journalctl -u bottie --since "24 hours ago" --no-pager 2>/dev/null | grep -c "result.*loss"'
+ssh root@78.141.222.227 'journalctl -u bottie --since "24 hours ago" --no-pager 2>/dev/null | grep -c "result.*loss"'
 ```
 
 ### Anomalie Signalen
@@ -47,10 +47,10 @@ ssh root@45.76.38.183 'journalctl -u bottie --since "24 hours ago" --no-pager 2>
 
 ```bash
 # Is daily loss limit actief?
-ssh root@45.76.38.183 'grep max_daily_loss /opt/bottie/config.yaml'
+ssh root@78.141.222.227 'grep max_daily_loss /opt/bottie/config.yaml'
 
 # Huidige daily PnL
-ssh root@45.76.38.183 'journalctl -u bottie --since "today" --no-pager 2>/dev/null | grep "daily_pnl\|STATUS:" | tail -3'
+ssh root@78.141.222.227 'journalctl -u bottie --since "today" --no-pager 2>/dev/null | grep "daily_pnl\|STATUS:" | tail -3'
 ```
 
 ---
@@ -59,13 +59,13 @@ ssh root@45.76.38.183 'journalctl -u bottie --since "today" --no-pager 2>/dev/nu
 
 ```bash
 # Polymarket API errors afgelopen uur
-ssh root@45.76.38.183 'journalctl -u bottie --since "1 hour ago" --no-pager 2>/dev/null | grep -c "positions fetch failed\|order.*failed\|API.*error"'
+ssh root@78.141.222.227 'journalctl -u bottie --since "1 hour ago" --no-pager 2>/dev/null | grep -c "positions fetch failed\|order.*failed\|API.*error"'
 
 # Fee API failures
-ssh root@45.76.38.183 'journalctl -u bottie --since "1 hour ago" --no-pager 2>/dev/null | grep -c "fee.*failed\|fee.*retry"'
+ssh root@78.141.222.227 'journalctl -u bottie --since "1 hour ago" --no-pager 2>/dev/null | grep -c "fee.*failed\|fee.*retry"'
 
 # Rate limit hits
-ssh root@45.76.38.183 'journalctl -u bottie --since "1 hour ago" --no-pager 2>/dev/null | grep -c "429\|rate.limit\|too many"'
+ssh root@78.141.222.227 'journalctl -u bottie --since "1 hour ago" --no-pager 2>/dev/null | grep -c "429\|rate.limit\|too many"'
 ```
 
 ### API Health Status

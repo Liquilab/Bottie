@@ -47,7 +47,7 @@ Voordat ik analyseer, heb ik de echte cijfers nodig:
 
 ```bash
 # NOOIT lokale bestanden gebruiken. ALTIJD van VPS.
-scp root@45.76.38.183:/opt/bottie/data/trades.jsonl /tmp/bottie_trades_analyse.jsonl
+scp root@78.141.222.227:/opt/bottie/data/trades.jsonl /tmp/bottie_trades_analyse.jsonl
 ```
 
 **Verificatie:** Vergelijk totaal aantal trades met dashboard. Als ze niet matchen → STOP, zoek de bron van het verschil.

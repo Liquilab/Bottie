@@ -73,7 +73,7 @@ Analyseert de trading pipeline (detect → evaluate → execute) voor bottleneck
 
 ```bash
 # Totale poll cycle time
-ssh root@45.76.38.183 'journalctl -u bottie --since "10 min ago" --no-pager 2>/dev/null | grep "POLL COMPLETE" | tail -5'
+ssh root@78.141.222.227 'journalctl -u bottie --since "10 min ago" --no-pager 2>/dev/null | grep "POLL COMPLETE" | tail -5'
 
 # Hoe lang duurt een volledige wallet poll cycle?
 # Met N wallets en delay_per_wallet = min(60000/N, 2000)ms
@@ -98,10 +98,10 @@ ssh root@45.76.38.183 'journalctl -u bottie --since "10 min ago" --no-pager 2>/d
 
 ```bash
 # Waarom worden trades geskipt? (afgelopen 6 uur)
-ssh root@45.76.38.183 'journalctl -u bottie --since "6 hours ago" --no-pager 2>/dev/null | grep "SKIP:" | sed "s/.*SKIP: //" | cut -d" " -f1-5 | sort | uniq -c | sort -rn | head -15'
+ssh root@78.141.222.227 'journalctl -u bottie --since "6 hours ago" --no-pager 2>/dev/null | grep "SKIP:" | sed "s/.*SKIP: //" | cut -d" " -f1-5 | sort | uniq -c | sort -rn | head -15'
 
 # Waarom worden trades rejected?
-ssh root@45.76.38.183 'journalctl -u bottie --since "6 hours ago" --no-pager 2>/dev/null | grep "RISK REJECTED:" | sed "s/.*RISK REJECTED: //" | cut -d" " -f1-5 | sort | uniq -c | sort -rn | head -10'
+ssh root@78.141.222.227 'journalctl -u bottie --since "6 hours ago" --no-pager 2>/dev/null | grep "RISK REJECTED:" | sed "s/.*RISK REJECTED: //" | cut -d" " -f1-5 | sort | uniq -c | sort -rn | head -10'
 ```
 
 ### Skip Diagnose

@@ -39,7 +39,7 @@ Bij `/experiment nieuw "[beschrijving]"`:
 
 ```bash
 # Haal actuele data op van VPS
-scp root@45.76.38.183:/opt/bottie/data/trades.jsonl /tmp/bottie_trades_baseline.jsonl
+scp root@78.141.222.227:/opt/bottie/data/trades.jsonl /tmp/bottie_trades_baseline.jsonl
 
 # Bereken baseline metrics
 python3 -c "
@@ -131,7 +131,7 @@ Bij `/experiment check [naam]`:
 ### A. Haal actuele data op
 
 ```bash
-scp root@45.76.38.183:/opt/bottie/data/trades.jsonl /tmp/bottie_trades_check.jsonl
+scp root@78.141.222.227:/opt/bottie/data/trades.jsonl /tmp/bottie_trades_check.jsonl
 ```
 
 ### B. Filter trades NA experiment startdatum

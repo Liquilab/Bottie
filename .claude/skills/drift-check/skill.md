@@ -28,7 +28,7 @@ Monitort of de wallets die we volgen nog steeds doen wat we denken dat ze doen. 
 **Vraag:** Handelen onze wallets nog in dezelfde markten als toen we ze selecteerden?
 
 ```bash
-scp root@45.76.38.183:/opt/bottie/data/trades.jsonl /tmp/bottie_drift.jsonl
+scp root@78.141.222.227:/opt/bottie/data/trades.jsonl /tmp/bottie_drift.jsonl
 ```
 
 ### Per wallet analyseren:

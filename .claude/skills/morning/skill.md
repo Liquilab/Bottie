@@ -41,7 +41,7 @@ git -C <PROJECT_ROOT> branch --show-current
 - Haal actieve tickets op
 
 **E. Production checks** (Bottie VPS):
-SSH: `export SSHPASS='}4nUzoFa#{67argr' && sshpass -e ssh -T -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@78.141.222.227`
+SSH: `ssh -T -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@78.141.222.227`
 
 1. **Portfolio (PM API — source of truth)**:
 ```bash

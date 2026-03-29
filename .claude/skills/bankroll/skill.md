@@ -33,10 +33,10 @@ Bankroll management en goal tracking. Monte Carlo simulatie voor risk of ruin. C
 
 ```bash
 # On-chain USDC
-ssh root@45.76.38.183 'journalctl -u bottie --no-pager 2>/dev/null | grep "SYNC.*balance" | tail -1'
+ssh root@78.141.222.227 'journalctl -u bottie --no-pager 2>/dev/null | grep "SYNC.*balance" | tail -1'
 
 # Actuele trade data
-scp root@45.76.38.183:/opt/bottie/data/trades.jsonl /tmp/bottie_bankroll.jsonl
+scp root@78.141.222.227:/opt/bottie/data/trades.jsonl /tmp/bottie_bankroll.jsonl
 ```
 
 ---

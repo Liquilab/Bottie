@@ -49,13 +49,13 @@ Voordat ik check, heb ik de echte cijfers nodig:
 
 Dan service + bankroll check:
 ```bash
-ssh root@45.76.38.183 'systemctl is-active bottie autoresearch wallet_scout 2>/dev/null'
+ssh root@78.141.222.227 'systemctl is-active bottie autoresearch wallet_scout 2>/dev/null'
 
 # On-chain USDC (available to trade)
-ssh root@45.76.38.183 'journalctl -u bottie --no-pager | grep "SYNC.*balance" | tail -1'
+ssh root@78.141.222.227 'journalctl -u bottie --no-pager | grep "SYNC.*balance" | tail -1'
 
 # Bot's interne bankroll
-ssh root@45.76.38.183 'journalctl -u bottie --no-pager | grep "STATUS:" | tail -1'
+ssh root@78.141.222.227 'journalctl -u bottie --no-pager | grep "STATUS:" | tail -1'
 ```
 
 **Met de antwoorden van de user bereken je:**
@@ -71,10 +71,10 @@ ssh root@45.76.38.183 'journalctl -u bottie --no-pager | grep "STATUS:" | tail -
 
 ```bash
 # Fills in het afgelopen uur
-ssh root@45.76.38.183 'journalctl -u bottie --since "1 hour ago" --no-pager 2>/dev/null | grep -c "FILLED:"'
+ssh root@78.141.222.227 'journalctl -u bottie --since "1 hour ago" --no-pager 2>/dev/null | grep -c "FILLED:"'
 
 # Waarom niet? Tel alle skip/reject redenen
-ssh root@45.76.38.183 'journalctl -u bottie --since "1 hour ago" --no-pager 2>/dev/null | grep -E "SKIP:|RISK REJECTED:" | sed "s/.*SKIP: //;s/.*RISK REJECTED: /RISK: /" | cut -d" " -f1-4 | sort | uniq -c | sort -rn | head -10'
+ssh root@78.141.222.227 'journalctl -u bottie --since "1 hour ago" --no-pager 2>/dev/null | grep -E "SKIP:|RISK REJECTED:" | sed "s/.*SKIP: //;s/.*RISK REJECTED: /RISK: /" | cut -d" " -f1-4 | sort | uniq -c | sort -rn | head -10'
 ```
 
 | Situatie | Actie |
@@ -98,7 +98,7 @@ ssh root@45.76.38.183 'journalctl -u bottie --since "1 hour ago" --no-pager 2>/d
 
 ```bash
 # Per-wallet win/loss uit onze eigen trades
-ssh root@45.76.38.183 'python3 -c "
+ssh root@78.141.222.227 'python3 -c "
 import json
 from collections import defaultdict
 trades = [json.loads(l) for l in open(\"/opt/bottie/data/trades.jsonl\") if l.strip()]
@@ -126,7 +126,7 @@ for w, (wins,losses,pnl) in sorted(by_w.items(), key=lambda x: x[1][2], reverse=
 
 ```bash
 # Laatste scout rapport
-ssh root@45.76.38.183 'python3 -c "
+ssh root@78.141.222.227 'python3 -c "
 import json
 r = json.loads(open(\"/opt/bottie/data/scout_report.json\").read())
 print(f\"Scout report: {r.get(\"timestamp\",\"?\")[:19]}\")
@@ -140,14 +140,14 @@ for rm in rems:
 "'
 
 # Draait de scout?
-ssh root@45.76.38.183 'systemctl is-active wallet_scout 2>/dev/null'
+ssh root@78.141.222.227 'systemctl is-active wallet_scout 2>/dev/null'
 ```
 
 ### C. Autoresearch — Past het de watchlist aan?
 
 ```bash
 # Laatste autoresearch cycle
-ssh root@45.76.38.183 'journalctl -u autoresearch --since "6 hours ago" --no-pager 2>/dev/null | grep -E "ADJUST|ADD|DEMOTE|RESEARCH CYCLE" | tail -10'
+ssh root@78.141.222.227 'journalctl -u autoresearch --since "6 hours ago" --no-pager 2>/dev/null | grep -E "ADJUST|ADD|DEMOTE|RESEARCH CYCLE" | tail -10'
 ```
 
 Autoresearch moet wallets toevoegen/verwijderen/gewicht aanpassen op basis van het scout rapport. Als het config parameters tweakt (kelly, sizing, delays) → het doet het verkeerde.
@@ -158,7 +158,7 @@ Autoresearch moet wallets toevoegen/verwijderen/gewicht aanpassen op basis van h
 
 ```bash
 # Check of er posities zijn op beide kanten van dezelfde markt
-ssh root@45.76.38.183 'python3 -c "
+ssh root@78.141.222.227 'python3 -c "
 import json
 from collections import defaultdict
 trades = [json.loads(l) for l in open(\"/opt/bottie/data/trades.jsonl\") if l.strip()]
@@ -185,22 +185,22 @@ else:
 
 ```bash
 # Services
-ssh root@45.76.38.183 'systemctl is-active bottie autoresearch wallet_scout 2>/dev/null'
+ssh root@78.141.222.227 'systemctl is-active bottie autoresearch wallet_scout 2>/dev/null'
 
 # Recente errors
-ssh root@45.76.38.183 'journalctl -u bottie --since "1 hour ago" --no-pager -p err 2>/dev/null | tail -5'
+ssh root@78.141.222.227 'journalctl -u bottie --since "1 hour ago" --no-pager -p err 2>/dev/null | tail -5'
 
 # Positions API werkt?
-ssh root@45.76.38.183 'journalctl -u bottie --since "10 min ago" --no-pager 2>/dev/null | grep -c "positions fetch failed"'
+ssh root@78.141.222.227 'journalctl -u bottie --since "10 min ago" --no-pager 2>/dev/null | grep -c "positions fetch failed"'
 
 # Bankroll sync werkend?
-ssh root@45.76.38.183 'journalctl -u bottie --since "10 min ago" --no-pager 2>/dev/null | grep "SYNC.*balance" | tail -1'
+ssh root@78.141.222.227 'journalctl -u bottie --since "10 min ago" --no-pager 2>/dev/null | grep "SYNC.*balance" | tail -1'
 
 # Laatste trade
-ssh root@45.76.38.183 'journalctl -u bottie --no-pager 2>/dev/null | grep "FILLED:" | tail -1'
+ssh root@78.141.222.227 'journalctl -u bottie --no-pager 2>/dev/null | grep "FILLED:" | tail -1'
 
 # Disk
-ssh root@45.76.38.183 'df -h / | tail -1'
+ssh root@78.141.222.227 'df -h / | tail -1'
 ```
 
 ---

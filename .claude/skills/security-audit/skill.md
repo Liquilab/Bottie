@@ -44,14 +44,14 @@ grep -rn "private_key\|PRIVATE_KEY\|secret\|SECRET" src/ --include="*.rs" | grep
 
 ```bash
 # .env permissions
-ssh root@45.76.38.183 'ls -la /opt/bottie/.env'
+ssh root@78.141.222.227 'ls -la /opt/bottie/.env'
 # Moet 600 zijn (alleen root leesbaar)
 
 # Wie kan bij de VPS?
-ssh root@45.76.38.183 'cat /root/.ssh/authorized_keys | wc -l'
+ssh root@78.141.222.227 'cat /root/.ssh/authorized_keys | wc -l'
 
 # Draait als root? (risico)
-ssh root@45.76.38.183 'ps aux | grep bottie-bin | grep -v grep | awk "{print \$1}"'
+ssh root@78.141.222.227 'ps aux | grep bottie-bin | grep -v grep | awk "{print \$1}"'
 ```
 
 ---
@@ -84,19 +84,19 @@ ssh root@45.76.38.183 'ps aux | grep bottie-bin | grep -v grep | awk "{print \$1
 
 ```bash
 # Firewall actief?
-ssh root@45.76.38.183 'ufw status 2>/dev/null || iptables -L -n 2>/dev/null | head -10'
+ssh root@78.141.222.227 'ufw status 2>/dev/null || iptables -L -n 2>/dev/null | head -10'
 
 # Open ports?
-ssh root@45.76.38.183 'ss -tlnp | grep -v "127.0.0.1"'
+ssh root@78.141.222.227 'ss -tlnp | grep -v "127.0.0.1"'
 
 # OS updates?
-ssh root@45.76.38.183 'apt list --upgradable 2>/dev/null | head -10'
+ssh root@78.141.222.227 'apt list --upgradable 2>/dev/null | head -10'
 
 # Fail2ban?
-ssh root@45.76.38.183 'systemctl is-active fail2ban 2>/dev/null'
+ssh root@78.141.222.227 'systemctl is-active fail2ban 2>/dev/null'
 
 # Unattended upgrades?
-ssh root@45.76.38.183 'systemctl is-active unattended-upgrades 2>/dev/null'
+ssh root@78.141.222.227 'systemctl is-active unattended-upgrades 2>/dev/null'
 ```
 
 ---

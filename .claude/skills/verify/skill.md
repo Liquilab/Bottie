@@ -27,7 +27,7 @@ Na elke deploy, config change, of experiment start: verifieer dat de bot daadwer
 ## Stap 1: Services Draaien?
 
 ```bash
-ssh root@45.76.38.183 'systemctl is-active bottie autoresearch wallet_scout 2>/dev/null'
+ssh root@78.141.222.227 'systemctl is-active bottie autoresearch wallet_scout 2>/dev/null'
 ```
 
 **KRITISCH:** `is-active` = noodzakelijk maar NIET voldoende. Een service kan draaien zonder trades te plaatsen.
@@ -38,10 +38,10 @@ ssh root@45.76.38.183 'systemctl is-active bottie autoresearch wallet_scout 2>/d
 
 ```bash
 # FILLED trades in afgelopen 30 minuten
-ssh root@45.76.38.183 'journalctl -u bottie --since "30 min ago" --no-pager 2>/dev/null | grep "FILLED:" | tail -5'
+ssh root@78.141.222.227 'journalctl -u bottie --since "30 min ago" --no-pager 2>/dev/null | grep "FILLED:" | tail -5'
 
 # Als geen FILLED: waarom niet?
-ssh root@45.76.38.183 'journalctl -u bottie --since "30 min ago" --no-pager 2>/dev/null | grep -E "SKIP:|RISK REJECTED:|SIGNAL:" | tail -10'
+ssh root@78.141.222.227 'journalctl -u bottie --since "30 min ago" --no-pager 2>/dev/null | grep -E "SKIP:|RISK REJECTED:|SIGNAL:" | tail -10'
 ```
 
 | Resultaat | Status | Actie |
@@ -59,16 +59,16 @@ Na een config wijziging:
 
 ```bash
 # Check of config is herladen (hot reload)
-ssh root@45.76.38.183 'journalctl -u bottie --since "5 min ago" --no-pager 2>/dev/null | grep -i "config\|reload\|watchlist"'
+ssh root@78.141.222.227 'journalctl -u bottie --since "5 min ago" --no-pager 2>/dev/null | grep -i "config\|reload\|watchlist"'
 
 # Verifieer specifieke waarde
-ssh root@45.76.38.183 'grep "min_price" /opt/bottie/config.yaml'
+ssh root@78.141.222.227 'grep "min_price" /opt/bottie/config.yaml'
 ```
 
 **Bij watchlist wijzigingen:** Verifieer dat de verwijderde wallet niet meer gepolld wordt:
 
 ```bash
-ssh root@45.76.38.183 'journalctl -u bottie --since "5 min ago" --no-pager 2>/dev/null | grep -i "[wallet_naam_of_adres]"'
+ssh root@78.141.222.227 'journalctl -u bottie --since "5 min ago" --no-pager 2>/dev/null | grep -i "[wallet_naam_of_adres]"'
 ```
 
 ---
@@ -77,13 +77,13 @@ ssh root@45.76.38.183 'journalctl -u bottie --since "5 min ago" --no-pager 2>/de
 
 ```bash
 # Error rate afgelopen uur
-ssh root@45.76.38.183 'journalctl -u bottie --since "1 hour ago" --no-pager -p err 2>/dev/null | wc -l'
+ssh root@78.141.222.227 'journalctl -u bottie --since "1 hour ago" --no-pager -p err 2>/dev/null | wc -l'
 
 # Vergelijk met vorige uur
-ssh root@45.76.38.183 'journalctl -u bottie --since "2 hours ago" --until "1 hour ago" --no-pager -p err 2>/dev/null | wc -l'
+ssh root@78.141.222.227 'journalctl -u bottie --since "2 hours ago" --until "1 hour ago" --no-pager -p err 2>/dev/null | wc -l'
 
 # Bankroll sync werkt?
-ssh root@45.76.38.183 'journalctl -u bottie --since "10 min ago" --no-pager 2>/dev/null | grep "SYNC.*balance" | tail -1'
+ssh root@78.141.222.227 'journalctl -u bottie --since "10 min ago" --no-pager 2>/dev/null | grep "SYNC.*balance" | tail -1'
 ```
 
 ---
@@ -130,7 +130,7 @@ ssh root@45.76.38.183 'journalctl -u bottie --since "10 min ago" --no-pager 2>/d
 
 ## Bekende VPS Details
 
-- **SSH:** `root@45.76.38.183`
+- **SSH:** `root@78.141.222.227`
 - **Path:** `/opt/bottie/`
 - **Binary:** `/opt/bottie/bottie-bin`
 - **Deploy:** `cargo build --release && cp target/release/bottie bottie-bin`
@@ -152,7 +152,7 @@ ssh root@45.76.38.183 'journalctl -u bottie --since "10 min ago" --no-pager 2>/d
 - **Niveau:** Tool call
 - **Wat:** `ssh bottie` faalde — geen SSH alias geconfigureerd
 - **Impact:** Productie-check in /morning mislukte, moest IP opzoeken in deploy.sh
-- **Fix:** IP hardcoded in skill: `root@45.76.38.183`
+- **Fix:** IP hardcoded in skill: `root@78.141.222.227`
 - **Gerelateerd:** /morning had ook geen SSH details → faalde op dezelfde stap
 
 ### F3: Nieuwe filters niet verifieerbaar (2026-03-15)

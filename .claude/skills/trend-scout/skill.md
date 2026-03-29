@@ -30,7 +30,7 @@ Identificeert opkomende markten op Polymarket voordat odds verschuiven. Zoekt na
 
 ```bash
 # Actieve markten met volume
-ssh root@45.76.38.183 'curl -s "https://clob.polymarket.com/markets?active=true&limit=50" | python3 -c "
+ssh root@78.141.222.227 'curl -s "https://clob.polymarket.com/markets?active=true&limit=50" | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
 for m in sorted(data, key=lambda x: float(x.get(\"volume\", 0)), reverse=True)[:20]:
@@ -45,7 +45,7 @@ for m in sorted(data, key=lambda x: float(x.get(\"volume\", 0)), reverse=True)[:
 
 ```bash
 # Recente signalen van de bot
-ssh root@45.76.38.183 'journalctl -u bottie --since "6 hours ago" --no-pager 2>/dev/null | grep "SIGNAL:" | tail -20'
+ssh root@78.141.222.227 'journalctl -u bottie --since "6 hours ago" --no-pager 2>/dev/null | grep "SIGNAL:" | tail -20'
 ```
 
 ### C. Snel-resolvende markten identificeren

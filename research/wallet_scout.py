@@ -140,22 +140,31 @@ async def evaluate_wallet(client: httpx.AsyncClient, address: str) -> dict:
     total_sport = sport_active + sport_closed
     sport_pct = total_sport / total_items if total_items > 0 else 0
 
-    # Win rate and PnL from closed positions
-    if closed:
-        pnls = [p.get("realizedPnl", 0) or 0 for p in closed]
-        wins = sum(1 for pnl in pnls if pnl > 0)
-        win_rate = wins / len(closed)
-        total_pnl = sum(pnls)
-        avg_pnl = total_pnl / len(closed)
+    # Win rate and PnL — survivorship corrected
+    # Closed-positions only shows winners. Losses sit in open positions at curPrice=0.
+    open_losers = []
+    for p in positions:
+        cp = float(p.get("curPrice", 0) or 0)
+        avg = float(p.get("avgPrice", 0) or 0)
+        sz = float(p.get("size", 0) or 0)
+        if cp < 0.005 and avg > 0.05 and sz > 0:
+            open_losers.append(-sz * avg)  # loss = negative PnL
 
-        # Sharpe approximation: mean / stdev of per-trade PnL
-        if len(pnls) > 1:
-            std_pnl = statistics.stdev(pnls)
+    all_pnls = [float(p.get("realizedPnl", 0) or 0) for p in closed] + open_losers
+
+    if all_pnls:
+        wins = sum(1 for pnl in all_pnls if pnl > 0)
+        win_rate = wins / len(all_pnls)
+        total_pnl = sum(all_pnls)
+        avg_pnl = total_pnl / len(all_pnls)
+
+        if len(all_pnls) > 1:
+            std_pnl = statistics.stdev(all_pnls)
             sharpe = avg_pnl / std_pnl if std_pnl > 0 else 0
         else:
             sharpe = 0
 
-        worst_trade = min(pnls)
+        worst_trade = min(all_pnls)
     else:
         win_rate = 0
         total_pnl = 0

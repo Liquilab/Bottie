@@ -325,10 +325,19 @@ async def prepare():
             # Both-sides check
             both_sides = check_both_sides(positions)
 
-            # Win rate
-            pnls = [float(p.get("realizedPnl", 0) or 0) for p in closed]
+            # Win rate — survivorship corrected
+            # Closed-positions only shows winners. Losses sit in open positions at curPrice=0.
+            open_losers_pnl = []
+            for p in positions:
+                cp = float(p.get("curPrice", 0) or 0)
+                avg = float(p.get("avgPrice", 0) or 0)
+                sz = float(p.get("size", 0) or 0)
+                if cp < 0.005 and avg > 0.05 and sz > 0:
+                    open_losers_pnl.append(-sz * avg)
+
+            pnls = [float(p.get("realizedPnl", 0) or 0) for p in closed] + open_losers_pnl
             wins = sum(1 for pnl in pnls if pnl > 0)
-            wr = wins / len(closed) if closed else 0
+            wr = wins / len(pnls) if pnls else 0
 
             # Sharpe
             import statistics

@@ -108,10 +108,10 @@ sport_sizing:
   voetbal_ml_pct: 8.0
   voetbal_draw_pct: 5.0
   nhl_ml_pct: 5.0
-  nba_ml_pct: 3.0
-  nba_spread_pct: 3.0
-  fif_ml_pct: 1.0
-  fif_draw_pct: 1.0
+  nba_ml_pct: 5.0
+  nba_spread_pct: 0.0
+  fif_ml_pct: 0.0
+  fif_draw_pct: 0.0
   min_bet_usdc: 2.50
 schedule:
   enabled: true
