@@ -6,7 +6,9 @@ from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
-BASE_DIR       = Path(__file__).parent
+# Use CWD (/opt/bottie) for data files, __file__ dir for code/templates
+BASE_DIR       = Path.cwd()
+CODE_DIR       = Path(__file__).parent
 TRADES_FILE    = BASE_DIR / "data" / "trades.jsonl"
 DAG_FILE       = BASE_DIR / "data" / "research_dag.jsonl"
 SCOUT_FILE     = BASE_DIR / "data" / "scout_report.json"
@@ -18,9 +20,12 @@ CONSENSUS_RESULTS = BASE_DIR / "data" / "consensus_results.json"
 INITIAL_BANKROLL = 1840.0  # total deposited (updated 2026-03-22, +$485 bijstorting)
 EDGE_REPORT_FILE = BASE_DIR / "data" / "edge_analysis_report.md"
 
+# Auth token — all routes require /t/<TOKEN>/ prefix (like webhook URLs)
+AUTH_TOKEN = os.environ.get("DASHBOARD_TOKEN", "8vNADas4jmnOk3IbpeBFrgDHkKHN9Epq")
+
 # Polymarket Data API — source of truth
 PM_DATA_API = "https://data-api.polymarket.com"
-PM_FUNDER = "0x9f23f6d5d18f9Fc5aeF42EFEc8f63a7db3dB6D15"
+PM_FUNDER = "0x89dcA91b49AfB7bEfb953a7658a1B83fC7Ab8F42"
 
 
 # ── PM API Data (source of truth) ──────────────────────────────────────────
@@ -1152,6 +1157,21 @@ a { color: var(--blue); text-decoration: none; }
 .nav a { padding: 10px 20px; color: var(--muted); font-size: 0.85rem; font-weight: 600; border-bottom: 2px solid transparent; }
 .nav a:hover { color: var(--text); background: rgba(255,255,255,0.03); }
 .nav a.active { color: var(--blue); border-bottom-color: var(--blue); }
+@media(max-width:600px) {
+  .nav { flex-wrap: wrap; }
+  .nav a { padding: 8px 12px; font-size: 0.75rem; }
+  .header { padding: 10px 12px; }
+  .header h1 { font-size: 0.95rem; }
+  .main { padding: 12px 8px; }
+  .kpi-row { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .kpi-value { font-size: 1.1rem; }
+  .market-title { max-width: 160px; font-size: 0.8rem; }
+  tbody td { padding: 6px 8px; font-size: 0.8rem; }
+  thead th { padding: 8px; font-size: 0.65rem; }
+  .sport-grid { grid-template-columns: repeat(2, 1fr); }
+}
+.stop-btn { background: var(--red); color: #fff; border: none; border-radius: 6px; padding: 6px 14px; font-size: 0.8rem; font-weight: 700; cursor: pointer; margin-right: 8px; }
+.stop-btn:hover { opacity: 0.8; }
 
 /* Layout */
 .main { max-width: 1600px; margin: 0 auto; padding: 20px 24px; }
@@ -1239,26 +1259,29 @@ tr.group-cont .market-title { padding-left: 12px; font-size: 0.85em; }
 """
 
 
-def page_wrap(active_page, body_html):
+def page_wrap(active_page, body_html, token=""):
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    prefix = f"/t/{token}" if token else ""
     pages = [
         ("Overview", "/"),
         ("Trades", "/trades"),
         ("Wallets", "/wallets"),
         ("Edge", "/edge"),
         ("Ops", "/ops"),
+        ("Intel", "/intel"),
+        ("Settings", "/settings"),
     ]
     nav = ""
     for label, href in pages:
         cls = ' class="active"' if href == active_page else ""
-        nav += f'<a href="{href}"{cls}>{label}</a>'
+        nav += f'<a href="{prefix}{href}"{cls}>{label}</a>'
 
     return f"""<!DOCTYPE html>
 <html lang="nl">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="refresh" content="30">
+  {"" if active_page == "/settings" else '<meta http-equiv="refresh" content="30">'}
   <title>Bottie — {active_page}</title>
   <style>{CSS}</style>
 </head>
@@ -1266,17 +1289,15 @@ def page_wrap(active_page, body_html):
 <div class="header">
   <h1>BOTTIE</h1>
   <div class="header-right">
-    <button onclick="location.reload()" style="background:var(--blue);color:#fff;border:none;border-radius:6px;padding:6px 14px;font-size:0.8rem;font-weight:600;cursor:pointer;margin-right:8px">&#x21BB; Refresh</button>
+    <button onclick="location.reload()" style="background:var(--blue);color:#fff;border:none;border-radius:6px;padding:6px 14px;font-size:0.8rem;font-weight:600;cursor:pointer;margin-right:8px">&#x21BB;</button>
     <span>{now_str}</span>
-    <span id="countdown">30</span>s
+    {"" if active_page == "/settings" else '<span id="countdown">30</span>s'}
   </div>
 </div>
 <div class="nav">{nav}</div>
 <div class="main">{body_html}</div>
 <script>
-let t = 30;
-const el = document.getElementById('countdown');
-if (el) setInterval(() => {{ el.textContent = --t; if(t<=0) location.reload(); }}, 1000);
+{"" if active_page == "/settings" else "let t = 30; const el = document.getElementById('countdown'); if (el) setInterval(() => { el.textContent = --t; if(t<=0) location.reload(); }, 1000);"}
 </script>
 </body>
 </html>"""
@@ -1317,28 +1338,369 @@ def render_strategy_summary(wallet_map):
     {sizing_info}"""
 
 
+def _load_cannae_slugs():
+    """Parse Cannae game slugs from bot logs (CANNAE GAMES output)."""
+    import subprocess
+    cannae_slugs = {}
+    try:
+        result = subprocess.run(
+            ["journalctl", "-u", "bottie", "--since", "60 min ago", "--no-pager"],
+            capture_output=True, text=True, timeout=10
+        )
+        for line in result.stdout.splitlines():
+            # Match: $   3538 | 7 legs (win+win+ou+ou+spread) | 15:15 UTC | win@5%+win@5%+draw@5% | es2-vld-bur-2026-03-28
+            if "legs (" in line and "|" in line:
+                parts = line.split("|")
+                if len(parts) >= 5:
+                    slug = parts[-1].strip()
+                    try:
+                        amount = float(parts[0].split("$")[1].strip())
+                    except:
+                        amount = 0
+                    legs = parts[1].strip()
+                    sizing = parts[3].strip() if len(parts) > 3 else ""
+                    cannae_slugs[slug] = {"amount": amount, "legs": legs, "sizing": sizing}
+    except:
+        pass
+    return cannae_slugs
+
+def render_live_board(trades):
+    """Live flight board — only Cannae games (not all PM scheduled games)."""
+    import os
+    schedule_file = BASE_DIR / "data" / "schedule_cache.json"
+
+    # Load Cannae's actual games from bot logs
+    cannae_slugs = _load_cannae_slugs()
+
+    games = []
+    if schedule_file.exists():
+        games = json.load(open(schedule_file))
+
+    now = datetime.now(timezone.utc)
+
+    # Build schedule lookup by slug
+    schedule_by_slug = {}
+    for g in games:
+        s = g.get("event_slug", "")
+        if s:
+            schedule_by_slug[s] = g
+
+    # Only show games that Cannae has positions in
+    upcoming = []
+    for slug, info in cannae_slugs.items():
+        sched = schedule_by_slug.get(slug)
+        if sched:
+            try:
+                start = datetime.fromisoformat(sched["start_time"].replace("Z", "+00:00"))
+            except:
+                start = now + timedelta(hours=12)  # unknown kickoff
+        else:
+            start = now + timedelta(hours=12)  # not in schedule
+
+        diff_min = (start - now).total_seconds() / 60
+        if diff_min < 24*60:  # within 24h
+            upcoming.append((slug, sched, start, diff_min, info))
+
+    upcoming.sort(key=lambda x: x[2])
+
+    if not upcoming:
+        return '<div class="empty">Geen Cannae games gevonden.</div>'
+
+    # Check which event_slugs already have fills
+    filled_slugs = set()
+    for t in trades:
+        if t.get("filled") and not t.get("dry_run") and t.get("event_slug"):
+            filled_slugs.add(t["event_slug"])
+
+    rows = ""
+    for slug, sched, start, diff_min, info in upcoming[:25]:
+        title = sched.get("title", slug) if sched else slug
+        league = slug.split("-")[0] if slug else ""
+        cannae_amt = info["amount"]
+        sizing = info["sizing"]
+
+        # Determine status
+        if diff_min < -120:
+            continue  # game ended long ago
+        elif diff_min < 0:
+            status = f'<span style="color:#3fb950">LIVE {abs(diff_min):.0f}min</span>'
+        elif diff_min < 10:
+            status = f'<span style="color:#f85149;font-weight:700">T-{diff_min:.0f}min!</span>'
+        elif diff_min < 30:
+            status = f'<span style="color:#f0883e">T-{diff_min:.0f}min</span>'
+        elif diff_min < 60:
+            status = f'<span style="color:#d29922">T-{diff_min:.0f}min</span>'
+        else:
+            hours = diff_min / 60
+            status = f'<span class="muted">{hours:.1f}h</span>'
+
+        # CET/CEST time
+        cet = start + timedelta(hours=1)
+        time_str = cet.strftime("%H:%M")
+
+        # Check if already filled
+        is_filled = slug in filled_slugs
+        fill_badge = ' <span class="badge green">FILLED</span>' if is_filled else ""
+
+        # Show sizing from bot logs (already computed)
+        if "SKIP" in sizing:
+            types_str = f'<span class="muted">SKIP</span>'
+        elif sizing:
+            types_str = sizing
+        else:
+            types_str = f'<span class="muted">—</span>'
+
+        row_style = 'opacity:0.5' if is_filled or "SKIP" in sizing else ''
+
+        rows += f"""
+        <tr style="{row_style}">
+          <td style="font-weight:600">{time_str}</td>
+          <td><span class="badge sport">{league}</span></td>
+          <td>{title}{fill_badge}</td>
+          <td>${cannae_amt:,.0f}</td>
+          <td>{types_str}</td>
+          <td>{status}</td>
+        </tr>"""
+
+    return f"""
+    <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>CET</th><th>League</th><th>Game</th><th>Cannae $</th><th>Onze Types</th><th>Status</th>
+      </tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+    </div>"""
+
+
+def render_bot_health(trades):
+    """Bot health bar — last activity, uptime indicator."""
+    import os
+
+    # Last trade timestamp
+    filled = [t for t in trades if t.get("filled") and not t.get("dry_run")]
+    last_trade_ts = max((t.get("timestamp", "") for t in filled), default="") if filled else ""
+
+    # Last trades.jsonl modification
+    trades_file = BASE_DIR / "data" / "trades.jsonl"
+    trades_age_min = 999
+    if trades_file.exists():
+        trades_age_min = (time.time() - os.path.getmtime(trades_file)) / 60
+
+    # Schedule cache age = proxy for "bot is polling"
+    schedule_file = BASE_DIR / "data" / "schedule_cache.json"
+    sched_age_min = 999
+    if schedule_file.exists():
+        sched_age_min = (time.time() - os.path.getmtime(schedule_file)) / 60
+
+    # Health status
+    # Schedule refreshes every 60min, trades.jsonl updates on fills
+    activity_age = min(sched_age_min, trades_age_min)
+    if activity_age < 70:
+        health = '<span style="color:#3fb950;font-weight:700">● ONLINE</span>'
+    elif activity_age < 120:
+        health = '<span style="color:#d29922;font-weight:700">● IDLE</span>'
+    else:
+        health = '<span style="color:#f85149;font-weight:700">● OFFLINE</span>'
+
+    # Last trade age
+    if last_trade_ts:
+        try:
+            lt = datetime.fromisoformat(last_trade_ts.replace("Z", "+00:00"))
+            age = datetime.now(timezone.utc) - lt
+            if age.total_seconds() < 3600:
+                trade_age = f"{age.total_seconds()/60:.0f}min geleden"
+            else:
+                trade_age = f"{age.total_seconds()/3600:.1f}h geleden"
+        except:
+            trade_age = last_trade_ts[:16]
+    else:
+        trade_age = "—"
+
+    return f"""
+    <div style="display:flex;gap:24px;align-items:center;padding:8px 16px;background:#161b22;border-radius:8px;margin-bottom:16px;font-size:13px">
+      <span>{health}</span>
+      <span class="muted">Laatste poll: {sched_age_min:.0f}min</span>
+      <span class="muted">Laatste trade: {trade_age}</span>
+      <span class="muted">Schedule: {sched_age_min:.0f}min oud</span>
+    </div>"""
+
+
+def render_daily_pnl(trades):
+    """Daily P&L breakdown — last 14 days."""
+    from collections import defaultdict
+
+    filled = [t for t in trades if t.get("filled") and not t.get("dry_run") and t.get("result") in ("win", "loss", "take_profit", "sold")]
+
+    by_day = defaultdict(lambda: {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0, "invested": 0.0})
+    for t in filled:
+        resolved = t.get("resolved_at") or t.get("timestamp") or ""
+        day = resolved[:10]
+        if not day: continue
+        by_day[day]["trades"] += 1
+        by_day[day]["pnl"] += t.get("actual_pnl") or t.get("pnl") or 0
+        by_day[day]["invested"] += t.get("size_usdc") or 0
+        if t.get("result") in ("win", "take_profit"):
+            by_day[day]["wins"] += 1
+        elif t.get("result") == "loss":
+            by_day[day]["losses"] += 1
+
+    if not by_day:
+        return '<div class="empty">Geen resolved trades.</div>'
+
+    # Sort by day descending, last 14 days
+    days = sorted(by_day.keys(), reverse=True)[:14]
+
+    cum_pnl = 0
+    # Calculate cumulative (need forward order)
+    all_days_asc = sorted(by_day.keys())
+    cum_by_day = {}
+    running = 0
+    for d in all_days_asc:
+        running += by_day[d]["pnl"]
+        cum_by_day[d] = running
+
+    rows = ""
+    for day in days:
+        d = by_day[day]
+        pnl = d["pnl"]
+        cum = cum_by_day.get(day, 0)
+        roi = (pnl / d["invested"] * 100) if d["invested"] > 0 else 0
+        pnl_color = "#3fb950" if pnl >= 0 else "#f85149"
+        cum_color = "#3fb950" if cum >= 0 else "#f85149"
+        wr = d["wins"] / d["trades"] * 100 if d["trades"] > 0 else 0
+        wr_color = "#3fb950" if wr >= 55 else "#f85149" if wr < 45 else "#d29922"
+
+        # Bar width (proportional, max 200px)
+        bar_width = min(200, abs(pnl) / 5)  # $5 per pixel
+        bar_color = "#3fb950" if pnl >= 0 else "#f85149"
+        bar = f'<div style="display:inline-block;height:12px;width:{bar_width}px;background:{bar_color};border-radius:2px"></div>'
+
+        rows += f"""
+        <tr>
+          <td style="font-weight:600">{day[5:]}</td>
+          <td>{d["trades"]}</td>
+          <td style="color:{wr_color}">{d["wins"]}W/{d["losses"]}L ({wr:.0f}%)</td>
+          <td style="color:{pnl_color};font-weight:600">${pnl:+.0f}</td>
+          <td>{bar}</td>
+          <td style="color:{cum_color}">${cum:+.0f}</td>
+        </tr>"""
+
+    return f"""
+    <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>Dag</th><th>Trades</th><th>W/L</th><th>P&L</th><th></th><th>Cum.</th>
+      </tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+    </div>"""
+
+
+def render_cannae_intel():
+    """Cannae intelligence summary from quant analysis report."""
+    report_file = BASE_DIR / "repo" / "research" / "cannae_quant_analysis" / "report.json"
+    # Also try relative path from /opt/bottie
+    if not report_file.exists():
+        report_file = Path("/opt/bottie/repo/research/cannae_quant_analysis/report.json")
+    if not report_file.exists():
+        return '<div class="empty">Geen Cannae rapport gevonden.</div>'
+
+    try:
+        r = json.load(open(report_file))
+    except:
+        return '<div class="empty">Cannae rapport onleesbaar.</div>'
+
+    gen = (r.get("generated_at") or "?")[:16]
+    dr = r.get("data_range", {})
+    overall = r.get("overall", {})
+
+    # Market type tiles
+    mt_html = ""
+    for k in ["win", "draw", "spread", "ou", "btts"]:
+        mt = r.get("by_market_type", {}).get(k, {})
+        if not mt: continue
+        wr = mt.get("wr", 0) * 100
+        roi = mt.get("roi", 0) * 100
+        pnl = mt.get("pnl", 0)
+        bets = mt.get("bets", 0)
+        wr_color = "#3fb950" if wr >= 60 else "#d29922" if wr >= 50 else "#f85149"
+        roi_color = "#3fb950" if roi >= 10 else "#d29922" if roi >= 0 else "#f85149"
+        mt_html += f"""
+        <div class="kpi-tile" style="border-top:3px solid {wr_color};flex:1">
+          <div class="kpi-label">{k.upper()}</div>
+          <div class="kpi-value" style="color:{wr_color}">{wr:.0f}% WR</div>
+          <div class="kpi-sub" style="color:{roi_color}">ROI {roi:+.0f}% | {bets} bets</div>
+        </div>"""
+
+    # Top leagues
+    leagues = r.get("by_league", {})
+    league_rows = ""
+    for lg, d in sorted(leagues.items(), key=lambda x: -x[1].get("pnl", 0))[:10]:
+        wr = d.get("wr", 0) * 100
+        roi = d.get("roi", 0) * 100
+        pnl = d.get("pnl", 0)
+        bets = d.get("bets", 0)
+        wr_color = "#3fb950" if wr >= 60 else "#f85149"
+        league_rows += f"""
+        <tr>
+          <td><span class="badge sport">{lg}</span></td>
+          <td>{bets}</td>
+          <td style="color:{wr_color}">{wr:.0f}%</td>
+          <td style="color:{"#3fb950" if roi > 0 else "#f85149"}">{roi:+.0f}%</td>
+          <td style="color:{"#3fb950" if pnl > 0 else "#f85149"}">${pnl:,.0f}</td>
+        </tr>"""
+
+    edge = r.get("edge_decay", {})
+    trend = edge.get("trend", "?")
+    trend_color = "#3fb950" if trend == "improving" else "#f85149" if trend == "declining" else "#d29922"
+
+    return f"""
+    <div style="margin-bottom:8px">
+      <span class="muted">Data: {dr.get("from","?")} — {dr.get("to","?")} | {r.get("resolved_bets",0)} bets | Updated: {gen}</span>
+    </div>
+    <div class="kpi-row">{mt_html}</div>
+    <div style="margin:12px 0">
+      <span>Edge trend: </span><span style="color:{trend_color};font-weight:600">{trend}</span>
+    </div>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>League</th><th>Bets</th><th>WR</th><th>ROI</th><th>PnL</th></tr></thead>
+      <tbody>{league_rows}</tbody>
+    </table>
+    </div>"""
+
+
 def render_overview(trades, wallet_map):
     kpis = compute_kpis(trades)
     sport_stats = compute_sport_stats(trades)
-    pnl_4h = compute_4h_pnl(trades)
 
-    body = render_kpi_row(kpis, wallet_map, trades)
+    body = render_bot_health(trades)
+    body += render_kpi_row(kpis, wallet_map, trades)
     body += f"""
+    <div class="section">
+      <div class="section-title">Live Board</div>
+      {render_live_board(trades)}
+    </div>
     <div class="section">
       <div class="section-title">Open Bets ({count_real_open_bets(trades)})</div>
       {render_open_bets(trades, wallet_map)}
     </div>
     <div class="section">
-      <div class="section-title">P&L per 4 uur (5d)</div>
-      {render_pnl_chart(pnl_4h)}
-    </div>
-    <div class="section">
-      <div class="section-title">Trade Log (laatste 30)</div>
-      {render_resolved_trades(trades, wallet_map, limit=30)}
+      <div class="section-title">Dagelijkse P&L</div>
+      {render_daily_pnl(trades)}
     </div>
     <div class="section">
       <div class="section-title">Per Sport</div>
       {render_sport_grid(sport_stats)}
+    </div>
+    <div class="section">
+      <div class="section-title">Cannae Intelligence</div>
+      {render_cannae_intel()}
+    </div>
+    <div class="section">
+      <div class="section-title">Trade Log (laatste 30)</div>
+      {render_resolved_trades(trades, wallet_map, limit=30)}
     </div>"""
     return page_wrap("/", body)
 
@@ -2224,40 +2586,205 @@ def render_ops_page(trades, wallet_map):
     return page_wrap("/ops", body)
 
 
+# ── Settings Page ─────────────────────────────────────────────────────────────
+
+WITHDRAW_WALLETS = {
+    "Koen": "0x87af7B1D1E76d218816313653a16183c9fa884a9",
+    "Liesbeth": "0xa6B2c1c45048998729411eEf1e3001e59364D8B3",
+}
+
+def render_settings_page(token=""):
+    prefix = f"/t/{token}" if token else ""
+    stop_url = f"{prefix}/stop"
+    transfer_url = f"{prefix}/transfer"
+
+    # Get current cash balance
+    pm = fetch_pm_data()
+    cash = pm.get("cash", 0)
+
+    # Bot status
+    bot_running = False
+    try:
+        import subprocess
+        result = subprocess.run(["systemctl", "is-active", "bottie"], capture_output=True, text=True, timeout=5)
+        bot_running = result.stdout.strip() == "active"
+    except Exception:
+        pass
+
+    status_color = "var(--green)" if bot_running else "var(--red)"
+    status_text = "ACTIVE" if bot_running else "STOPPED"
+
+    wallet_options = ""
+    for name, addr in WITHDRAW_WALLETS.items():
+        short = addr[:6] + "..." + addr[-4:]
+        wallet_options += f'<option value="{addr}">{name} ({short})</option>'
+
+    body = f"""
+    <div class="section">
+      <div class="section-title">Bot Control</div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:20px;margin-bottom:16px">
+        <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px">
+          <span style="font-size:0.9rem;font-weight:600">Status:</span>
+          <span style="color:{status_color};font-weight:700;font-size:0.9rem">{status_text}</span>
+        </div>
+        <button class="stop-btn" style="padding:10px 24px;font-size:0.9rem"
+          onclick="if(confirm('⚠️ STOP BOTTIE? Dit stopt alle trading.'))fetch('{stop_url}',{{method:'POST'}}).then(r=>r.text()).then(t=>{{alert(t);location.reload();}})">
+          ⏹ STOP BOT
+        </button>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Withdraw USDC</div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:20px">
+        <div style="margin-bottom:16px;font-size:0.85rem;color:var(--muted)">
+          Beschikbaar: <span style="color:var(--green);font-weight:700">${cash:.2f}</span> USDC
+        </div>
+
+        <div style="margin-bottom:16px">
+          <label style="font-size:0.8rem;font-weight:600;display:block;margin-bottom:6px">Bedrag (USDC)</label>
+          <input id="withdraw-amount" type="number" min="1" max="{cash:.0f}" step="0.01" placeholder="0.00"
+            style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 14px;color:var(--text);font-size:0.95rem;width:200px;font-family:monospace">
+          <div style="margin-top:8px;display:flex;gap:8px">
+            <button onclick="document.getElementById('withdraw-amount').value='{cash/4:.2f}'" style="background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:4px 10px;color:var(--muted);font-size:0.75rem;cursor:pointer">25%</button>
+            <button onclick="document.getElementById('withdraw-amount').value='{cash/2:.2f}'" style="background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:4px 10px;color:var(--muted);font-size:0.75rem;cursor:pointer">50%</button>
+            <button onclick="document.getElementById('withdraw-amount').value='{cash:.2f}'" style="background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:4px 10px;color:var(--muted);font-size:0.75rem;cursor:pointer">100%</button>
+          </div>
+        </div>
+
+        <div style="margin-bottom:20px">
+          <label style="font-size:0.8rem;font-weight:600;display:block;margin-bottom:6px">Naar wallet</label>
+          <select id="withdraw-wallet"
+            style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 14px;color:var(--text);font-size:0.9rem;width:320px">
+            {wallet_options}
+          </select>
+        </div>
+
+        <button id="transfer-btn" onclick="doTransfer()" style="background:var(--green);color:#fff;border:none;border-radius:6px;padding:10px 24px;font-size:0.9rem;font-weight:700;cursor:pointer">
+          Verstuur USDC
+        </button>
+        <div id="transfer-result" style="margin-top:12px;font-size:0.85rem"></div>
+      </div>
+    </div>
+
+    <script>
+    function doTransfer() {{
+      const amount = document.getElementById('withdraw-amount').value;
+      const wallet = document.getElementById('withdraw-wallet').value;
+      const btn = document.getElementById('transfer-btn');
+      const resultDiv = document.getElementById('transfer-result');
+
+      if (!amount || parseFloat(amount) <= 0) {{
+        resultDiv.innerHTML = '<span style="color:var(--red)">Vul een bedrag in</span>';
+        return;
+      }}
+
+      const walletName = document.getElementById('withdraw-wallet').selectedOptions[0].text;
+      if (!confirm('Verstuur $' + amount + ' USDC naar ' + walletName + '?')) return;
+
+      btn.disabled = true;
+      btn.textContent = 'Bezig...';
+      resultDiv.innerHTML = '<span style="color:var(--yellow)">Transactie wordt verstuurd...</span>';
+
+      fetch('{transfer_url}', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{amount: parseFloat(amount), to: wallet}})
+      }})
+      .then(r => r.json())
+      .then(data => {{
+        if (data.ok) {{
+          resultDiv.innerHTML = '<span style="color:var(--green)">✓ Verstuurd! TX: <a href="https://polygonscan.com/tx/' + data.tx_hash + '" target="_blank" style="color:var(--blue)">' + data.tx_hash.substring(0,16) + '...</a></span>';
+        }} else {{
+          resultDiv.innerHTML = '<span style="color:var(--red)">✗ ' + data.error + '</span>';
+        }}
+        btn.disabled = false;
+        btn.textContent = 'Verstuur USDC';
+      }})
+      .catch(e => {{
+        resultDiv.innerHTML = '<span style="color:var(--red)">✗ Fout: ' + e + '</span>';
+        btn.disabled = false;
+        btn.textContent = 'Verstuur USDC';
+      }});
+    }}
+    </script>"""
+
+    return page_wrap("/settings", body, token)
+
+
 # ── HTTP Server ───────────────────────────────────────────────────────────────
 
 class DashboardHandler(BaseHTTPRequestHandler):
+    def _check_auth(self):
+        """Extract token from /t/<token>/... path. Returns (page_path, token) or None."""
+        # Allow /t/<token>/ and /t/<token>/page paths
+        if self.path.startswith(f"/t/{AUTH_TOKEN}"):
+            rest = self.path[len(f"/t/{AUTH_TOKEN}"):]
+            if not rest or rest == "/":
+                return ("/", AUTH_TOKEN)
+            return (rest, AUTH_TOKEN)
+        # Also allow localhost without token (SSH tunnel)
+        host = self.headers.get("Host", "")
+        if host.startswith("localhost") or host.startswith("127.0.0.1"):
+            return (self.path, "")
+        return None
+
+    def _send_html(self, html, status=200):
+        body = html.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", len(body))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
-        if self.path in ("/", "/index.html", "/trades", "/wallets", "/edge", "/ops", "/strategy"):
+        auth = self._check_auth()
+        if auth is None:
+            self.send_response(403)
+            self.end_headers()
+            self.wfile.write(b"Forbidden")
+            return
+
+        page, token = auth
+
+        if page == "/settings":
+            try:
+                html = render_settings_page(token)
+                self._send_html(html)
+            except Exception as e:
+                import traceback
+                self._send_html(f"<pre>Error: {e}\n{traceback.format_exc()}</pre>", 500)
+        elif page in ("/", "/index.html", "/trades", "/wallets", "/edge", "/ops", "/strategy", "/intel"):
             try:
                 trades     = load_trades()
                 wallet_map = parse_config_wallets()
-                if self.path == "/trades":
+                if page == "/trades":
                     html = render_trades_page(trades, wallet_map)
-                elif self.path == "/wallets":
+                elif page == "/wallets":
                     html = render_wallets_page(trades, wallet_map)
-                elif self.path == "/edge":
+                elif page == "/edge":
                     html = render_edge_page(trades, wallet_map)
-                elif self.path == "/ops":
+                elif page == "/ops":
                     html = render_ops_page(trades, wallet_map)
-                elif self.path == "/strategy":
-                    # Legacy redirect — strategy content moved to /edge
+                elif page == "/strategy":
                     html = render_edge_page(trades, wallet_map)
+                elif page == "/intel":
+                    html = page_wrap("/intel", f"""
+    <div class="section">
+      <div class="section-title">Cannae Intelligence Report</div>
+      {render_cannae_intel()}
+    </div>""", token)
                 else:
                     html = render_overview(trades, wallet_map)
-                body = html.encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", len(body))
-                self.end_headers()
-                self.wfile.write(body)
+                # Inject token into page_wrap calls that don't have it yet
+                if token and f"/t/{token}" not in html:
+                    html = html.replace('href="/', f'href="/t/{token}/')
+                    html = html.replace("fetch('/", f"fetch('/t/{token}/")
+                self._send_html(html)
             except Exception as e:
-                err = f"<pre>Error: {e}</pre>".encode()
-                self.send_response(500)
-                self.send_header("Content-Type", "text/html")
-                self.end_headers()
-                self.wfile.write(err)
-        elif self.path == "/api/trades":
+                import traceback
+                self._send_html(f"<pre>Error: {e}\n{traceback.format_exc()}</pre>", 500)
+        elif page == "/api/trades":
             try:
                 trades = load_trades()
                 body = json.dumps(trades).encode("utf-8")
@@ -2269,6 +2796,92 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_response(500)
                 self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        auth = self._check_auth()
+        if auth is None:
+            self.send_response(403)
+            self.end_headers()
+            return
+
+        page, token = auth
+
+        if page == "/stop":
+            import subprocess
+            try:
+                subprocess.run(["systemctl", "stop", "bottie"], check=True, timeout=10)
+                # Send Telegram alert
+                import urllib.request
+                tg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+                tg_chat = os.environ.get("TELEGRAM_CHAT_ID", "")
+                if tg_token and tg_chat:
+                    msg = "⏹ BOTTIE STOPPED via dashboard noodstop"
+                    try:
+                        urllib.request.urlopen(urllib.request.Request(
+                            f"https://api.telegram.org/bot{tg_token}/sendMessage",
+                            data=f"chat_id={tg_chat}&text={msg}".encode(),
+                            headers={"Content-Type": "application/x-www-form-urlencoded"},
+                        ), timeout=5)
+                    except: pass
+                body = b"Bot gestopt. Herstart via SSH: systemctl start bottie"
+            except Exception as e:
+                body = f"Stop failed: {e}".encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", len(body))
+            self.end_headers()
+            self.wfile.write(body)
+        elif page == "/transfer":
+            import subprocess
+            try:
+                content_len = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(content_len) if content_len else b"{}"
+                data = json.loads(raw)
+                amount = float(data.get("amount", 0))
+                to_addr = data.get("to", "")
+
+                # Validate destination is in whitelist
+                valid_addrs = set(WITHDRAW_WALLETS.values())
+                if to_addr not in valid_addrs:
+                    raise ValueError(f"Onbekend wallet adres: {to_addr}")
+                if amount <= 0:
+                    raise ValueError("Bedrag moet > 0 zijn")
+
+                # Run transfer script
+                script = str(CODE_DIR / "scripts" / "transfer_usdc.py")
+                result = subprocess.run(
+                    ["python3", script, to_addr, str(amount)],
+                    capture_output=True, text=True, timeout=60,
+                    cwd=str(BASE_DIR),
+                )
+                resp = json.loads(result.stdout) if result.stdout.strip() else {"ok": False, "error": result.stderr or "No output"}
+
+                # Send Telegram notification on success
+                if resp.get("ok"):
+                    tg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+                    tg_chat = os.environ.get("TELEGRAM_CHAT_ID", "")
+                    wallet_name = next((n for n, a in WITHDRAW_WALLETS.items() if a == to_addr), to_addr[:10])
+                    if tg_token and tg_chat:
+                        msg = f"💸 USDC Transfer: ${amount:.2f} → {wallet_name}\nTX: https://polygonscan.com/tx/{resp.get('tx_hash', '')}"
+                        try:
+                            urllib.request.urlopen(urllib.request.Request(
+                                f"https://api.telegram.org/bot{tg_token}/sendMessage",
+                                data=f"chat_id={tg_chat}&text={msg}".encode(),
+                                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                            ), timeout=5)
+                        except: pass
+
+                body = json.dumps(resp).encode()
+            except Exception as e:
+                body = json.dumps({"ok": False, "error": str(e)}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", len(body))
+            self.end_headers()
+            self.wfile.write(body)
         else:
             self.send_response(404)
             self.end_headers()
