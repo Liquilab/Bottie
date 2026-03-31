@@ -199,20 +199,23 @@ def get_holders(condition_id: str) -> list:
 
 
 def scan_league_holders(league: str, events: list, max_events: int = 20) -> dict:
-    """Scan holders for events in a league. Returns {wallet: {count, names, events}}."""
-    wallet_stats = defaultdict(lambda: {"count": 0, "names": set(), "events": set()})
+    """Scan holders for events in a league. Returns {wallet: {count, names, events, conditions}}."""
+    wallet_stats = defaultdict(lambda: {"count": 0, "names": set(), "events": set(), "conditions": {}})
     scan = events[:max_events]
 
     for event in scan:
+        eslug = event.get("slug", "")
         for market in event.get("markets", []):
             cid = market.get("conditionId", "")
+            question = market.get("question", "")
             if not cid:
                 continue
             for h in get_holders(cid):
                 ws = wallet_stats[h["wallet"]]
                 ws["count"] += 1
                 ws["names"].add(h["name"])
-                ws["events"].add(event.get("slug", ""))
+                ws["events"].add(eslug)
+                ws["conditions"][cid] = {"event_slug": eslug, "question": question}
             time.sleep(0.1)
 
     # Filter: 5+ different events (3+ for tag-based sports with fewer events)
@@ -230,20 +233,234 @@ def scan_league_holders(league: str, events: list, max_events: int = 20) -> dict
 MAX_POSITIONS = 5000
 
 
+def fetch_targeted_conditions(wallet: str, known_conditions: dict) -> dict:
+    """Fetch wallet positions only for known conditions (bottom-up).
+
+    known_conditions: {conditionId: {event_slug, question}} from holders scan.
+    Only fetches conditions where we already know the wallet has a position.
+
+    Returns dict in same format as merge_positions: {key: {pnl, invested, title, event_slug}}
+    """
+    all_conds = {}
+    for cid, meta in known_conditions.items():
+        eslug = meta.get("event_slug", "")
+        question = meta.get("question", "")
+        try:
+            positions = fetch(f"{API}/positions?user={wallet}&market={cid}&sizeThreshold=0")
+            if not positions:
+                closed = fetch(f"{API}/closed-positions?user={wallet}&market={cid}")
+                positions = closed or []
+            for p in positions:
+                oi = str(p.get("outcomeIndex", ""))
+                key = f"{cid}_{oi}"
+                pnl = float(p.get("realizedPnl", 0) or 0)
+                cur_price = float(p.get("curPrice", 0) or 0)
+                size = float(p.get("size", 0) or 0)
+                avg_price = float(p.get("avgPrice", 0) or 0)
+                # Resolved loser: curPrice~0, size>0, no realizedPnl
+                if abs(pnl) < 0.001 and cur_price < 0.02 and size > 0 and avg_price > 0:
+                    pnl = -(size * avg_price)
+                invested = float(p.get("initialValue", 0) or 0)
+                if invested <= 0:
+                    invested = float(p.get("cashPaid", 0) or 0)
+                if invested <= 0:
+                    tb = float(p.get("totalBought", 0) or 0)
+                    invested = tb * avg_price if tb > 0 and avg_price > 0 else size * avg_price
+                all_conds[key] = {
+                    "pnl": pnl,
+                    "invested": max(invested, 0),
+                    "title": p.get("title", question) or "",
+                    "event_slug": p.get("eventSlug", eslug) or eslug,
+                }
+        except Exception:
+            pass
+        time.sleep(0.05)
+    return all_conds
+
+
+def analyse_candidate_targeted(wallet: str, name: str, sport: str, league_events_map: dict,
+                               all_conds_cache: dict, known_conditions: dict = None) -> dict | None:
+    """Targeted analysis for tag-based sports (tennis, esports).
+
+    Instead of fetching the entire wallet (which fails for mega-traders),
+    fetch only positions in the known conditions from the holders scan.
+    """
+    lb_profit = get_lb_profit(wallet)
+
+    if not known_conditions:
+        print(f"    ✗ {name}: no known conditions", flush=True)
+        return None
+
+    print(f"    fetching {len(known_conditions)} conditions targeted...", flush=True)
+    all_conds = fetch_targeted_conditions(wallet, known_conditions)
+
+    if not all_conds:
+        print(f"    ✗ {name}: no positions found in {sport} events", flush=True)
+        return None
+
+    # Both-sides filter on sport conditions only
+    bs_pct = both_sides_pct(all_conds)
+    if bs_pct > 0.3:
+        print(f"    ✗ {name}: REJECTED L7 — both sides {bs_pct:.0%} > 30%", flush=True)
+        return None
+
+    # Cache for sport-level aggregation
+    all_conds_cache[wallet] = (all_conds, lb_profit, None)
+
+    # Per-league analysis (same as standard path from layer 4 onwards)
+    league_results = {}
+
+    for league, events in league_events_map.items():
+        league_slugs = {e.get("slug", "") for e in events}
+
+        # Filter conditions to this league
+        league_conds = {k: v for k, v in all_conds.items() if v.get("event_slug", "") in league_slugs}
+
+        if not league_conds:
+            continue
+
+        # Layer 4: resolved ratio
+        total_conds = len(league_conds)
+        resolved = sum(1 for e in league_conds.values() if abs(e["pnl"]) > 0.001)
+        resolved_ratio = resolved / total_conds if total_conds > 0 else 0
+
+        # Layer 5: sliding WR cap
+        wr_cap = sliding_wr_cap(resolved_ratio)
+        if wr_cap == 0:
+            league_results[league] = {
+                "status": "REJECTED",
+                "reason": f"L4/L5: resolved ratio {resolved_ratio:.0%} < 50%",
+                "resolved_ratio": round(resolved_ratio, 2),
+            }
+            continue
+
+        # Hauptbet analysis — pass sport for classify_sport, but conditions are already filtered
+        hb = hauptbet_analysis(league_conds, sport)
+        if hb["games"] == 0:
+            # For tag-based sports, hauptbet may fail on classify_sport.
+            # Fallback: manual aggregation since conditions are already sport-filtered.
+            hb = _manual_hauptbet(league_conds)
+            if hb["games"] == 0:
+                continue
+
+        # Layer 5: check WR against cap
+        if hb["wr"] > wr_cap:
+            league_results[league] = {
+                "status": "REJECTED",
+                "reason": f"L5: WR {hb['wr']}% > cap {wr_cap}% (resolved {resolved_ratio:.0%})",
+                "resolved_ratio": round(resolved_ratio, 2),
+                "wr": hb["wr"],
+                "wr_cap": wr_cap,
+                "games": hb["games"],
+            }
+            continue
+
+        # Tier config
+        tier = get_tier(league)
+        cfg = tier_config(tier)
+
+        # Min games check
+        if hb["games"] < cfg["min_league"]:
+            league_results[league] = {
+                "status": "REJECTED",
+                "reason": f"games {hb['games']} < min {cfg['min_league']} (tier {tier})",
+                "games": hb["games"],
+            }
+            continue
+
+        # ROI check
+        if hb["roi"] <= 0:
+            league_results[league] = {
+                "status": "REJECTED",
+                "reason": f"ROI {hb['roi']}% ≤ 0",
+                "games": hb["games"],
+                "roi": hb["roi"],
+            }
+            continue
+
+        league_results[league] = {
+            "status": "PASS",
+            "games": hb["games"],
+            "wins": hb["wins"],
+            "losses": hb["losses"],
+            "wr": hb["wr"],
+            "roi": hb["roi"],
+            "pnl": hb["pnl"],
+            "invested": hb["invested"],
+            "per_line": hb.get("per_line", {}),
+            "resolved_ratio": round(resolved_ratio, 2),
+            "wr_cap": wr_cap,
+            "tier": tier,
+        }
+
+    if not any(r.get("status") == "PASS" for r in league_results.values()):
+        reasons = "; ".join(f"{l}: {r.get('reason', '?')}" for l, r in league_results.items())
+        print(f"    ✗ {name}: no passing leagues — {reasons}", flush=True)
+        return None
+
+    return {
+        "wallet": wallet,
+        "name": name,
+        "lb_total_pnl": round(lb_profit, 2) if lb_profit else None,
+        "sanity_gap": None,
+        "both_sides_pct": round(bs_pct, 3),
+        "sell_ratio": 0,
+        "leagues": league_results,
+    }
+
+
+def _manual_hauptbet(conds: dict) -> dict:
+    """Fallback hauptbet for tag-based sports where classify_sport fails.
+
+    Groups by event_slug, picks max invested leg per event.
+    """
+    games = {}
+    for key, entry in conds.items():
+        slug = entry.get("event_slug", "") or entry.get("title", "")
+        if not slug:
+            continue
+        if slug not in games:
+            games[slug] = []
+        games[slug].append(entry)
+
+    wins, losses, total_pnl, total_inv = 0, 0, 0.0, 0.0
+    for slug, legs in games.items():
+        hb = max(legs, key=lambda l: l["invested"])
+        total_pnl += hb["pnl"]
+        total_inv += hb["invested"]
+        if hb["pnl"] > 0:
+            wins += 1
+        else:
+            losses += 1
+
+    n = wins + losses
+    return {
+        "games": n,
+        "wins": wins,
+        "losses": losses,
+        "wr": round(wins / n * 100, 1) if n > 0 else 0,
+        "roi": round(total_pnl / total_inv * 100, 1) if total_inv > 0 else 0,
+        "pnl": round(total_pnl, 2),
+        "invested": round(total_inv, 2),
+        "per_line": {},
+    }
+
+
 def analyse_candidate(wallet: str, name: str, sport: str, league_events_map: dict,
                       all_conds_cache: dict) -> dict | None:
     """Full 8-layer anti-bias analysis on one wallet.
 
     Returns dict with per-league results, or None if rejected.
     """
-    # Quick OOM check
-    try:
-        probe = fetch(f"{API}/positions?user={wallet}&limit=1&offset={MAX_POSITIONS}&sizeThreshold=0")
-        if probe and len(probe) > 0:
-            print(f"    ✗ {name}: SKIP — >{MAX_POSITIONS} positions", flush=True)
-            return None
-    except Exception:
-        pass
+    # Quick OOM check (skip for tag-based sports — broad traders may still be sport specialists)
+    if sport not in TAG_BASED_SPORTS:
+        try:
+            probe = fetch(f"{API}/positions?user={wallet}&limit=1&offset={MAX_POSITIONS}&sizeThreshold=0")
+            if probe and len(probe) > 0:
+                print(f"    ✗ {name}: SKIP — >{MAX_POSITIONS} positions", flush=True)
+                return None
+        except Exception:
+            pass
 
     # Fetch once (layers 1+2)
     try:
@@ -534,7 +751,7 @@ def scan_sport(sport: str, target_league: str | None = None, parallel: int = 3, 
 
     # Step 2: Scan holders per league
     print(f"\nStep 2: Scanning holders per league...", flush=True)
-    all_candidates = defaultdict(lambda: {"names": set(), "events": set(), "leagues": set()})
+    all_candidates = defaultdict(lambda: {"names": set(), "events": set(), "leagues": set(), "conditions": {}})
 
     for league, events in sorted(leagues.items()):
         holders = scan_league_holders(league, events, max_events=20)
@@ -544,6 +761,7 @@ def scan_sport(sport: str, target_league: str | None = None, parallel: int = 3, 
             ac["names"].update(stats["names"])
             ac["events"].update(stats["events"])
             ac["leagues"].add(league)
+            ac["conditions"].update(stats.get("conditions", {}))
 
     # Pre-filter: lb-api profit > 0
     print(f"\nStep 2b: Pre-filter {len(all_candidates)} candidates via lb-api...", flush=True)
@@ -581,7 +799,13 @@ def scan_sport(sport: str, target_league: str | None = None, parallel: int = 3, 
         wallet, name, stats = item
         leagues_str = ",".join(sorted(stats["leagues"]))
         print(f"  → {name[:25]} ({len(stats['events'])} events, leagues: {leagues_str})...", flush=True)
-        result = analyse_candidate(wallet, name, sport, league_events_map, all_conds_cache)
+        if sport in TAG_BASED_SPORTS:
+            result = analyse_candidate_targeted(
+                wallet, name, sport, league_events_map, all_conds_cache,
+                known_conditions=stats.get("conditions", {}),
+            )
+        else:
+            result = analyse_candidate(wallet, name, sport, league_events_map, all_conds_cache)
         if result:
             passing = [l for l, r in result["leagues"].items() if r.get("status") == "PASS"]
             for l in passing:
