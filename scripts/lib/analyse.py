@@ -11,7 +11,9 @@ Verified 2026-03-30:
 """
 
 import json
+import re
 import urllib.request
+from collections import defaultdict
 
 API = "https://data-api.polymarket.com"
 HEADERS = {"User-Agent": "B/1", "Accept": "application/json"}
@@ -54,7 +56,6 @@ MLB_TEAMS = {"yankees", "dodgers", "mets", "braves", "astros", "phillies", "padr
 
 def _slug_looks_like_game(slug: str) -> bool:
     """Check if slug looks like a game market (has date or 'vs'/'v-')."""
-    import re
     return bool(re.search(r"\d{4}-\d{2}-\d{2}|\bvs?\b|v-", slug))
 
 
@@ -331,11 +332,13 @@ def hauptbet_analysis(all_conds: dict, target_sport: str) -> dict:
 MAX_SANITY_GAP_PCT = 30  # Refuse results if merge vs lb-api gap exceeds this
 
 
-def fetch_and_merge(address: str) -> tuple:
+def fetch_and_merge(address: str, *, require_lb: bool = True) -> tuple:
     """Fetch ALL data for a wallet and merge. Returns (all_conds, lb_profit, sanity_gap).
 
     This is the ONLY way to get wallet data. No limits, no shortcuts.
-    Raises ValueError if sanity check fails (gap > MAX_SANITY_GAP_PCT).
+    Raises ValueError if:
+    - sanity check fails (gap > MAX_SANITY_GAP_PCT)
+    - lb-api data missing and require_lb=True (default)
     """
     open_pos = get_all_positions(address)
     closed_pos = get_closed_positions(address)
@@ -344,7 +347,15 @@ def fetch_and_merge(address: str) -> tuple:
 
     merge_total = sum(e["pnl"] for e in all_conds.values())
     sanity_gap = None
-    if lb_profit is not None and abs(lb_profit) > 1:
+
+    if lb_profit is None or abs(lb_profit) <= 1:
+        if require_lb:
+            raise ValueError(
+                f"NO LB DATA: wallet not on leaderboard (merge PnL ${merge_total:+,.0f}). "
+                f"Cannot verify data completeness — wallet REJECTED. "
+                f"{len(closed_pos)} closed, {len(open_pos)} positions."
+            )
+    else:
         sanity_gap = round(abs(merge_total - lb_profit) / abs(lb_profit) * 100, 1)
         if sanity_gap > MAX_SANITY_GAP_PCT:
             raise ValueError(
@@ -398,3 +409,60 @@ def analyse_wallet(address: str, target_sport: str) -> dict:
         "merge_total_pnl": round(merge_total, 2),
         "sanity_gap_pct": sanity_gap,
     }
+
+
+# --- Anti-bias helpers (league scanner) ---
+
+def is_match_event(slug: str, markets_count: int) -> bool:
+    """True als event een wedstrijd is (niet futures/outright).
+
+    Match events have a date in the slug and few markets (≤8).
+    Futures like "Will X win the World Cup?" have no date and/or many markets.
+    """
+    has_date = bool(re.search(r"\d{4}-\d{2}-\d{2}", slug))
+    return has_date and markets_count <= 8
+
+
+def both_sides_pct(all_conds: dict) -> float:
+    """Fractie conditionIds waar wallet BEIDE outcomes heeft (market maker signal).
+
+    If >30% of conditions have both sides, wallet is likely a market maker, not predictor.
+    """
+    cids = defaultdict(set)
+    for key in all_conds:
+        parts = key.rsplit("_", 1)
+        if len(parts) == 2:
+            cid, outcome_idx = parts
+            cids[cid].add(outcome_idx)
+    if not cids:
+        return 0.0
+    return sum(1 for outcomes in cids.values() if len(outcomes) > 1) / len(cids)
+
+
+def sell_ratio(positions: list) -> float:
+    """Gemiddelde totalSold/totalBought over alle posities.
+
+    High sell ratio (>0.3) = trader who sells before resolution, not a predictor.
+    """
+    ratios = []
+    for p in positions:
+        bought = float(p.get("totalBought", 0) or 0)
+        sold = float(p.get("totalSold", 0) or 0)
+        if bought > 0:
+            ratios.append(sold / bought)
+    return sum(ratios) / len(ratios) if ratios else 0.0
+
+
+def sliding_wr_cap(resolved_ratio: float) -> int:
+    """Max toegestane WR gegeven resolved ratio.
+
+    Lower resolved ratio → more conservative WR cap (survivorship bias protection).
+    Returns 0 = REJECT (too uncertain).
+    """
+    if resolved_ratio >= 0.8:
+        return 75
+    if resolved_ratio >= 0.6:
+        return 65
+    if resolved_ratio >= 0.5:
+        return 55
+    return 0  # reject

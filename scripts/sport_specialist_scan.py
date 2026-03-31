@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from lib.analyse import (
     fetch_and_merge, hauptbet_analysis, classify_sport,
     fetch, API,
+    is_match_event, both_sides_pct, sell_ratio, sliding_wr_cap,
 )
 
 EXCLUDE = {
@@ -122,8 +123,8 @@ def scan_holders(sport):
                 total_markets += 1
                 time.sleep(0.1)  # Rate limit
 
-    # Filter: 3+ different events (lower threshold for broader coverage)
-    frequent = {w: s for w, s in wallet_stats.items() if len(s["events"]) >= 3}
+    # Filter: 5+ different events (must be recurring bettor, not tourist)
+    frequent = {w: s for w, s in wallet_stats.items() if len(s["events"]) >= 5}
     for s in frequent.values():
         s["names"] = list(s["names"])
         s["events"] = list(s["events"])
@@ -149,11 +150,21 @@ def analyse_wallet_for_sport(wallet, name, sport):
         all_conds, lb_profit, sanity_gap, _ = fetch_and_merge(wallet)
         sport_conds = {k: v for k, v in all_conds.items()
                        if classify_sport(v["title"], v.get("event_slug", "")) == sport}
-        if len(sport_conds) < 5:
+        if len(sport_conds) < 10:
             return None
 
         hb = hauptbet_analysis(sport_conds, sport)
-        if hb["games"] < 10:
+        if hb["games"] < 30:
+            # 30+ games minimum for statistical significance
+            return None
+        if hb["roi"] <= 0:
+            # Must be profitable on this sport
+            return None
+
+        # Concentration check: sport must be >20% of total conditions
+        sport_pct = len(sport_conds) / max(len(all_conds), 1) * 100
+        if sport_pct < 5:
+            print(f"    ✗ {name}: SKIP — only {sport_pct:.0f}% of trades in {sport} (tourist)", flush=True)
             return None
 
         return {
@@ -171,6 +182,7 @@ def analyse_wallet_for_sport(wallet, name, sport):
             "lb_total_pnl": round(lb_profit, 2) if lb_profit else None,
             "sanity_gap": sanity_gap,
             "total_conditions": len(all_conds),
+            "sport_concentration_pct": round(sport_pct, 1),
         }
     except ValueError as e:
         print(f"    ⚠️ {name}: BIAS REJECTED — {e}", flush=True)

@@ -18,7 +18,8 @@ WATCHLIST = [
     {"name": "beachboy4", "address": "0xc2e7800b5af46e6093872b177b7a5e7f0563be51", "sport": "football", "status": "watching"},
     {"name": "ewelmealt", "address": "0x07921379f7b31ef93da634b688b2fe36897db778", "sport": "football", "status": "live_1pct"},
     {"name": "Blessed-Sunshine", "address": "0x59a0744db1f39ff3afccd175f80e6e8dfc239a09", "sport": "nba", "status": "watching"},
-    {"name": "CERTuo", "address": "0xf195721ad850377c96cd634457c70cd9e8308057", "sport": "nhl", "status": "watching"},
+    # CERTuo REMOVED 2026-03-31: not on leaderboard, sanity check impossible.
+    # stakesroyale is the proper NHL scan winner (371g, 9.2% ROI, 2.6% gap) if NHL is re-enabled.
 ]
 
 
