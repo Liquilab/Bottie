@@ -16,7 +16,7 @@ mod sports;
 mod stability;
 mod sync;
 mod wallet_tracker;
-mod watchlist_refresh;
+
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,7 +26,7 @@ use alloy_signer_local::PrivateKeySigner;
 use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::sync::RwLock;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use tracing::{error, info, warn};
 
 use crate::clob::client::ClobClient;
@@ -317,10 +317,6 @@ async fn copy_trading_loop(
     let mut watched_games: Vec<scheduler::WatchedGame> = Vec::new(); // continuously discovered, waiting for T-5
     let mut t5_executed: HashSet<String> = HashSet::new(); // event_slugs already bought
 
-    // RUS-278: Pre-computed ROI cache — refreshed every 20 polls (~5 min), NOT per candidate.
-    let mut roi_cache: HashMap<(String, String), f64> = HashMap::new();
-    let mut polls_since_roi_refresh: u32 = 20; // Force immediate refresh on first cycle
-
     // Cannae position summary: log every ~30 min (120 polls × 15s = 30 min)
     let cannae_summary_every_n: u32 = 120;
     let mut polls_since_cannae_summary: u32 = cannae_summary_every_n; // Force immediate on first cycle
@@ -357,54 +353,6 @@ async fn copy_trading_loop(
             }
         }
 
-        // RUS-278: Refresh ROI cache periodically (every 20 polls = ~5 min)
-        polls_since_roi_refresh += 1;
-        if polls_since_roi_refresh >= 20 {
-            polls_since_roi_refresh = 0;
-            let cfg = config.read().await;
-            let conflict_cfg = &cfg.copy_trading.conflict_resolution;
-            let min_trades = conflict_cfg.min_trades_for_live_roi;
-
-            let live_roi = logger.compute_wallet_roi();
-
-            // Canonicalize market type names: logger uses "total"/"moneyline",
-            // CopyTrader uses "ou"/"win". Normalize to CopyTrader names.
-            let canonical_mt = |mt: &str| -> String {
-                match mt {
-                    "total" => "ou".to_string(),
-                    "moneyline" => "win".to_string(),
-                    other => other.to_string(),
-                }
-            };
-
-            roi_cache.clear();
-            for ((wallet, mt), (roi, count)) in &live_roi {
-                if *count >= min_trades {
-                    roi_cache.insert((wallet.to_lowercase(), canonical_mt(mt)), *roi);
-                }
-            }
-
-            // Fill in seed rankings for wallets without enough live data
-            for wallet_entry in &cfg.copy_trading.watchlist {
-                let name = wallet_entry.name.to_lowercase();
-                for mt in &["spread", "ou", "win", "ml", "draw"] {
-                    let key = (name.clone(), mt.to_string());
-                    if !roi_cache.contains_key(&key) {
-                        if let Some(rank) = conflict_cfg.seed_rank(&wallet_entry.name, mt) {
-                            roi_cache.insert(key, 100.0 - rank as f64);
-                        }
-                    }
-                }
-            }
-
-            drop(cfg);
-            info!(
-                "ROI CACHE: refreshed — {} entries ({} from live data)",
-                roi_cache.len(),
-                live_roi.values().filter(|(_, count)| *count >= 20).count()
-            );
-        }
-
         // Poll for new copy signals
         let (_copy_signals, raw_positions) = copy_trader.poll().await;
 
@@ -431,12 +379,12 @@ async fn copy_trading_loop(
             // Refresh budget config in case of hot-reload
             wave_budget.update_config(config.read().await.sport_sizing.clone());
 
-            // Collect Cannae positions (first wallet = Cannae)
+            // Collect positions from the primary wallet (first in watchlist)
             let cannae_positions: Vec<_> = raw_positions
                 .iter()
-                .filter(|(_, name, _)| name.eq_ignore_ascii_case("Cannae"))
-                .flat_map(|(_, _, positions)| positions.clone())
-                .collect();
+                .next()
+                .map(|(_, _, positions)| positions.clone())
+                .unwrap_or_default();
 
             wave_budget.refresh_from_positions(&cannae_positions);
 
@@ -579,53 +527,35 @@ async fn execute_stable_game(
         return false;
     }
 
-    // Group all positions by conditionId, pick hauptbet (largest USDC) per conditionId
-    let mut best_per_cid: std::collections::HashMap<
-        String,
-        &crate::clob::types::WalletPosition,
-    > = std::collections::HashMap::new();
-
-    for pos in &game.positions {
-        let cid = pos.condition_id.as_deref().unwrap_or("");
-        if cid.is_empty() { continue; }
-        let entry = best_per_cid.entry(cid.to_string()).or_insert(pos);
-        if pos.initial_value_f64() > entry.initial_value_f64() {
-            *entry = pos;
+    // Min Cannae game total filter (e.g. NHL only when Cannae invests >= $1000)
+    if let Some(&min_usdc) = sport_sizing.min_cannae_game_usdc.get(league) {
+        let game_total: f64 = game.positions.iter().map(|p| p.current_value_f64()).sum();
+        if game_total < min_usdc {
+            info!("GAME SKIP: {} — Cannae game total ${:.0} < min ${:.0} for {}",
+                game.event_slug, game_total, min_usdc, league);
+            return false;
         }
     }
 
-    // Collect ALL hauptbets per conditionId with their game line type and outcome
-    struct HauptbetInfo<'a> {
-        pos: &'a crate::clob::types::WalletPosition,
-        game_line: String,
-        outcome_is_yes: bool,
-        usdc: f64,
+    // Log ALL positions for this game (T5 debug)
+    info!("T5 POSITIONS: {} — {} positions:", game.event_slug, game.positions.len());
+    for pos in &game.positions {
+        let title = pos.title.as_deref().unwrap_or("?");
+        let outcome = pos.outcome.as_deref().unwrap_or("?");
+        let cid = pos.condition_id.as_deref().unwrap_or("?");
+        let iv = pos.initial_value_f64();
+        let cv = pos.current_value_f64();
+        let cp = pos.cur_price_f64();
+        let sz = pos.size_f64();
+        let ap = pos.avg_price_f64();
+        info!("  {} {} | iv=${:.0} cv=${:.0} | {:.0}sh @ {:.2}ct (cur {:.2}ct) | cid={}..{} | {}",
+            outcome, CopyTrader::detect_market_type(title),
+            iv, cv, sz, ap * 100.0, cp * 100.0,
+            &cid[..cid.len().min(8)], &cid[cid.len().saturating_sub(4)..],
+            &title[..title.len().min(50)]);
     }
 
-    let mut all_hauptbets: Vec<HauptbetInfo> = Vec::new();
-    for pos in best_per_cid.values() {
-        let title = pos.title.as_deref().unwrap_or("");
-        let gl = CopyTrader::detect_market_type(title);
-        let outcome = pos.outcome.as_deref().unwrap_or("");
-        let is_yes = outcome.eq_ignore_ascii_case("Yes")
-            || (!outcome.eq_ignore_ascii_case("No") && !outcome.eq_ignore_ascii_case("Under") && !outcome.eq_ignore_ascii_case("Over"));
-        all_hauptbets.push(HauptbetInfo {
-            pos,
-            game_line: gl,
-            outcome_is_yes: is_yes,
-            usdc: pos.initial_value_f64(),
-        });
-    }
-
-    // Separate by game line type
-    let ml_bets: Vec<&HauptbetInfo> = all_hauptbets.iter().filter(|h| h.game_line == "win").collect();
-    let draw_bets: Vec<&HauptbetInfo> = all_hauptbets.iter().filter(|h| h.game_line == "draw").collect();
-    let spread_bets: Vec<&HauptbetInfo> = all_hauptbets.iter().filter(|h| h.game_line == "spread").collect();
-
-    // Find the overall largest position (determines mode)
-    let overall_largest = all_hauptbets.iter().max_by(|a, b| a.usdc.partial_cmp(&b.usdc).unwrap_or(std::cmp::Ordering::Equal));
-    let is_football = !matches!(league, "nba" | "nhl" | "mlb" | "nfl" | "cbb" | "ncaa");
-
+    // Classify all positions by game line, using currentValue for hauptbet selection
     struct GameLineBet<'a> {
         pos: &'a crate::clob::types::WalletPosition,
         game_line: String,
@@ -634,105 +564,89 @@ async fn execute_stable_game(
 
     let bankroll = risk.read().await.bankroll();
     let mut bets: Vec<GameLineBet> = Vec::new();
+    let is_football = !matches!(league, "nba" | "nhl" | "mlb" | "nfl" | "cbb" | "ncaa");
 
-    if is_football {
-        // Football conviction logic:
-        // 1. Find ML hauptbet (largest "win" position)
-        // 2. Find Draw hauptbet (largest "draw" position)
-        // 3. Determine mode based on which is the overall largest
+    // Per allowed game line: find hauptbet (highest currentValue)
+    for &gl in &allowed_lines {
+        let hauptbet = game.positions.iter()
+            .filter(|p| {
+                let title = p.title.as_deref().unwrap_or("");
+                CopyTrader::detect_market_type(title) == gl
+            })
+            .max_by(|a, b| a.current_value_f64().partial_cmp(&b.current_value_f64()).unwrap_or(std::cmp::Ordering::Equal));
 
-        let ml_hauptbet = ml_bets.iter().max_by(|a, b| a.usdc.partial_cmp(&b.usdc).unwrap_or(std::cmp::Ordering::Equal));
-        let draw_hauptbet = draw_bets.iter().max_by(|a, b| a.usdc.partial_cmp(&b.usdc).unwrap_or(std::cmp::Ordering::Equal));
-
-        // Collect all ML NO bets (for draw mode: Team X NO + Team Y NO)
-        let ml_no_bets: Vec<&&HauptbetInfo> = ml_bets.iter().filter(|h| !h.outcome_is_yes).collect();
-        // Collect ML YES bets
-        let ml_yes_bets: Vec<&&HauptbetInfo> = ml_bets.iter().filter(|h| h.outcome_is_yes).collect();
-
-        let draw_is_largest = if let (Some(d), Some(m)) = (draw_hauptbet, ml_hauptbet) {
-            d.usdc > m.usdc
-        } else {
-            false
-        };
-
-        let mode;
-
-        if draw_is_largest {
-            // DRAW MODE: Draw YES is the largest bet in the game
-            // → Buy Draw YES + all ML NOs (Team X NO + Team Y NO)
-            mode = "DRAW";
-            if let Some(d) = draw_hauptbet {
-                if d.outcome_is_yes {
-                    let pct = wave_budget.get_line_pct(bankroll, league, "draw");
-                    if pct > 0.0 {
-                        bets.push(GameLineBet { pos: d.pos, game_line: "draw".to_string(), size_pct: pct });
-                    }
-                }
+        if let Some(pos) = hauptbet {
+            let pct = wave_budget.get_line_pct(bankroll, league, gl);
+            if pct > 0.0 {
+                bets.push(GameLineBet { pos, game_line: gl.to_string(), size_pct: pct });
             }
-            // Add all ML NO bets (at draw wins, NO also wins)
-            for no_bet in &ml_no_bets {
-                let pct = wave_budget.get_line_pct(bankroll, league, "win");
-                if pct > 0.0 {
-                    bets.push(GameLineBet { pos: no_bet.pos, game_line: "win".to_string(), size_pct: pct });
-                }
-            }
-        } else if let Some(ml) = ml_hauptbet {
-            // ML is largest. Check for conviction.
-            // Conviction: ML Team X YES + at least one ML Team Y NO + Draw NO
-            let has_ml_no = !ml_no_bets.is_empty();
-            let has_draw_no = draw_hauptbet.map(|d| !d.outcome_is_yes).unwrap_or(false);
+        }
+    }
 
-            if ml.outcome_is_yes && has_ml_no && has_draw_no {
-                // CONVICTION: Team X YES + Team Y NO + Draw NO → all back Team X winning
-                mode = "CONVICTION";
-                // Buy ML hauptbet (Team X YES)
-                let pct = wave_budget.get_line_pct(bankroll, league, "win");
-                if pct > 0.0 {
-                    bets.push(GameLineBet { pos: ml.pos, game_line: "win".to_string(), size_pct: pct });
-                }
-                // Buy all ML NOs
-                for no_bet in &ml_no_bets {
+    // Football conviction: if win hauptbet is YES AND Draw NO > Draw YES → add extra legs
+    if is_football && !bets.is_empty() {
+        let win_hauptbet = bets.iter().find(|b| b.game_line == "win");
+        if let Some(win_bet) = win_hauptbet {
+            let win_outcome = win_bet.pos.outcome.as_deref().unwrap_or("");
+            let win_is_yes = win_outcome.eq_ignore_ascii_case("Yes")
+                || (!win_outcome.eq_ignore_ascii_case("No")
+                    && !win_outcome.eq_ignore_ascii_case("Under")
+                    && !win_outcome.eq_ignore_ascii_case("Over"));
+
+            if win_is_yes {
+                // Check draw: is Draw NO > Draw YES?
+                let draw_positions: Vec<_> = game.positions.iter()
+                    .filter(|p| CopyTrader::detect_market_type(p.title.as_deref().unwrap_or("")) == "draw")
+                    .collect();
+                let draw_no_cv: f64 = draw_positions.iter()
+                    .filter(|p| p.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No"))
+                    .map(|p| p.current_value_f64())
+                    .sum();
+                let draw_yes_cv: f64 = draw_positions.iter()
+                    .filter(|p| p.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("Yes"))
+                    .map(|p| p.current_value_f64())
+                    .sum();
+
+                if draw_no_cv > draw_yes_cv {
+                    // CONVICTION: win hauptbet is YES + draw NO > draw YES
+                    // Add: Team B NO (all win-line NOs that aren't the hauptbet)
+                    let win_cid = win_bet.pos.condition_id.as_deref().unwrap_or("");
                     let pct = wave_budget.get_line_pct(bankroll, league, "win");
-                    if pct > 0.0 {
-                        bets.push(GameLineBet { pos: no_bet.pos, game_line: "win".to_string(), size_pct: pct });
+                    for pos in &game.positions {
+                        let title = pos.title.as_deref().unwrap_or("");
+                        if CopyTrader::detect_market_type(title) != "win" { continue; }
+                        let cid = pos.condition_id.as_deref().unwrap_or("");
+                        if cid == win_cid { continue; } // skip same condition as hauptbet
+                        let outcome = pos.outcome.as_deref().unwrap_or("");
+                        if !outcome.eq_ignore_ascii_case("No") { continue; }
+                        // Find the NO with highest currentValue for this conditionId
+                        let already_added = bets.iter().any(|b| {
+                            b.pos.condition_id.as_deref().unwrap_or("") == cid
+                        });
+                        if already_added { continue; }
+                        if pct > 0.0 {
+                            bets.push(GameLineBet { pos, game_line: "win".to_string(), size_pct: pct });
+                        }
                     }
-                }
-                // Buy Draw NO
-                if let Some(d) = draw_hauptbet {
-                    let pct = wave_budget.get_line_pct(bankroll, league, "draw");
-                    if pct > 0.0 {
-                        bets.push(GameLineBet { pos: d.pos, game_line: "draw".to_string(), size_pct: pct });
+                    // Add: Draw NO (highest currentValue draw NO)
+                    let draw_no = draw_positions.iter()
+                        .filter(|p| p.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No"))
+                        .max_by(|a, b| a.current_value_f64().partial_cmp(&b.current_value_f64()).unwrap_or(std::cmp::Ordering::Equal));
+                    if let Some(dn) = draw_no {
+                        let draw_already = bets.iter().any(|b| b.game_line == "draw");
+                        if !draw_already {
+                            let dpct = wave_budget.get_line_pct(bankroll, league, "draw");
+                            if dpct > 0.0 {
+                                bets.push(GameLineBet { pos: dn, game_line: "draw".to_string(), size_pct: dpct });
+                            }
+                        }
                     }
+                    info!("GAME MODE: {} → CONVICTION ({} bets)", game.event_slug, bets.len());
+                } else {
+                    info!("GAME MODE: {} → STANDARD ({} bets)", game.event_slug, bets.len());
                 }
             } else {
-                // STANDARD: just buy ML hauptbet
-                mode = "STANDARD";
-                let pct = wave_budget.get_line_pct(bankroll, league, "win");
-                if pct > 0.0 {
-                    bets.push(GameLineBet { pos: ml.pos, game_line: "win".to_string(), size_pct: pct });
-                }
-            }
-        } else {
-            mode = "SKIP";
-        }
-
-        if !bets.is_empty() {
-            info!("GAME MODE: {} → {} ({} bets)", game.event_slug, mode, bets.len());
-        }
-    } else {
-        // US sports: simple — buy hauptbet per allowed game line (no conviction logic)
-        for &gl in &allowed_lines {
-            let best = match gl {
-                "win" => ml_bets.iter().max_by(|a, b| a.usdc.partial_cmp(&b.usdc).unwrap_or(std::cmp::Ordering::Equal)),
-                "spread" => spread_bets.iter().max_by(|a, b| a.usdc.partial_cmp(&b.usdc).unwrap_or(std::cmp::Ordering::Equal)),
-                "draw" => draw_bets.iter().max_by(|a, b| a.usdc.partial_cmp(&b.usdc).unwrap_or(std::cmp::Ordering::Equal)),
-                _ => None,
-            };
-            if let Some(h) = best {
-                let pct = wave_budget.get_line_pct(bankroll, league, gl);
-                if pct > 0.0 {
-                    bets.push(GameLineBet { pos: h.pos, game_line: gl.to_string(), size_pct: pct });
-                }
+                info!("GAME MODE: {} → STANDARD ({} bets)", game.event_slug, bets.len());
             }
         }
     }
@@ -752,9 +666,9 @@ async fn execute_stable_game(
         let outcome = bet.pos.outcome.as_deref().unwrap_or("");
         let usdc = bankroll * bet.size_pct / 100.0;
         info!(
-            "  T5 PLAN: {} {} | {} | ${:.0} ({:.0}%) | Cannae ${:.0}",
+            "  T5 PLAN: {} {} | {} | ${:.0} ({:.0}%) | Cannae cv=${:.0} iv=${:.0}",
             outcome, bet.game_line, &title[..title.len().min(50)],
-            usdc, bet.size_pct, bet.pos.initial_value_f64(),
+            usdc, bet.size_pct, bet.pos.current_value_f64(), bet.pos.initial_value_f64(),
         );
     }
 
@@ -776,7 +690,7 @@ async fn execute_stable_game(
         let price = pos.avg_price_f64();
         let sport = CopyTrader::detect_sport_static(&title, &event_slug);
         let market_type = CopyTrader::detect_market_type(&title);
-        let source_size_usdc = pos.initial_value_f64();
+        let source_size_usdc = pos.current_value_f64();
         let source_shares = pos.size_f64();
         let confidence = (price * 1.10).min(0.95);
 

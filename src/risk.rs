@@ -119,10 +119,6 @@ impl RiskManager {
         RiskDecision::Allowed
     }
 
-    pub fn record_trade_opened(&mut self, _size_usdc: f64) {
-        self.open_bets += 1;
-    }
-
     /// Record trade opened with wallet/sport tracking
     pub fn record_trade_opened_with_context(
         &mut self,
@@ -168,12 +164,6 @@ impl RiskManager {
         }
     }
 
-    /// Decrement open_bets without affecting pnl/bankroll.
-    /// Used by the resolver to close out positions before applying net pnl separately.
-    pub fn decrement_open_bets(&mut self) {
-        self.open_bets = self.open_bets.saturating_sub(1);
-    }
-
     pub fn reset_daily(&mut self) {
         self.daily_pnl = 0.0;
         self.initial_bankroll = self.bankroll;
@@ -189,28 +179,12 @@ impl RiskManager {
         // Those should only reset in reset_daily().
     }
 
-    pub fn add_daily_pnl(&mut self, pnl: f64) {
-        self.daily_pnl += pnl;
-    }
-
     pub fn daily_pnl(&self) -> f64 {
         self.daily_pnl
     }
 
     pub fn open_bets(&self) -> u32 {
         self.open_bets
-    }
-
-    /// Sync open_bets with actual count from trade log.
-    /// Fixes drift when positions are manually sold via UI.
-    pub fn sync_open_bets(&mut self, actual_count: u32) {
-        if self.open_bets != actual_count {
-            info!(
-                "risk: open_bets drift corrected {} → {}",
-                self.open_bets, actual_count
-            );
-            self.open_bets = actual_count;
-        }
     }
 
     /// Full sync: rebuilds open_bets, open_per_wallet, and open_per_sport from trade log.

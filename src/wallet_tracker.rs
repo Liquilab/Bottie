@@ -107,14 +107,4 @@ impl WalletTracker {
         }
     }
 
-    pub fn get_effective_weight(&self, address: &str, sport: &str) -> f64 {
-        if let Some(w) = self.wallets.get(&address.to_lowercase()) {
-            let sport_rate = w.sport_win_rates.get(sport).copied().unwrap_or(w.overall_win_rate);
-            // Weight = base_weight × sport_specific_win_rate / 0.5
-            // So a 60% win rate wallet gets 1.2× its base weight
-            w.weight * (sport_rate / 0.5).min(2.0)
-        } else {
-            0.0
-        }
-    }
 }

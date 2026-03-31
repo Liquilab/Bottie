@@ -60,80 +60,6 @@ impl Executor {
         format!("{}:{}:{}", condition_id, outcome.to_lowercase(), side)
     }
 
-    /// Seed attempted map from trades.jsonl so historical trades survive restarts.
-    /// The PM Data API inconsistently returns positions, so this is the belt to
-    /// PM-seeding's suspenders.
-    pub fn seed_from_trade_log(&mut self, path: &std::path::Path) {
-        use std::io::BufRead;
-
-        let file = match std::fs::File::open(path) {
-            Ok(f) => f,
-            Err(e) => {
-                warn!("could not open {}: {} — skipping trade log seed", path.display(), e);
-                return;
-            }
-        };
-
-        let reader = std::io::BufReader::new(file);
-        let mut added = 0u32;
-
-        for line in reader.lines() {
-            let line = match line {
-                Ok(l) if !l.trim().is_empty() => l,
-                _ => continue,
-            };
-            let trade: serde_json::Value = match serde_json::from_str(&line) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            // Only seed open positions (result=null). Resolved/sold trades must not
-            // block re-buying the same event. Phantoms are also skipped.
-            let result = trade.get("result");
-            let is_open = result.is_none() || result == Some(&serde_json::Value::Null);
-            if !is_open {
-                continue;
-            }
-
-            let condition_id = trade.get("condition_id").and_then(|v| v.as_str()).unwrap_or("");
-            let outcome = trade.get("outcome").and_then(|v| v.as_str()).unwrap_or("");
-            let side = trade.get("side").and_then(|v| v.as_str()).unwrap_or("BUY");
-
-            if !condition_id.is_empty() && !outcome.is_empty() {
-                let key = Self::attempt_key(condition_id, outcome, side);
-                if self.attempted.insert(key) {
-                    added += 1;
-                }
-            }
-        }
-
-        info!("seeded {} entries from trades.jsonl into attempted map (total: {})", added, self.attempted.len());
-    }
-
-    /// Execute with game context: proportional shares sizing using Cannae's game total
-    pub async fn execute_with_game_context(
-        &mut self,
-        signal: &AggregatedSignal,
-        risk: &mut RiskManager,
-        logger: &TradeLogger,
-        cannae_game_total_usdc: f64,
-    ) -> Result<bool> {
-        self.execute_inner(signal, risk, logger, cannae_game_total_usdc, false, 1.0).await
-    }
-
-    /// Execute with game context, taker mode (FOK on ask price), and market-type multiplier
-    pub async fn execute_with_game_context_taker(
-        &mut self,
-        signal: &AggregatedSignal,
-        risk: &mut RiskManager,
-        logger: &TradeLogger,
-        cannae_game_total_usdc: f64,
-        taker_mode: bool,
-        market_type_multiplier: f64,
-    ) -> Result<bool> {
-        self.execute_inner(signal, risk, logger, cannae_game_total_usdc, taker_mode, market_type_multiplier).await
-    }
-
     /// Execute with flat sizing: bankroll × pct% / price = shares.
     /// No proportional weighting, no conviction, no Kelly.
     pub async fn execute_flat(
@@ -144,7 +70,7 @@ impl Executor {
         taker_mode: bool,
         size_pct: f64,
     ) -> Result<bool> {
-        self.execute_inner(signal, risk, logger, 0.0, taker_mode, size_pct).await
+        self.execute_inner(signal, risk, logger, taker_mode, size_pct).await
     }
 
     /// Execute a signal: size it, risk-check it, place the order
@@ -154,7 +80,7 @@ impl Executor {
         risk: &mut RiskManager,
         logger: &TradeLogger,
     ) -> Result<bool> {
-        self.execute_inner(signal, risk, logger, 0.0, false, 1.0).await
+        self.execute_inner(signal, risk, logger, false, 1.0).await
     }
 
     async fn execute_inner(
@@ -162,7 +88,6 @@ impl Executor {
         signal: &AggregatedSignal,
         risk: &mut RiskManager,
         logger: &TradeLogger,
-        cannae_game_total_usdc: f64,
         taker_mode: bool,
         market_type_multiplier: f64,
     ) -> Result<bool> {
@@ -343,11 +268,8 @@ impl Executor {
         };
 
         let is_copy = signal.sources.iter().any(|s| matches!(s, SignalSource::Copy(_)));
-        let size = if is_copy && cannae_game_total_usdc == 0.0 && market_type_multiplier > 0.0 {
+        let size = if is_copy && market_type_multiplier > 0.0 {
             // Flat sizing: market_type_multiplier is the size_pct from wave budget
-            sizing::flat_size(risk.bankroll(), market_type_multiplier, exec_price)
-        } else if is_copy && cannae_game_total_usdc > 0.0 {
-            // Legacy proportional sizing (fallback)
             sizing::flat_size(risk.bankroll(), market_type_multiplier, exec_price)
         } else {
             sizing::flat_size(risk.bankroll(), 5.0, exec_price) // fallback 5%
@@ -505,14 +427,46 @@ impl Executor {
 
         let order_id = resp.effective_id().map(|s| s.to_string());
         let mut filled = resp.is_filled();
-        // Use actual filled size from exchange, not requested size
-        let actual_shares = if filled { let fs = resp.filled_size(); if fs > 0.0 { fs } else { size } } else { 0.0 };
-        let actual_usdc = if filled { actual_shares * exec_price } else { 0.0 };
 
-        // GTC orders sit in the orderbook and may not fill instantly.
-        // Trust the CLOB response (is_filled checks size_matched > 0).
-        // The resolver phantom-sync (every 5 min) catches false positives
-        // by checking actual PM positions.
+        // GTC orders may not fill instantly (sports delayed matching).
+        // If we have an order_id but no immediate fill, poll the order status.
+        if !filled && !resp.is_rejected() {
+            if let Some(oid) = &order_id {
+                for attempt in 1..=3 {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    match self.client.get_order_status(oid).await {
+                        Ok((status, size_matched)) => {
+                            if size_matched > 0.0 {
+                                info!("GTC DELAYED FILL (attempt {}): {} matched {:.1} shares", attempt, signal.market_title, size_matched);
+                                filled = true;
+                                break;
+                            }
+                            if status.contains("CANCELED") || status.contains("INVALID") {
+                                warn!("GTC ORDER {}: {} for {}", status, oid, signal.market_title);
+                                break;
+                            }
+                            // Still LIVE — keep polling
+                        }
+                        Err(e) => {
+                            warn!("order status poll failed: {}", e);
+                            break;
+                        }
+                    }
+                }
+                // If still not filled after polling, cancel the resting order
+                if !filled {
+                    if let Err(e) = self.client.cancel_order(oid).await {
+                        warn!("cancel resting order failed: {}", e);
+                    } else {
+                        info!("cancelled unfilled GTC order {} for {}", oid, signal.market_title);
+                    }
+                }
+            }
+        }
+
+        // Use actual filled size from exchange, not requested size
+        let actual_shares = if filled { size } else { 0.0 };
+        let actual_usdc = if filled { actual_shares * exec_price } else { 0.0 };
 
         if filled {
             risk.record_trade_opened_with_context(
@@ -598,43 +552,3 @@ fn extract_signal_meta(sources: &[SignalSource]) -> (String, Option<String>, Opt
     ("unknown".to_string(), None, None, None, 0)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn seed_from_trade_log_blocks_duplicates() {
-        let tmp = std::env::temp_dir().join("test_trades.jsonl");
-        std::fs::write(&tmp, r#"{"condition_id":"0xabc123","outcome":"No","side":"BUY","result":"win"}
-{"condition_id":"0xdef456","outcome":"Yes","side":"BUY","result":"loss"}
-{"condition_id":"0xphantom","outcome":"No","side":"BUY","result":"phantom"}
-"#).unwrap();
-
-        let mut attempted: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-        // Simulate seed_from_trade_log inline (can't construct Executor without ClobClient)
-        use std::io::BufRead;
-        let file = std::fs::File::open(&tmp).unwrap();
-        let reader = std::io::BufReader::new(file);
-        let mut added = 0u32;
-        for line in reader.lines() {
-            let line = match line { Ok(l) if !l.trim().is_empty() => l, _ => continue };
-            let trade: serde_json::Value = match serde_json::from_str(&line) { Ok(v) => v, Err(_) => continue };
-            if trade.get("result").and_then(|v| v.as_str()) == Some("phantom") { continue; }
-            let cid = trade.get("condition_id").and_then(|v| v.as_str()).unwrap_or("");
-            let outcome = trade.get("outcome").and_then(|v| v.as_str()).unwrap_or("");
-            let side = trade.get("side").and_then(|v| v.as_str()).unwrap_or("BUY");
-            if !cid.is_empty() && !outcome.is_empty() {
-                let key = Executor::attempt_key(cid, outcome, side);
-                if attempted.insert(key) { added += 1; }
-            }
-        }
-
-        assert_eq!(added, 2, "should seed 2 non-phantom trades");
-        assert!(attempted.contains("0xabc123:no:BUY"), "should contain abc123");
-        assert!(attempted.contains("0xdef456:yes:BUY"), "should contain def456");
-        assert!(!attempted.contains("0xphantom:no:BUY"), "should NOT contain phantom");
-
-        std::fs::remove_file(&tmp).ok();
-    }
-}

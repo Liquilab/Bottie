@@ -1,0 +1,18 @@
+{
+  "address": "0x7ea571c40408f340c1c8fc8eaacebab53c1bde7b",
+  "name": "Cannae",
+  "total_positions": 7723,
+  "total_closed": 50,
+  "portfolio_value": 290651.032640622,
+  "method_a_cashpnl": -10037203.39,
+  "method_b_netted_pnl": -10037204.35,
+  "method_b_cost": 10327864.23,
+  "method_c_pnl": -10037203.39,
+  "total_initial_value": 10327864.23,
+  "total_current_value": 290660.84,
+  "closed_pnl": 0.0,
+  "both_sides_count": 195,
+  "unique_conditions": 7528,
+  "resolved_markets": 7414,
+  "active_markets": 114
+}

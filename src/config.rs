@@ -15,7 +15,6 @@ pub const USDC_ADDRESS: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 pub const CTF_ADDRESS: &str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
 
 pub const CHAIN_ID: u64 = 137;
-pub const CTF_DECIMALS: u32 = 6;
 pub const CTF_DECIMAL_FACTOR: f64 = 1_000_000.0;
 pub const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
@@ -25,8 +24,6 @@ pub const GAMMA_API: &str = "https://gamma-api.polymarket.com";
 pub const DATA_API: &str = "https://data-api.polymarket.com";
 
 // Order constraints
-pub const MIN_ORDER_SHARES: f64 = 5.0;
-pub const MIN_ORDER_VALUE: f64 = 1.0;
 pub const TICK_SIZE: f64 = 0.01;
 
 #[derive(Debug, Clone)]
@@ -98,10 +95,7 @@ pub struct AppConfig {
     pub sizing: SizingConfig,
     pub risk: RiskConfig,
     #[serde(default)]
-    pub take_profit: TakeProfitConfig,
-    #[serde(default)]
     pub auto_sell: AutoSellConfig,
-    pub autoresearch: AutoresearchConfig,
     #[serde(default)]
     pub autoresearch_params: AutoresearchParams,
     #[serde(default)]
@@ -139,29 +133,6 @@ fn default_refresh_interval() -> u32 {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct TakeProfitConfig {
-    #[serde(default = "tp_default_enabled")]
-    pub enabled: bool,
-    #[serde(default = "tp_default_min_delta")]
-    pub min_delta: f64,
-    #[serde(default = "tp_default_safety_threshold")]
-    pub safety_threshold: f64,
-    #[serde(default = "tp_default_cancel_timeout")]
-    pub cancel_timeout_secs: u64,
-}
-
-impl Default for TakeProfitConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            min_delta: 0.05,
-            safety_threshold: 0.95,
-            cancel_timeout_secs: 60,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
 pub struct AutoSellConfig {
     #[serde(default = "auto_sell_default_enabled")]
     pub enabled: bool,
@@ -180,11 +151,6 @@ impl Default for AutoSellConfig {
 
 fn auto_sell_default_enabled() -> bool { false }
 fn auto_sell_default_min_bid() -> f64 { 0.98 }
-
-fn tp_default_enabled() -> bool { true }
-fn tp_default_min_delta() -> f64 { 0.05 }
-fn tp_default_safety_threshold() -> f64 { 0.95 }
-fn tp_default_cancel_timeout() -> u64 { 60 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CopyTradingConfig {
@@ -338,17 +304,11 @@ pub struct OddsArbConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SizingConfig {
-    pub kelly_fraction: f64,
     pub max_bet_pct: f64,
-    pub copy_base_size_pct: f64,
     #[serde(default = "default_min_price")]
     pub min_price: f64,
     #[serde(default = "default_max_price")]
     pub max_price: f64,
-    /// Reference portfolio value for tiered copy-trade sizing (cash + positions).
-    /// If 0, falls back to live bankroll (cash only).
-    #[serde(default)]
-    pub portfolio_reference_usdc: f64,
 }
 
 fn default_min_price() -> f64 {
@@ -399,9 +359,22 @@ pub struct SportSizingConfig {
     /// FIF draw.
     #[serde(default = "default_fif_draw")]
     pub fif_draw_pct: f64,
+    /// MLB moneyline.
+    #[serde(default)]
+    pub mlb_ml_pct: f64,
+    /// NFL moneyline.
+    #[serde(default)]
+    pub nfl_ml_pct: f64,
+    /// Fallback sizing % for leagues without a sport-specific field.
+    #[serde(default = "default_fallback_pct")]
+    pub fallback_pct: f64,
     /// Minimum bet size in USDC. Below this → skip game.
     #[serde(default = "default_min_bet_usdc")]
     pub min_bet_usdc: f64,
+    /// Minimum Cannae game total (USDC) per league to copy. Below → skip.
+    /// e.g. {"nhl": 1000} = only copy NHL when Cannae invests >= $1000.
+    #[serde(default)]
+    pub min_cannae_game_usdc: std::collections::HashMap<String, f64>,
 }
 
 impl Default for SportSizingConfig {
@@ -414,7 +387,11 @@ impl Default for SportSizingConfig {
             nba_spread_pct: 3.0,
             fif_ml_pct: 0.0,
             fif_draw_pct: 0.0,
+            mlb_ml_pct: 0.0,
+            nfl_ml_pct: 0.0,
+            fallback_pct: 2.0,
             min_bet_usdc: 2.50,
+            min_cannae_game_usdc: std::collections::HashMap::new(),
         }
     }
 }
@@ -426,19 +403,23 @@ fn default_nba_ml() -> f64 { 3.0 }
 fn default_nba_spread() -> f64 { 3.0 }
 fn default_fif_ml() -> f64 { 0.0 }
 fn default_fif_draw() -> f64 { 0.0 }
+fn default_fallback_pct() -> f64 { 2.0 }
 fn default_min_bet_usdc() -> f64 { 2.50 }
 
 impl SportSizingConfig {
     /// Get the max % cap for a given sport + game line combination.
     /// Returns None if this sport/game_line combo should be skipped.
+    ///
+    /// Uses sport-specific overrides when set (> 0), otherwise falls back
+    /// to the generic fallback_pct (typically copy_base_size_pct from config).
     pub fn cap_for(&self, league: &str, game_line: &str) -> Option<f64> {
         let is_football = !matches!(league, "nba" | "nhl" | "mlb" | "nfl" | "cbb" | "ncaa");
 
-        if league == "fif" {
-            // FIFA WCQ/friendlies — separate caps (experimental, default 0 = off)
+        // Sport-specific override if configured (> 0)
+        let specific = if league == "fif" {
             match game_line {
-                "win" if self.fif_ml_pct > 0.0 => Some(self.fif_ml_pct),
-                "draw" if self.fif_draw_pct > 0.0 => Some(self.fif_draw_pct),
+                "win" => Some(self.fif_ml_pct),
+                "draw" => Some(self.fif_draw_pct),
                 _ => None,
             }
         } else if is_football {
@@ -447,48 +428,41 @@ impl SportSizingConfig {
                 "draw" => Some(self.voetbal_draw_pct),
                 _ => None,
             }
-        } else if league == "nhl" {
-            match game_line {
-                "win" => Some(self.nhl_ml_pct),
-                _ => None, // no spread/totals for NHL
-            }
-        } else if league == "nba" {
-            match game_line {
-                "win" => Some(self.nba_ml_pct),
-                "spread" => Some(self.nba_spread_pct),
-                _ => None, // no totals
-            }
         } else {
-            None // mlb, nfl, cbb etc — not yet configured
-        }
+            // US sports + tennis + esports: check named field, else fallback
+            match (league, game_line) {
+                ("nhl", "win") => Some(self.nhl_ml_pct),
+                ("nba", "win") => Some(self.nba_ml_pct),
+                ("nba", "spread") => Some(self.nba_spread_pct),
+                ("mlb", "win") => Some(self.mlb_ml_pct),
+                ("nfl", "win") => Some(self.nfl_ml_pct),
+                (_, "win") => Some(self.fallback_pct),
+                _ => None,
+            }
+        };
+
+        // Filter out 0.0 (= disabled)
+        specific.filter(|&v| v > 0.0)
     }
 
     /// List allowed game line types for a given league.
     pub fn allowed_game_lines(&self, league: &str) -> Vec<&'static str> {
         let is_football = !matches!(league, "nba" | "nhl" | "mlb" | "nfl" | "cbb" | "ncaa");
-        if league == "fif" {
+        if is_football {
+            // Football (incl fif): win + draw
             let mut v = vec![];
-            if self.fif_ml_pct > 0.0 { v.push("win"); }
-            if self.fif_draw_pct > 0.0 { v.push("draw"); }
+            if self.cap_for(league, "win").is_some() { v.push("win"); }
+            if self.cap_for(league, "draw").is_some() { v.push("draw"); }
             v
-        } else if is_football {
-            vec!["win", "draw"]
-        } else if league == "nhl" {
-            vec!["win"]
-        } else if league == "nba" {
-            vec!["win", "spread"]
         } else {
-            vec![]
+            // US sports / tennis / esports: win always, spread for NBA
+            let mut v = vec!["win"];
+            if league == "nba" && self.nba_spread_pct > 0.0 {
+                v.push("spread");
+            }
+            v
         }
     }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct AutoresearchConfig {
-    pub interval_hours: u64,
-    pub min_backtest_trades: u32,
-    pub min_improvement_pct: f64,
-    pub claude_model: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

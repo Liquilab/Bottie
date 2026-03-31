@@ -228,35 +228,6 @@ impl TradeLogger {
         }
     }
 
-    /// Check if there is an open position on this event from a DIFFERENT wallet.
-    /// Prevents contradictions: e.g. Cannae bets "win" while sovereign bets "O/U" on the same event.
-    /// Returns Some(existing_wallet) if contradiction detected, None if clear.
-    pub fn has_conflicting_wallet_on_event(&self, event_slug: &str, market_title: &str, new_wallet: &str) -> Option<String> {
-        let dedup_key = Self::event_dedup_key(event_slug, market_title);
-        if dedup_key.is_empty() {
-            return None;
-        }
-        let event_wallets = self.open_event_wallets.lock().unwrap();
-        if let Some(existing_wallet) = event_wallets.get(&dedup_key) {
-            if existing_wallet != new_wallet {
-                return Some(existing_wallet.clone());
-            }
-        }
-        None
-    }
-
-    /// Check if there is ANY open position on this event.
-    /// With consensus strategy: 1 trade per event, regardless of market type.
-    /// Uses event_dedup_key to also match trades that had empty event_slug.
-    pub fn has_any_open_on_event(&self, event_slug: &str, market_title: &str) -> bool {
-        let dedup_key = Self::event_dedup_key(event_slug, market_title);
-        if dedup_key.is_empty() {
-            return false;
-        }
-        let event_types = self.open_event_types.lock().unwrap();
-        event_types.contains_key(&dedup_key)
-    }
-
     /// Compute ROI per (copy_wallet, market_type) from resolved trades.
     /// Returns HashMap<(wallet_name, market_type), (roi_pct, trade_count)>.
     /// market_type uses logger's classification ("spread", "total", "moneyline").
@@ -294,41 +265,6 @@ impl TradeLogger {
             result.insert(key.clone(), (roi_pct, count));
         }
         result
-    }
-
-    /// Pick the best wallet for a given market_type based on live ROI.
-    /// Only considers wallets with at least min_trades resolved trades.
-    /// Accepts market_type in CopyTrader format ("win", "ou", "spread", etc.)
-    /// and maps to logger format ("moneyline", "total", "spread") for lookup.
-    /// Returns Some((wallet_name, roi_pct)) or None if no wallet qualifies.
-    pub fn best_wallet_for_market_type(
-        &self,
-        market_type: &str,
-        candidate_wallets: &[&str],
-        min_trades: u32,
-    ) -> Option<(String, f64)> {
-        // Map CopyTrader market types to logger market types
-        let logger_type = match market_type {
-            "win" | "ml" | "draw" => "moneyline",
-            "ou" => "total",
-            "spread" => "spread",
-            other => other,
-        };
-
-        let roi_map = self.compute_wallet_roi();
-        let mut best: Option<(String, f64)> = None;
-
-        for wallet in candidate_wallets {
-            let key = (wallet.to_string(), logger_type.to_string());
-            if let Some(&(roi, count)) = roi_map.get(&key) {
-                if count >= min_trades {
-                    if best.is_none() || roi > best.as_ref().unwrap().1 {
-                        best = Some((wallet.to_string(), roi));
-                    }
-                }
-            }
-        }
-        best
     }
 
     /// Rewrite the entire log with updated records (used by the resolver).

@@ -319,108 +319,15 @@ impl ClobClient {
             warn!("Order rejected: {}", parsed.skipped.as_deref().unwrap_or("unknown"));
         }
 
-        // Log raw response to diagnose size_matched availability
-        debug!("CLOB response: size_matched={:?} order_id={:?} status={:?}",
-               parsed.size_matched, parsed.effective_id(), parsed.status);
-
-        Ok(parsed)
-    }
-
-    // --- Data API: Public Trades Feed ---
-
-    pub async fn get_recent_trades(&self, limit: u32) -> Result<Vec<DataApiTrade>> {
-        let url = format!("{DATA_API}/trades?limit={limit}");
-        let trades: Vec<DataApiTrade> = self
-            .http
-            .get(&url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        Ok(trades)
-    }
-
-    pub async fn get_recent_trades_offset(&self, limit: u32, offset: u32) -> Result<Vec<DataApiTrade>> {
-        let url = format!("{DATA_API}/trades?limit={limit}&offset={offset}");
-        let trades: Vec<DataApiTrade> = self
-            .http
-            .get(&url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        Ok(trades)
-    }
-
-    pub async fn get_trades_for_wallet(&self, wallet: &str, limit: u32) -> Result<Vec<DataApiTrade>> {
-        // Use user= parameter (maker=/taker= are broken — return global trades)
-        let url = format!("{DATA_API}/trades?user={wallet}&limit={limit}");
-        let mut all_trades: Vec<DataApiTrade> = self.http.get(&url).send().await?
-            .error_for_status()?
-            .json().await?;
-
-        // Sort by timestamp descending (most recent first)
-        all_trades.sort_by(|a, b| {
-            b.timestamp_secs().unwrap_or(0).cmp(&a.timestamp_secs().unwrap_or(0))
-        });
-
-        Ok(all_trades)
-    }
-
-    /// Get a wallet's trades since a given timestamp.
-    /// Paginates through the Data API to find all trades after `since_unix`.
-    /// Returns trades sorted by timestamp descending (most recent first).
-    pub async fn get_trades_since(
-        &self,
-        wallet: &str,
-        since_unix: i64,
-        max_pages: u32,
-    ) -> Result<Vec<DataApiTrade>> {
-        let mut all_trades = Vec::new();
-        let mut offset: u32 = 0;
-        let page_size: u32 = 100;
-
-        for _ in 0..max_pages {
-            let url = format!(
-                "{DATA_API}/trades?user={wallet}&limit={page_size}&offset={offset}"
-            );
-            let trades: Vec<DataApiTrade> = match self.http.get(&url).send().await {
-                Ok(resp) => resp.json::<Vec<DataApiTrade>>().await.unwrap_or_default(),
-                Err(_) => break,
-            };
-
-            let count = trades.len();
-
-            let mut past_window = false;
-            for t in &trades {
-                if let Some(ts) = t.timestamp_secs() {
-                    if ts < since_unix {
-                        past_window = true;
-                        break;
-                    }
-                }
-                all_trades.push(t.clone());
-            }
-
-            if past_window || count < page_size as usize {
-                break;
-            }
-            offset += page_size;
+        // Log raw response — visible in production for diagnosing NOT FILLED
+        if !parsed.is_filled() {
+            warn!("CLOB RAW: {}", text);
+        } else {
+            info!("CLOB response: size_matched={:?} order_id={:?} status={:?}",
+                   parsed.size_matched, parsed.effective_id(), parsed.status);
         }
 
-        // Filter: only trades after since_unix
-        all_trades.retain(|t| {
-            t.timestamp_secs().map_or(false, |ts| ts >= since_unix)
-        });
-
-        // Sort descending
-        all_trades.sort_by(|a, b| {
-            b.timestamp_secs().unwrap_or(0).cmp(&a.timestamp_secs().unwrap_or(0))
-        });
-
-        Ok(all_trades)
+        Ok(parsed)
     }
 
     // --- Per-wallet Activity (DEPRECATED: unreliable, use get_wallet_positions instead) ---
@@ -561,52 +468,15 @@ impl ClobClient {
         Ok(resp.into_iter().next())
     }
 
-    // --- Market Discovery ---
-
-    pub async fn find_market_tokens(
-        &self,
-        condition_id: &str,
-    ) -> Result<(String, String)> {
-        let url = format!("{CLOB_API}/markets/{condition_id}");
-        let resp: ClobMarketResponse = self
-            .http
-            .get(&url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-
-        let tokens = resp.tokens.context("no tokens in market")?;
-        let mut yes_token = String::new();
-        let mut no_token = String::new();
-
-        for t in &tokens {
-            let outcome = t.outcome.as_deref().unwrap_or("");
-            let token_id = t.token_id.as_deref().unwrap_or("");
-            match outcome {
-                "Yes" => yes_token = token_id.to_string(),
-                "No" => no_token = token_id.to_string(),
-                _ => {}
-            }
-        }
-
-        if yes_token.is_empty() || no_token.is_empty() {
-            anyhow::bail!("could not find Yes/No tokens for condition {condition_id}");
-        }
-
-        Ok((yes_token, no_token))
-    }
-
     // --- Sports Market Search ---
 
     pub async fn search_sports_events(&self, tag_slug: &str) -> Result<Vec<GammaSportsEvent>> {
         let now = chrono::Utc::now();
-        let end = now + chrono::Duration::hours(48);
         let end_date_min = now.format("%Y-%m-%dT%H:%M:%SZ");
-        let end_date_max = end.format("%Y-%m-%dT%H:%M:%SZ");
+        // No end_date_max: MLB/NFL endDates are a week+ after the game.
+        // active=true&closed=false is sufficient to filter.
         let url = format!(
-            "{GAMMA_API}/events?active=true&closed=false&tag_slug={tag_slug}&end_date_min={end_date_min}&end_date_max={end_date_max}&limit=100"
+            "{GAMMA_API}/events?active=true&closed=false&tag_slug={tag_slug}&end_date_min={end_date_min}&limit=100"
         );
         let events: Vec<GammaSportsEvent> = self
             .http
@@ -653,28 +523,6 @@ impl ClobClient {
         let hex = hex.trim_start_matches("0x");
         let raw = u128::from_str_radix(hex, 16).unwrap_or(0);
         Ok(raw as f64 / 1_000_000.0)
-    }
-
-    // --- Redeem resolved positions ---
-
-    /// Redeem winning conditional tokens back to USDC after market resolution.
-    pub async fn redeem_position(&self, condition_id: &str) -> Result<()> {
-        let path = "/redeem";
-        let body = serde_json::json!({ "conditionId": condition_id }).to_string();
-        let builder = self.http.post(format!("{CLOB_API}{path}"));
-        let builder = self.l2_request(builder, "POST", path, Some(&body))?;
-        let resp = builder
-            .header("Content-Type", "application/json")
-            .body(body)
-            .send()
-            .await?;
-
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            anyhow::bail!("redeem failed ({status}): {text}");
-        }
-        Ok(())
     }
 
     pub fn is_dry_run(&self) -> bool {

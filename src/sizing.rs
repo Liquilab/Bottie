@@ -1,5 +1,3 @@
-use crate::config::MIN_ORDER_VALUE;
-
 /// Flat sizing: bankroll × pct / price = shares.
 ///
 /// No proportional weighting, no conviction, no Kelly.

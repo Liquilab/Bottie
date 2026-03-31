@@ -67,20 +67,11 @@ impl GameSchedule {
     pub fn games_starting_within(&self, minutes: i64) -> Vec<&UpcomingGame> {
         let now = Utc::now();
         let cutoff = now + chrono::Duration::minutes(minutes);
+        // Include games that started up to 2 hours ago (still in-play, positions still tradeable)
+        let lookback = now - chrono::Duration::hours(2);
         self.games
             .iter()
-            .filter(|g| g.start_time > now && g.start_time <= cutoff)
-            .collect()
-    }
-
-    /// Filter games starting between now+from_minutes and now+to_minutes
-    pub fn games_starting_between(&self, from_minutes: i64, to_minutes: i64) -> Vec<&UpcomingGame> {
-        let now = Utc::now();
-        let from = now + chrono::Duration::minutes(from_minutes);
-        let to = now + chrono::Duration::minutes(to_minutes);
-        self.games
-            .iter()
-            .filter(|g| g.start_time >= from && g.start_time <= to)
+            .filter(|g| g.start_time > lookback && g.start_time <= cutoff)
             .collect()
     }
 
@@ -450,50 +441,6 @@ mod tests {
         let within_30 = schedule.games_starting_within(30);
         assert_eq!(within_30.len(), 1);
         assert_eq!(within_30[0].event_slug, "game-soon");
-    }
-
-    #[test]
-    fn games_starting_between_filters_correctly() {
-        let now = Utc::now();
-        let schedule = GameSchedule {
-            games: vec![
-                UpcomingGame {
-                    event_slug: "game-5min".to_string(),
-                    title: "5min Game".to_string(),
-                    start_time: now + chrono::Duration::minutes(5),
-                    condition_ids: vec!["cid1".to_string()],
-                    token_ids: vec![],
-                    sport_tag: "nba".to_string(),
-                },
-                UpcomingGame {
-                    event_slug: "game-30min".to_string(),
-                    title: "30min Game".to_string(),
-                    start_time: now + chrono::Duration::minutes(30),
-                    condition_ids: vec!["cid2".to_string()],
-                    token_ids: vec![],
-                    sport_tag: "nba".to_string(),
-                },
-                UpcomingGame {
-                    event_slug: "game-60min".to_string(),
-                    title: "60min Game".to_string(),
-                    start_time: now + chrono::Duration::minutes(60),
-                    condition_ids: vec!["cid3".to_string()],
-                    token_ids: vec![],
-                    sport_tag: "nba".to_string(),
-                },
-            ],
-            last_refresh: now,
-        };
-
-        // Between 25 and 35 minutes
-        let between = schedule.games_starting_between(25, 35);
-        assert_eq!(between.len(), 1);
-        assert_eq!(between[0].event_slug, "game-30min");
-
-        // Between 0 and 7 minutes
-        let between_short = schedule.games_starting_between(0, 7);
-        assert_eq!(between_short.len(), 1);
-        assert_eq!(between_short[0].event_slug, "game-5min");
     }
 
     #[test]

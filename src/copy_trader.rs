@@ -451,32 +451,6 @@ impl CopyTrader {
         Self::detect_sport(title, event_slug)
     }
 
-    /// Determine the polling tier for a wallet this cycle.
-    /// Returns true if the wallet should be polled.
-    pub fn should_poll_wallet(
-        addr: &str,
-        poll_count: u64,
-        warm_every_n: u64,
-        consensus_window_mins: u32,
-        last_signal_time: &HashMap<String, DateTime<Utc>>,
-        prev_positions: &HashMap<String, HashMap<String, f64>>,
-        now: DateTime<Utc>,
-    ) -> bool {
-        // Hot tier: always poll if signal in last window_minutes
-        let hot_cutoff = chrono::Duration::minutes(consensus_window_mins as i64);
-        if let Some(last) = last_signal_time.get(addr) {
-            if now.signed_duration_since(*last) < hot_cutoff {
-                return true;
-            }
-        }
-        // First poll (no prev_positions): always poll to seed
-        if !prev_positions.contains_key(addr) {
-            return true;
-        }
-        // Warm tier: poll every N-th cycle
-        poll_count % warm_every_n == 0
-    }
-
     /// Score consensus for an event, outcome-aware.
     ///
     /// Groups bets by outcome, finds the majority side.
@@ -622,94 +596,6 @@ impl CopyTrader {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-
-    fn empty_signal_times() -> HashMap<String, DateTime<Utc>> {
-        HashMap::new()
-    }
-
-    fn empty_prev_positions() -> HashMap<String, HashMap<String, f64>> {
-        HashMap::new()
-    }
-
-    fn seeded_prev_positions(addrs: &[&str]) -> HashMap<String, HashMap<String, f64>> {
-        addrs.iter().map(|a| (a.to_string(), HashMap::new())).collect()
-    }
-
-    // ═══════════════════════════════════════════════════════════════════
-    // RUS-210: Tiered polling
-    // ═══════════════════════════════════════════════════════════════════
-
-    #[test]
-    fn hot_wallet_always_polled() {
-        let now = Utc::now();
-        let mut signals = HashMap::new();
-        signals.insert("0xhot".to_string(), now - Duration::minutes(5));
-        let prev = seeded_prev_positions(&["0xhot"]);
-
-        // Should be polled on ANY cycle (even non-warm cycles)
-        for cycle in [1, 2, 3, 5, 7] {
-            assert!(
-                CopyTrader::should_poll_wallet("0xhot", cycle, 4, 30, &signals, &prev, now),
-                "hot wallet should be polled on cycle {cycle}"
-            );
-        }
-    }
-
-    #[test]
-    fn unseeded_wallet_always_polled() {
-        let now = Utc::now();
-        let prev = empty_prev_positions(); // no seeded wallets
-
-        for cycle in [1, 2, 3, 5] {
-            assert!(
-                CopyTrader::should_poll_wallet("0xnew", cycle, 4, 30, &empty_signal_times(), &prev, now),
-                "unseeded wallet should be polled on cycle {cycle}"
-            );
-        }
-    }
-
-    #[test]
-    fn warm_wallet_only_on_nth_cycle() {
-        let now = Utc::now();
-        let prev = seeded_prev_positions(&["0xwarm"]);
-        let signals = empty_signal_times(); // no recent signal
-
-        // warm_every_n = 4 (60s / 15s)
-        assert!(!CopyTrader::should_poll_wallet("0xwarm", 1, 4, 30, &signals, &prev, now));
-        assert!(!CopyTrader::should_poll_wallet("0xwarm", 2, 4, 30, &signals, &prev, now));
-        assert!(!CopyTrader::should_poll_wallet("0xwarm", 3, 4, 30, &signals, &prev, now));
-        assert!(CopyTrader::should_poll_wallet("0xwarm", 4, 4, 30, &signals, &prev, now));
-        assert!(!CopyTrader::should_poll_wallet("0xwarm", 5, 4, 30, &signals, &prev, now));
-        assert!(CopyTrader::should_poll_wallet("0xwarm", 8, 4, 30, &signals, &prev, now));
-        assert!(CopyTrader::should_poll_wallet("0xwarm", 12, 4, 30, &signals, &prev, now));
-    }
-
-    #[test]
-    fn hot_expires_to_warm_after_window() {
-        let now = Utc::now();
-        let mut signals = HashMap::new();
-        // Signal 31 minutes ago, window is 30 minutes
-        signals.insert("0xexpired".to_string(), now - Duration::minutes(31));
-        let prev = seeded_prev_positions(&["0xexpired"]);
-
-        // cycle 1: not a warm cycle, not hot anymore → skip
-        assert!(!CopyTrader::should_poll_wallet("0xexpired", 1, 4, 30, &signals, &prev, now));
-        // cycle 4: warm cycle → poll
-        assert!(CopyTrader::should_poll_wallet("0xexpired", 4, 4, 30, &signals, &prev, now));
-    }
-
-    #[test]
-    fn config_change_warm_interval() {
-        let now = Utc::now();
-        let prev = seeded_prev_positions(&["0xwarm"]);
-        let signals = empty_signal_times();
-
-        // warm_every_n = 2 (30s / 15s) — faster polling
-        assert!(!CopyTrader::should_poll_wallet("0xwarm", 1, 2, 30, &signals, &prev, now));
-        assert!(CopyTrader::should_poll_wallet("0xwarm", 2, 2, 30, &signals, &prev, now));
-        assert!(!CopyTrader::should_poll_wallet("0xwarm", 3, 2, 30, &signals, &prev, now));
-        assert!(CopyTrader::should_poll_wallet("0xwarm", 4, 2, 30, &signals, &prev, now));
-    }
 
     // ═══════════════════════════════════════════════════════════════════
     // RUS-211: Consensus window pruning

@@ -5,6 +5,11 @@ import json, re, glob, os
 from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+try:
+    from zoneinfo import ZoneInfo
+    CET = ZoneInfo("Europe/Amsterdam")
+except ImportError:
+    CET = None
 
 # Use CWD (/opt/bottie) for data files, __file__ dir for code/templates
 BASE_DIR       = Path.cwd()
@@ -17,7 +22,7 @@ CONFIG_FILE    = BASE_DIR / "config.yaml"
 PM_CACHE_FILE  = BASE_DIR / "data" / "pm_cache.json"
 CONSENSUS_BULK = BASE_DIR / "data" / "consensus_bulk.json"
 CONSENSUS_RESULTS = BASE_DIR / "data" / "consensus_results.json"
-INITIAL_BANKROLL = 1840.0  # total deposited (updated 2026-03-22, +$485 bijstorting)
+INITIAL_BANKROLL = 1400.0  # initiële inzet
 EDGE_REPORT_FILE = BASE_DIR / "data" / "edge_analysis_report.md"
 
 # Auth token — all routes require /t/<TOKEN>/ prefix (like webhook URLs)
@@ -35,7 +40,7 @@ import urllib.request, urllib.error, time
 _pm_cache = {"data": None, "ts": 0}
 
 def fetch_pm_data():
-    """Fetch real data from Polymarket API. Cached for 60 seconds."""
+    """Fetch real data from Polymarket API. Cached for 15 seconds."""
     now = time.time()
     if _pm_cache["data"] and now - _pm_cache["ts"] < 15:
         return _pm_cache["data"]
@@ -66,8 +71,16 @@ def fetch_pm_data():
         result["error"] = "trades: %s" % e
 
     try:
-        url = "%s/positions?user=%s&limit=500&sizeThreshold=0" % (PM_DATA_API, PM_FUNDER)
-        result["positions"] = json.loads(pm_get(url).read())
+        all_positions = []
+        pos_offset = 0
+        while pos_offset <= 10000:
+            url = "%s/positions?user=%s&limit=500&offset=%d&sizeThreshold=0" % (PM_DATA_API, PM_FUNDER, pos_offset)
+            batch = json.loads(pm_get(url).read())
+            all_positions.extend(batch)
+            if len(batch) < 500:
+                break
+            pos_offset += 500
+        result["positions"] = all_positions
     except Exception as e:
         result["error"] = "positions: %s" % e
 
@@ -209,6 +222,13 @@ def load_playbook():
     return PLAYBOOK_FILE.read_text()
 
 
+def _load_config():
+    """Load config.yaml as dict."""
+    if not CONFIG_FILE.exists():
+        return {}
+    import yaml
+    return yaml.safe_load(CONFIG_FILE.read_text()) or {}
+
 def parse_config_wallets():
     if not CONFIG_FILE.exists():
         return {}
@@ -225,14 +245,21 @@ def parse_config_wallets():
             market_types = w.get("market_types", [])
             min_price = w.get("min_price", 0)
             max_price = w.get("max_price", 1)
+            leagues = w.get("leagues", [])
+            sports = w.get("sports", [])
+            max_legs = w.get("max_legs_per_event", 0)
             wallets[addr] = {
                 "name": name, "weight": weight, "tier": tier,
                 "market_types": market_types,
                 "min_price": min_price, "max_price": max_price,
+                "leagues": leagues, "sports": sports,
+                "max_legs_per_event": max_legs,
             }
         return wallets
     except Exception:
         return {}
+
+HYPOTHESES_DIR = BASE_DIR / "data" / "hypotheses"
 
 def load_hypotheses():
     if not HYPOTHESES_DIR.exists():
@@ -431,7 +458,7 @@ def compute_source_stats(trades):
             "pnl": sum(t.get("pnl") or 0 for t in resolved),
             "avg_size": sum(t.get("size_usdc") or 0 for t in group) / len(group) if group else 0,
             "avg_conf": sum(t.get("confidence") or 0 for t in group) / len(group) if group else 0,
-            "avg_edge": sum(t.get("edge_pct") or 0 for t in arb_t) / len(arb_t) if arb_t else 0,
+            "avg_edge": sum(t.get("edge_pct") or 0 for t in group) / len(group) if group else 0,
         }
 
     return {"copy": stats(copy_t), "arb": stats(arb_t)}
@@ -509,7 +536,7 @@ def render_why(trade, wallet_map):
         name = info.get("name", addr[:8] + "…" if addr else "?")
         delay_s = (trade.get("signal_delay_ms") or 0) / 1000
         # Color by wallet name
-        wallet_colors = {"cannae": "#388bfd", "sovereign2013": "#3fb950"}
+        wallet_colors = {"cannae": "#388bfd", "sovereign": "#3fb950", "ewelmealt": "#d29922"}
         name_color = wallet_colors.get(name.lower(), "#8b949e")
         html = f'<span class="badge" style="background:{name_color};color:#fff">{name}</span>'
         html += f' <span class="muted" style="font-size:0.75rem">{delay_s:.1f}s</span>'
@@ -1260,7 +1287,10 @@ tr.group-cont .market-title { padding-left: 12px; font-size: 0.85em; }
 
 
 def page_wrap(active_page, body_html, token=""):
-    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    if CET:
+        now_str = datetime.now(CET).strftime("%Y-%m-%d %H:%M %Z")
+    else:
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     prefix = f"/t/{token}" if token else ""
     pages = [
         ("Overview", "/"),
@@ -1306,31 +1336,47 @@ def page_wrap(active_page, body_html, token=""):
 def render_strategy_summary(wallet_map):
     """Show current strategy info: wallets, filters, sizing."""
     cards = ""
-    wallet_colors = {"cannae": "#388bfd", "sovereign2013": "#3fb950"}
+    wallet_colors = {"cannae": "#388bfd", "sovereign": "#3fb950", "ewelmealt": "#d29922"}
     for addr, info in wallet_map.items():
         name = info.get("name", addr[:10])
         mtypes = ", ".join(info.get("market_types", [])) or "all"
         min_p = info.get("min_price", 0)
         max_p = info.get("max_price", 1)
         color = wallet_colors.get(name.lower(), "#8b949e")
+        leagues_str = ", ".join(info.get("leagues", [])) or "all"
+        if len(leagues_str) > 60:
+            leagues_str = leagues_str[:57] + "..."
         cards += f"""
         <div class="source-box" style="border-top:3px solid {color}">
           <div class="source-title">{name}</div>
           <div class="stat-row"><span>Markets</span><span>{mtypes}</span></div>
+          <div class="stat-row"><span>Leagues</span><span style="font-size:0.75em">{leagues_str}</span></div>
           <div class="stat-row"><span>Entry range</span><span>{min_p:.0%} - {max_p:.0%}</span></div>
           <div class="stat-row"><span>Adres</span><span class="muted" style="font-size:0.75em">{addr[:10]}...{addr[-6:]}</span></div>
         </div>"""
 
-    sizing_info = """
+    # Read sizing from config
+    try:
+        config = _load_config()
+        ss = config.get("sport_sizing", {})
+        risk = config.get("risk", {})
+        sizing_lines = f"""Voetbal ML: {ss.get('voetbal_ml_pct', '?')}% | Draw: {ss.get('voetbal_draw_pct', '?')}%<br>
+        NBA ML: {ss.get('nba_ml_pct', '?')}% | Spread: {ss.get('nba_spread_pct', '?')}%<br>
+        NHL ML: {ss.get('nhl_ml_pct', '?')}% | Min bet: ${ss.get('min_bet_usdc', '?')}"""
+        max_open = risk.get("max_open_bets", "?")
+        max_deploy = risk.get("max_deployment_pct", "?")
+    except Exception:
+        sizing_lines = "Config niet beschikbaar"
+        max_open = "?"
+        max_deploy = "?"
+
+    sizing_info = f"""
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:12px">
-      <div style="font-weight:700;margin-bottom:8px">Sizing (tiered, gebaseerd op Cannae game total)</div>
+      <div style="font-weight:700;margin-bottom:8px">Sizing (proportioneel: leg_weight × conviction × max_pct)</div>
       <div style="font-family:monospace;font-size:0.85rem;color:var(--purple)">
-        Game total &lt; $1.3K → 1% bankroll<br>
-        Game total $1.3K-$5K → 1.5% bankroll<br>
-        Game total $5K-$15K → 2% bankroll<br>
-        Game total &gt; $15K → 3% bankroll
+        {sizing_lines}
       </div>
-      <div class="muted" style="font-size:0.8rem;margin-top:4px">Hoofdbet only (largest per conditionId) | GTC maker @ ask-1ct | max 50 open bets</div>
+      <div class="muted" style="font-size:0.8rem;margin-top:4px">Max {max_open} open bets | {max_deploy}% deployment cap | Taker mode</div>
     </div>"""
 
     return f"""
@@ -1434,8 +1480,11 @@ def render_live_board(trades):
             hours = diff_min / 60
             status = f'<span class="muted">{hours:.1f}h</span>'
 
-        # CET/CEST time
-        cet = start + timedelta(hours=1)
+        # CET/CEST time (proper DST handling)
+        if CET:
+            cet = start.astimezone(CET)
+        else:
+            cet = start + timedelta(hours=1)
         time_str = cet.strftime("%H:%M")
 
         # Check if already filled
@@ -1538,7 +1587,7 @@ def render_daily_pnl(trades):
         day = resolved[:10]
         if not day: continue
         by_day[day]["trades"] += 1
-        by_day[day]["pnl"] += t.get("actual_pnl") or t.get("pnl") or 0
+        by_day[day]["pnl"] += t.get("actual_pnl") if t.get("actual_pnl") is not None else (t.get("pnl") or 0)
         by_day[day]["invested"] += t.get("size_usdc") or 0
         if t.get("result") in ("win", "take_profit"):
             by_day[day]["wins"] += 1
@@ -1974,7 +2023,7 @@ def render_consensus_signals(trades, wallet_map):
         slug = trade.get("event_slug") or ""
         # Match YYYY-MM-DD in title or slug
         for text in [title, slug]:
-            m = re.search(r'(2026-\d{2}-\d{2})', text)
+            m = re.search(r'(20\d{2}-\d{2}-\d{2})', text)
             if m:
                 return m.group(1)
         # Match "March 16" etc
@@ -2026,7 +2075,9 @@ def render_consensus_signals(trades, wallet_map):
 
         resolve = t.get("_resolve_date") or ""
         resolve_short = resolve[5:] if resolve else "?"  # MM-DD
-        resolve_color = "#3fb950" if resolve and resolve <= "2026-03-16" else "#d29922" if resolve and resolve <= "2026-03-17" else "#8b949e"
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        tomorrow_str = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
+        resolve_color = "#3fb950" if resolve and resolve <= today_str else "#d29922" if resolve and resolve <= tomorrow_str else "#8b949e"
 
         rows += f"""
         <tr data-cc="{cc}">

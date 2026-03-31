@@ -19,8 +19,6 @@ pub struct WaveBudget {
     pub sport_sizing: SportSizingConfig,
     /// Cannae games: event_slug → CannaeGameInfo
     pub cannae_games: BTreeMap<String, CannaeGameInfo>,
-    /// Cached budget pct per line (refreshed every cycle with schedule data)
-    cached_budget_pct: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -42,7 +40,6 @@ impl WaveBudget {
         Self {
             sport_sizing,
             cannae_games: BTreeMap::new(),
-            cached_budget_pct: 5.0, // default until first refresh
         }
     }
 
@@ -116,15 +113,6 @@ impl WaveBudget {
         count
     }
 
-    /// Calculate the per-line budget percentage.
-    /// Uses schedule to count only games kicking off in the next 8 hours (one wave).
-    /// Falls back to count_filtered_lines if no schedule data.
-    ///
-    /// bankroll = current cash (automatically includes recycled capital).
-    pub fn line_budget_pct(&self, bankroll: f64) -> f64 {
-        self.line_budget_pct_with_schedule(bankroll, None)
-    }
-
     pub fn line_budget_pct_with_schedule(
         &self,
         bankroll: f64,
@@ -162,9 +150,9 @@ impl WaveBudget {
         deployment_cap / total_lines
     }
 
-    /// Refresh cached budget pct from schedule (call every poll cycle).
-    pub fn refresh_budget(&mut self, bankroll: f64, schedule: &crate::scheduler::GameSchedule) {
-        self.cached_budget_pct = self.line_budget_pct_with_schedule(bankroll, Some(schedule));
+    /// Refresh budget from schedule (call every poll cycle).
+    pub fn refresh_budget(&mut self, _bankroll: f64, _schedule: &crate::scheduler::GameSchedule) {
+        // Budget refreshed on demand via get_line_pct_with_schedule
     }
 
     /// Get the sizing percentage for a specific game line.

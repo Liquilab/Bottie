@@ -87,12 +87,6 @@ impl PostOrderResponse {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct CancelOrderRequest {
-    #[serde(rename = "orderID")]
-    pub order_id: String,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct FeeRateResponse {
     /// API returns "base_fee" (not "fee_rate_bps")
@@ -153,15 +147,6 @@ impl DataApiTrade {
         }
     }
 
-    pub fn trade_id(&self) -> Option<String> {
-        // Prefer explicit id field, fall back to transactionHash
-        match &self.id {
-            Some(serde_json::Value::String(s)) if !s.is_empty() => return Some(s.clone()),
-            Some(serde_json::Value::Number(n)) => return Some(n.to_string()),
-            _ => {}
-        }
-        self.transaction_hash.clone()
-    }
 }
 
 /// Activity entry from data-api/activity?user={address}
@@ -323,12 +308,6 @@ impl GammaMarketStatus {
     }
 }
 
-/// Gamma API event response for market discovery
-#[derive(Debug, Clone, Deserialize)]
-pub struct GammaEventResponse {
-    pub markets: Option<Vec<GammaMarketResponse>>,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct GammaMarketResponse {
     #[serde(rename = "conditionId")]
@@ -412,6 +391,14 @@ impl WalletPosition {
 
     pub fn initial_value_f64(&self) -> f64 {
         match &self.initial_value {
+            Some(serde_json::Value::Number(n)) => n.as_f64().unwrap_or(0.0),
+            Some(serde_json::Value::String(s)) => s.parse().unwrap_or(0.0),
+            _ => 0.0,
+        }
+    }
+
+    pub fn current_value_f64(&self) -> f64 {
+        match &self.current_value {
             Some(serde_json::Value::Number(n)) => n.as_f64().unwrap_or(0.0),
             Some(serde_json::Value::String(s)) => s.parse().unwrap_or(0.0),
             _ => 0.0,
