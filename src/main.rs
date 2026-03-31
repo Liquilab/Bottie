@@ -458,6 +458,10 @@ async fn copy_trading_loop(
                     });
 
                     for t5_match in &t5_sorted {
+                        // Skip if this game was already successfully executed by another wallet
+                        if t5_executed.contains(&t5_match.game_event_slug) {
+                            continue;
+                        }
                         let game = stability::StableGame {
                             event_slug: t5_match.game_event_slug.clone(),
                             positions: t5_match.positions.clone(),
@@ -469,13 +473,15 @@ async fn copy_trading_loop(
                             game.event_slug, game.source_name,
                             t5_match.positions.len(), t5_match.t30_position_count,
                         );
-                        execute_stable_game(
+                        let executed = execute_stable_game(
                             &game, &mut executor, &risk, &logger, &config, true,
                             &wave_budget,
                         ).await;
-                        // Always mark as executed — never retry. If the order failed,
-                        // retrying every 15 seconds spams the CLOB API and wastes fees.
-                        t5_executed.insert(t5_match.game_event_slug.clone());
+                        if executed {
+                            // Mark as executed — don't retry with other wallets
+                            t5_executed.insert(t5_match.game_event_slug.clone());
+                        }
+                        // If not executed (league filter, no bets), let another wallet try
                     }
 
                     // Cleanup: remove watched games that have already started (past due)
@@ -517,6 +523,7 @@ async fn execute_stable_game(
     // League filter
     let league = game.event_slug.split('-').next().unwrap_or("");
     if !allowed_leagues.is_empty() && !allowed_leagues.iter().any(|l| l == league) {
+        info!("GAME SKIP: {} — league '{}' not in {}'s allowed leagues", game.event_slug, league, game.source_name);
         return false;
     }
 

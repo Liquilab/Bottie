@@ -342,60 +342,55 @@ pub fn confirm_and_execute_t5(
     for game in &due_games {
         let game_slug_base = strip_more(&game.event_slug);
 
-        // Find wallet config from first snapshot entry
-        let wallet_addr = match game.wallet_snapshots.keys().next() {
-            Some(a) => a.clone(),
-            None => continue,
-        };
-        let wallet_cfg = match watchlist.iter()
-            .find(|w| w.address.to_lowercase() == wallet_addr)
-        {
-            Some(w) => w,
-            None => continue,
-        };
+        // Try ALL wallets that have positions in this game (not just the first).
+        // This ensures that if wallet A's league filter rejects, wallet B gets a chance.
+        for wallet_addr in game.wallet_snapshots.keys() {
+            let wallet_cfg = match watchlist.iter()
+                .find(|w| w.address.to_lowercase() == *wallet_addr)
+            {
+                Some(w) => w,
+                None => continue,
+            };
 
-        let current_all = match wallet_positions.get(&wallet_addr) {
-            Some(p) => p,
-            None => continue,
-        };
+            let current_all = match wallet_positions.get(wallet_addr) {
+                Some(p) => p,
+                None => continue,
+            };
 
-        // Match positions by eventSlug (fresh data, no T-30 snapshot needed)
-        let current_game_positions: Vec<WalletPosition> = current_all.iter()
-            .filter(|p| {
-                if p.size_f64() <= 0.0 { return false; }
-                let cur = p.cur_price_f64();
-                if cur <= 0.01 || cur >= 0.99 { return false; }
-                p.event_slug.as_ref()
-                    .map(|slug| strip_more(slug) == game_slug_base)
-                    .unwrap_or(false)
-            })
-            .cloned()
-            .collect();
+            // Match positions by eventSlug (fresh data, no T-30 snapshot needed)
+            let current_game_positions: Vec<WalletPosition> = current_all.iter()
+                .filter(|p| {
+                    if p.size_f64() <= 0.0 { return false; }
+                    let cur = p.cur_price_f64();
+                    if cur <= 0.01 || cur >= 0.99 { return false; }
+                    p.event_slug.as_ref()
+                        .map(|slug| strip_more(slug) == game_slug_base)
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect();
 
-        if current_game_positions.is_empty() {
+            if current_game_positions.is_empty() {
+                continue;
+            }
+
+            let mins_to_start = game.start_time.signed_duration_since(now).num_minutes();
             info!(
-                "T5 SKIP: {} no positions for {} in current data",
-                wallet_cfg.name, game.event_slug
+                "T5 CONFIRMED: {} has {} positions in {} (starts in {}min)",
+                wallet_cfg.name,
+                current_game_positions.len(),
+                game.event_slug,
+                mins_to_start,
             );
-            continue;
+
+            matches.push(T5Match {
+                wallet_name: wallet_cfg.name.clone(),
+                wallet_address: wallet_addr.clone(),
+                game_event_slug: game.event_slug.clone(),
+                positions: current_game_positions,
+                t30_position_count: 0, // no longer tracking T-30 count
+            });
         }
-
-        let mins_to_start = game.start_time.signed_duration_since(now).num_minutes();
-        info!(
-            "T5 CONFIRMED: {} has {} positions in {} (starts in {}min)",
-            wallet_cfg.name,
-            current_game_positions.len(),
-            game.event_slug,
-            mins_to_start,
-        );
-
-        matches.push(T5Match {
-            wallet_name: wallet_cfg.name.clone(),
-            wallet_address: wallet_addr.clone(),
-            game_event_slug: game.event_slug.clone(),
-            positions: current_game_positions,
-            t30_position_count: 0, // no longer tracking T-30 count
-        });
     }
 
     matches
