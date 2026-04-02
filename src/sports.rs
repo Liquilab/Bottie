@@ -92,6 +92,7 @@ pub async fn fetch_sports_markets(
                         team_a,
                         team_b,
                         sport: tag.clone(),
+                        end_date: event.end_date.clone(),
                     });
                 }
             }

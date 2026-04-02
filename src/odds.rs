@@ -195,6 +195,7 @@ pub struct PolymarketSportsMatch {
     pub team_a: String,
     pub team_b: String,
     pub sport: String,
+    pub end_date: Option<String>,
 }
 
 /// Grouped event: all main markets (win A, win B, draw) for one event
