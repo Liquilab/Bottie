@@ -597,7 +597,8 @@ async fn execute_stable_game(
         }
     }
 
-    // Football conviction: if win hauptbet is YES AND Draw NO > Draw YES → add extra legs
+    // Football: if win hauptbet is NO → only buy that NO, no draw (NO already covers draw)
+    // If win hauptbet is YES → conviction logic applies (add team B NO + draw NO)
     if is_football && !bets.is_empty() {
         let win_hauptbet = bets.iter().find(|b| b.game_line == "win");
         if let Some(win_bet) = win_hauptbet {
@@ -607,7 +608,11 @@ async fn execute_stable_game(
                     && !win_outcome.eq_ignore_ascii_case("Under")
                     && !win_outcome.eq_ignore_ascii_case("Over"));
 
-            if win_is_yes {
+            if !win_is_yes {
+                // Hauptbet is NO → remove draw (NO already profits on draw outcome)
+                bets.retain(|b| b.game_line != "draw");
+                info!("GAME MODE: {} → NO-HAUPTBET (1 bet, no draw)", game.event_slug);
+            } else if win_is_yes {
                 // Check draw: is Draw NO > Draw YES?
                 let draw_positions: Vec<_> = game.positions.iter()
                     .filter(|p| CopyTrader::detect_market_type(p.title.as_deref().unwrap_or("")) == "draw")
