@@ -180,7 +180,11 @@ impl Executor {
                 Ok((ask, depth)) if ask > 0.0 && ask < 1.0 => {
                     // Round to tick size (0.01) — PM rejects prices like 0.5002
                     let ask = (ask * 100.0).ceil() / 100.0;
-                    if ask > signal.price * 1.25 {
+                    // Skip price-drift check for close_games (Gamma outcomePrices are stale)
+                    let is_close_games_signal = signal.sources.iter().any(|s| {
+                        if let SignalSource::OddsArb(arb) = s { arb.bookmaker == "close_games" } else { false }
+                    });
+                    if !is_close_games_signal && ask > signal.price * 1.25 {
                         info!(
                             "SKIP: price moved too much for {} (was {:.0}ct, now {:.0}ct)",
                             signal.market_title,
@@ -268,7 +272,21 @@ impl Executor {
         };
 
         let is_copy = signal.sources.iter().any(|s| matches!(s, SignalSource::Copy(_)));
-        let size = if is_copy && market_type_multiplier > 0.0 {
+        let is_close_games = signal.sources.iter().any(|s| {
+            if let SignalSource::OddsArb(arb) = s {
+                arb.bookmaker == "close_games"
+            } else {
+                false
+            }
+        });
+        let size = if is_close_games {
+            // Close games: use configured flat USDC size, convert to shares
+            let flat_usdc = {
+                let config = self.config.read().await;
+                config.odds_arb.flat_size_usdc
+            };
+            if exec_price > 0.0 { flat_usdc / exec_price } else { 0.0 }
+        } else if is_copy && market_type_multiplier > 0.0 {
             // Flat sizing: market_type_multiplier is the size_pct from wave budget
             sizing::flat_size(risk.bankroll(), market_type_multiplier, exec_price)
         } else {
