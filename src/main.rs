@@ -443,6 +443,9 @@ async fn copy_trading_loop(
                         &raw_positions,
                     );
 
+                    // Always use latest config for sizing (hot-reload may have changed %)
+                    wave_budget.update_config(config.read().await.sport_sizing.clone());
+
                     // Sort T5 matches by Cannae game total DESC (biggest games first)
                     let mut t5_sorted = t5_matches;
                     t5_sorted.sort_by(|a, b| {
@@ -475,11 +478,13 @@ async fn copy_trading_loop(
                         );
                         let executed = execute_stable_game(
                             &game, &mut executor, &risk, &logger, &config, true,
-                            &wave_budget,
+                            &wave_budget, &client, &game_schedule,
                         ).await;
                         if executed {
                             // Mark as executed — don't retry with other wallets
                             t5_executed.insert(t5_match.game_event_slug.clone());
+                            // Brief pause between orders to avoid CLOB 425 rate limit
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         }
                         // If not executed (league filter, no bets), let another wallet try
                     }
@@ -509,6 +514,8 @@ async fn execute_stable_game(
     config: &SharedConfig,
     taker_mode: bool,
     wave_budget: &budget::WaveBudget,
+    client: &Arc<ClobClient>,
+    game_schedule: &scheduler::GameSchedule,
 ) -> bool {
     use crate::copy_trader::CopyTrader;
 
@@ -563,8 +570,8 @@ async fn execute_stable_game(
     }
 
     // Classify all positions by game line, using currentValue for hauptbet selection
-    struct GameLineBet<'a> {
-        pos: &'a crate::clob::types::WalletPosition,
+    struct GameLineBet {
+        pos: crate::clob::types::WalletPosition,
         game_line: String,
         size_pct: f64,
     }
@@ -585,7 +592,7 @@ async fn execute_stable_game(
         if let Some(pos) = hauptbet {
             let pct = wave_budget.get_line_pct(bankroll, league, gl);
             if pct > 0.0 {
-                bets.push(GameLineBet { pos, game_line: gl.to_string(), size_pct: pct });
+                bets.push(GameLineBet { pos: pos.clone(), game_line: gl.to_string(), size_pct: pct });
             }
         }
     }
@@ -617,22 +624,21 @@ async fn execute_stable_game(
                 if draw_no_cv > draw_yes_cv {
                     // CONVICTION: win hauptbet is YES + draw NO > draw YES
                     // Add: Team B NO (all win-line NOs that aren't the hauptbet)
-                    let win_cid = win_bet.pos.condition_id.as_deref().unwrap_or("");
+                    let win_cid = win_bet.pos.condition_id.as_deref().unwrap_or("").to_owned();
                     let pct = wave_budget.get_line_pct(bankroll, league, "win");
                     for pos in &game.positions {
                         let title = pos.title.as_deref().unwrap_or("");
                         if CopyTrader::detect_market_type(title) != "win" { continue; }
                         let cid = pos.condition_id.as_deref().unwrap_or("");
-                        if cid == win_cid { continue; } // skip same condition as hauptbet
+                        if cid == win_cid.as_str() { continue; } // skip same condition as hauptbet
                         let outcome = pos.outcome.as_deref().unwrap_or("");
                         if !outcome.eq_ignore_ascii_case("No") { continue; }
-                        // Find the NO with highest currentValue for this conditionId
                         let already_added = bets.iter().any(|b| {
                             b.pos.condition_id.as_deref().unwrap_or("") == cid
                         });
                         if already_added { continue; }
                         if pct > 0.0 {
-                            bets.push(GameLineBet { pos, game_line: "win".to_string(), size_pct: pct });
+                            bets.push(GameLineBet { pos: pos.clone(), game_line: "win".to_string(), size_pct: pct });
                         }
                     }
                     // Add: Draw NO (highest currentValue draw NO)
@@ -640,15 +646,61 @@ async fn execute_stable_game(
                         .filter(|p| p.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No"))
                         .max_by(|a, b| a.current_value_f64().partial_cmp(&b.current_value_f64()).unwrap_or(std::cmp::Ordering::Equal));
                     if let Some(dn) = draw_no {
-                        let draw_already = bets.iter().any(|b| b.game_line == "draw");
-                        if !draw_already {
-                            let dpct = wave_budget.get_line_pct(bankroll, league, "draw");
-                            if dpct > 0.0 {
-                                bets.push(GameLineBet { pos: dn, game_line: "draw".to_string(), size_pct: dpct });
-                            }
+                        // Conviction overrides STANDARD draw: remove wrong side, add correct NO
+                        bets.retain(|b| b.game_line != "draw");
+                        let dpct = wave_budget.get_line_pct(bankroll, league, "draw");
+                        if dpct > 0.0 {
+                            bets.push(GameLineBet { pos: (*dn).clone(), game_line: "draw".to_string(), size_pct: dpct });
                         }
                     }
                     info!("GAME MODE: {} → CONVICTION ({} bets)", game.event_slug, bets.len());
+                } else if draw_positions.is_empty() {
+                    // TEAMB_NO: Cannae only has Team A=Yes with no draw coverage.
+                    // Team B=No is strictly better: wins on Team A win AND draw.
+                    // Substitute: replace Team A=Yes with Team B=No from schedule.
+                    let win_cid = win_bet.pos.condition_id.as_deref().unwrap_or("").to_owned();
+                    // draw_cids would be empty here (no draw positions), but compute defensively
+                    let draw_cids: Vec<&str> = game.positions.iter()
+                        .filter(|p| CopyTrader::detect_market_type(p.title.as_deref().unwrap_or("")) == "draw")
+                        .filter_map(|p| p.condition_id.as_deref())
+                        .collect();
+                    match game_schedule.find_opponent_no_token(&game.event_slug, &win_cid, &draw_cids) {
+                        Some((opp_cid, no_token_id)) => {
+                            // Look up price: ask_No ≈ 1 - bid_Yes for opponent's condition
+                            let no_price = match game_schedule.find_yes_token(&game.event_slug, &opp_cid) {
+                                Some(yes_tok) => {
+                                    client.get_best_bid(&yes_tok).await
+                                        .map(|p| (1.0 - p).max(0.30).min(0.90))
+                                        .unwrap_or(0.55)
+                                }
+                                None => 0.55,
+                            };
+                            // Build synthetic position for Team B=No
+                            let mut sub_pos = win_bet.pos.clone();
+                            sub_pos.asset = Some(no_token_id);
+                            sub_pos.condition_id = Some(opp_cid.clone());
+                            sub_pos.outcome = Some("No".to_string());
+                            sub_pos.avg_price = Some(serde_json::json!(no_price));
+                            sub_pos.cur_price = Some(serde_json::json!(no_price));
+                            // Replace Team A=Yes with Team B=No
+                            bets.retain(|b| b.game_line != "win");
+                            let pct = wave_budget.get_line_pct(bankroll, league, "win");
+                            if pct > 0.0 {
+                                bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: pct });
+                            }
+                            info!(
+                                "GAME MODE: {} → TEAMB_NO (opp_cid={}..{}, price={:.0}ct, {} bets)",
+                                game.event_slug,
+                                &opp_cid[..opp_cid.len().min(8)],
+                                &opp_cid[opp_cid.len().saturating_sub(4)..],
+                                no_price * 100.0,
+                                bets.len(),
+                            );
+                        }
+                        None => {
+                            info!("GAME MODE: {} → STANDARD (opponent No token not in schedule, using Team A=Yes)", game.event_slug);
+                        }
+                    }
                 } else {
                     info!("GAME MODE: {} → STANDARD ({} bets)", game.event_slug, bets.len());
                 }
@@ -682,7 +734,7 @@ async fn execute_stable_game(
     // Execute each game line bet
     let mut any_filled = false;
     for bet in &bets {
-        let pos = bet.pos;
+        let pos = &bet.pos;
         let title = pos.title.as_deref().unwrap_or("").to_string();
         let condition_id = pos.condition_id.as_deref().unwrap_or("").to_string();
         let outcome = pos.outcome.as_deref().unwrap_or("").to_string();
@@ -817,18 +869,43 @@ async fn odds_arb_loop(
 
         match sports::fetch_sports_markets(&client, &pm_sports_tags).await {
             Ok(pm_markets) => {
-                let arb_signals =
-                    odds::find_arb_opportunities(&all_odds, &pm_markets, odds_config.min_edge_pct);
+                let signals = if odds_config.mode == "close_games" {
+                    let sigs = odds::find_close_game_signals(
+                        &all_odds,
+                        &pm_markets,
+                        odds_config.max_competitiveness_pct,
+                    );
+                    if !sigs.is_empty() {
+                        info!(
+                            "CLOSE_GAMES: found {} signals from close games (comp < {:.0}%)",
+                            sigs.len(),
+                            odds_config.max_competitiveness_pct
+                        );
+                    }
+                    sigs
+                } else {
+                    odds::find_arb_opportunities(&all_odds, &pm_markets, odds_config.min_edge_pct)
+                };
 
-                if !arb_signals.is_empty() {
-                    info!("found {} arb opportunities", arb_signals.len());
-                    let aggregated = SignalAggregator::aggregate(&[], &arb_signals);
+                if !signals.is_empty() {
+                    if odds_config.log_only {
+                        info!("LOG_ONLY: would execute {} signals:", signals.len());
+                        for sig in &signals {
+                            info!(
+                                "  LOG_ONLY: {} | price={:.3} | bm_prob={:.3} | comp={:.1}%",
+                                sig.market_title, sig.pm_price, sig.bookmaker_prob, sig.edge_pct
+                            );
+                        }
+                    } else {
+                        info!("executing {} odds signals", signals.len());
+                        let aggregated = SignalAggregator::aggregate(&[], &signals);
 
-                    for signal in &aggregated {
-                        let mut risk_guard = risk.write().await;
-                        match executor.execute(signal, &mut risk_guard, &logger).await {
-                            Ok(_) => {}
-                            Err(e) => warn!("arb execution error: {e}"),
+                        for signal in &aggregated {
+                            let mut risk_guard = risk.write().await;
+                            match executor.execute(signal, &mut risk_guard, &logger).await {
+                                Ok(_) => {}
+                                Err(e) => warn!("arb execution error: {e}"),
+                            }
                         }
                     }
                 }
@@ -844,9 +921,7 @@ fn pm_tag_from_odds_sport(odds_sport: &str) -> String {
     match odds_sport {
         "basketball_nba" => "nba".to_string(),
         "icehockey_nhl" => "nhl".to_string(),
-        "soccer_epl"
-        | "soccer_uefa_champs_league"
-        | "soccer_uefa_europa_league" => "soccer".to_string(),
+        s if s.starts_with("soccer_") => "soccer".to_string(),
         s if s.starts_with("tennis_") => "tennis".to_string(),
         "mma_mixed_martial_arts" => "mma".to_string(),
         other => other.to_string(),
