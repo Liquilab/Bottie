@@ -270,16 +270,28 @@ impl ClobClient {
         let body = post_order(make_clob_order(signature, false))?;
         debug!("POST /order body: {}", &body[..body.len().min(500)]);
 
-        let builder = self.http.post(format!("{CLOB_API}{path}"));
-        let builder = self.l2_request(builder, "POST", path, Some(&body))?;
-        let resp = builder
-            .header("Content-Type", "application/json")
-            .body(body)
-            .send()
-            .await?;
-
-        let status = resp.status();
-        let text = resp.text().await?;
+        let (status, text) = {
+            let mut last_status = reqwest::StatusCode::default();
+            let mut last_text = String::new();
+            for attempt in 0..4u32 {
+                let builder = self.http.post(format!("{CLOB_API}{path}"));
+                let builder = self.l2_request(builder, "POST", path, Some(&body))?;
+                let resp = builder
+                    .header("Content-Type", "application/json")
+                    .body(body.clone())
+                    .send()
+                    .await?;
+                last_status = resp.status();
+                last_text = resp.text().await?;
+                if last_status.is_success() || (last_status.as_u16() != 425 && last_status.as_u16() != 429) {
+                    break;
+                }
+                let wait_secs = (attempt + 1) * 2;
+                warn!("POST /order got {last_status}, retry {}/{} after {wait_secs}s", attempt + 1, 3);
+                tokio::time::sleep(std::time::Duration::from_secs(wait_secs as u64)).await;
+            }
+            (last_status, last_text)
+        };
 
         // If invalid signature, retry with opposite neg_risk setting (standard exchange)
         if !status.is_success() && text.contains("invalid signature") {
@@ -473,20 +485,30 @@ impl ClobClient {
     pub async fn search_sports_events(&self, tag_slug: &str) -> Result<Vec<GammaSportsEvent>> {
         let now = chrono::Utc::now();
         let end_date_min = now.format("%Y-%m-%dT%H:%M:%SZ");
-        // No end_date_max: MLB/NFL endDates are a week+ after the game.
-        // active=true&closed=false is sufficient to filter.
-        let url = format!(
-            "{GAMMA_API}/events?active=true&closed=false&tag_slug={tag_slug}&end_date_min={end_date_min}&limit=100"
-        );
-        let events: Vec<GammaSportsEvent> = self
-            .http
-            .get(&url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        Ok(events)
+        // Paginate: soccer alone has 500+ events, limit=100 missed bra/es2/efa leagues.
+        let mut all_events: Vec<GammaSportsEvent> = Vec::new();
+        let mut offset = 0usize;
+        const PAGE: usize = 500;
+        loop {
+            let url = format!(
+                "{GAMMA_API}/events?active=true&closed=false&tag_slug={tag_slug}&end_date_min={end_date_min}&limit={PAGE}&offset={offset}"
+            );
+            let batch: Vec<GammaSportsEvent> = self
+                .http
+                .get(&url)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            let n = batch.len();
+            all_events.extend(batch);
+            if n < PAGE {
+                break;
+            }
+            offset += PAGE;
+        }
+        Ok(all_events)
     }
 
     // --- On-chain USDC balance ---

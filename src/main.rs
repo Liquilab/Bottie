@@ -609,9 +609,24 @@ async fn execute_stable_game(
                     && !win_outcome.eq_ignore_ascii_case("Over"));
 
             if !win_is_yes {
-                // Hauptbet is NO → remove draw (NO already profits on draw outcome)
-                bets.retain(|b| b.game_line != "draw");
-                info!("GAME MODE: {} → NO-HAUPTBET (1 bet, no draw)", game.event_slug);
+                // Hauptbet is NO → check if Cannae has Draw YES (= deliberate draw bet, pays 3-4x)
+                let draw_positions: Vec<_> = game.positions.iter()
+                    .filter(|p| CopyTrader::detect_market_type(p.title.as_deref().unwrap_or("")) == "draw")
+                    .collect();
+                let draw_yes_cv: f64 = draw_positions.iter()
+                    .filter(|p| p.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("Yes"))
+                    .map(|p| p.current_value_f64())
+                    .sum();
+                if draw_yes_cv > 0.0 {
+                    // Cannae has Draw YES → keep it (deliberate draw bet)
+                    // But remove any Draw NO (redundant with win NO)
+                    bets.retain(|b| !(b.game_line == "draw" && b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No")));
+                    info!("GAME MODE: {} → NO-HAUPTBET+DRAW (win NO + draw YES, {} bets)", game.event_slug, bets.len());
+                } else {
+                    // No Draw YES → remove all draw (win NO already covers draw outcome)
+                    bets.retain(|b| b.game_line != "draw");
+                    info!("GAME MODE: {} → NO-HAUPTBET (1 bet, no draw)", game.event_slug);
+                }
             } else if win_is_yes {
                 // Check draw: is Draw NO > Draw YES?
                 let draw_positions: Vec<_> = game.positions.iter()
@@ -707,7 +722,42 @@ async fn execute_stable_game(
                         }
                     }
                 } else {
-                    info!("GAME MODE: {} → STANDARD ({} bets)", game.event_slug, bets.len());
+                    // Draw YES dominates → Cannae hedges draw. Replace Win YES with Team B NO
+                    // (covers both win AND draw outcome, strictly better than Win YES)
+                    let win_cid = win_bet.pos.condition_id.as_deref().unwrap_or("").to_owned();
+                    let draw_cids: Vec<&str> = draw_positions.iter()
+                        .filter_map(|p| p.condition_id.as_deref())
+                        .collect();
+                    match game_schedule.find_opponent_no_token(&game.event_slug, &win_cid, &draw_cids) {
+                        Some((opp_cid, no_token_id)) => {
+                            let no_price = match game_schedule.find_yes_token(&game.event_slug, &opp_cid) {
+                                Some(yes_tok) => {
+                                    client.get_best_bid(&yes_tok).await
+                                        .map(|p| (1.0 - p).max(0.30).min(0.90))
+                                        .unwrap_or(0.55)
+                                }
+                                None => 0.55,
+                            };
+                            let mut sub_pos = win_bet.pos.clone();
+                            sub_pos.asset = Some(no_token_id);
+                            sub_pos.condition_id = Some(opp_cid.clone());
+                            sub_pos.outcome = Some("No".to_string());
+                            sub_pos.avg_price = Some(serde_json::json!(no_price));
+                            sub_pos.cur_price = Some(serde_json::json!(no_price));
+                            bets.retain(|b| b.game_line != "win");
+                            let pct = wave_budget.get_line_pct(bankroll, league, "win");
+                            if pct > 0.0 {
+                                bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: pct });
+                            }
+                            info!(
+                                "GAME MODE: {} → DRAW_HEDGE (win YES→opp NO + draw YES, {} bets)",
+                                game.event_slug, bets.len(),
+                            );
+                        }
+                        None => {
+                            info!("GAME MODE: {} → STANDARD (opponent No not in schedule, keeping win YES + draw YES, {} bets)", game.event_slug, bets.len());
+                        }
+                    }
                 }
             } else {
                 info!("GAME MODE: {} → STANDARD ({} bets)", game.event_slug, bets.len());

@@ -300,6 +300,30 @@ pub struct OddsArbConfig {
     pub base_url: String,
     pub sports: Vec<String>,
     pub min_edge_pct: f64,
+    /// "arb" (default) or "close_games"
+    #[serde(default = "default_odds_mode")]
+    pub mode: String,
+    /// Max competitiveness % for close_games mode (fav_prob - dog_prob)
+    #[serde(default = "default_max_competitiveness")]
+    pub max_competitiveness_pct: f64,
+    /// Flat bet size in USDC for close_games mode
+    #[serde(default = "default_flat_size")]
+    pub flat_size_usdc: f64,
+    /// Log-only mode (paper trading): log signals but don't execute
+    #[serde(default)]
+    pub log_only: bool,
+}
+
+fn default_odds_mode() -> String {
+    "arb".to_string()
+}
+
+fn default_max_competitiveness() -> f64 {
+    10.0
+}
+
+fn default_flat_size() -> f64 {
+    2.50
 }
 
 #[derive(Debug, Clone, Deserialize)]

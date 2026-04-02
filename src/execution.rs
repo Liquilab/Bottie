@@ -41,6 +41,11 @@ impl Executor {
             if pos.size_f64() < 0.01 {
                 continue;
             }
+            // Skip resolved positions (curPrice 0 or 1 = already settled)
+            let cur = pos.cur_price_f64();
+            if cur <= 0.01 || cur >= 0.99 {
+                continue;
+            }
             let cid = pos.condition_id.as_deref().unwrap_or("");
             let outcome = pos.outcome.as_deref().unwrap_or("");
             if cid.is_empty() {
@@ -61,7 +66,7 @@ impl Executor {
     }
 
     /// Execute with flat sizing: bankroll × pct% / price = shares.
-    /// No proportional weighting, no conviction, no Kelly.
+    /// No proportional weighting, no conviction.
     pub async fn execute_flat(
         &mut self,
         signal: &AggregatedSignal,
@@ -264,7 +269,7 @@ impl Executor {
             }
         }
 
-        // Size the trade (using exec_price for accurate Kelly and edge)
+        // Size the trade using exec_price
         let exec_edge_pct = if signal.combined_confidence > 0.5 && exec_price > 0.0 {
             (signal.combined_confidence - exec_price) / exec_price * 100.0
         } else {

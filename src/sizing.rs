@@ -1,6 +1,6 @@
 /// Flat sizing: bankroll × pct / price = shares.
 ///
-/// No proportional weighting, no conviction, no Kelly.
+/// No proportional weighting, no conviction.
 /// The pct is determined by sport + game line (from SportSizingConfig),
 /// capped by wave budget (bankroll / total_lines_in_wave).
 ///

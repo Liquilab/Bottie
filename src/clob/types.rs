@@ -317,6 +317,7 @@ pub struct GammaMarketResponse {
     pub tokens: Option<Vec<GammaTokenResponse>>,
     #[serde(rename = "outcomePrices")]
     pub outcome_prices: Option<serde_json::Value>,
+    pub question: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -197,6 +197,222 @@ pub struct PolymarketSportsMatch {
     pub sport: String,
 }
 
+/// Grouped event: all main markets (win A, win B, draw) for one event
+#[derive(Debug, Clone)]
+pub struct GroupedEvent {
+    pub event_title: String,
+    pub team_a: String,
+    pub team_b: String,
+    /// "Will Team A win?" market
+    pub win_a: Option<PolymarketSportsMatch>,
+    /// "Will Team B win?" market
+    pub win_b: Option<PolymarketSportsMatch>,
+    /// "Will X vs Y end in a draw?" market
+    pub draw: Option<PolymarketSportsMatch>,
+    /// Bookmaker consensus probabilities
+    pub bm_prob_a: f64,
+    pub bm_prob_b: f64,
+    pub bm_prob_draw: f64,
+    /// Competitiveness = abs(fav_prob - dog_prob) as percentage
+    pub competitiveness_pct: f64,
+}
+
+/// Find close game signals: events where competitiveness < threshold
+/// Returns signals for Win NO legs on both teams + Draw YES
+pub fn find_close_game_signals(
+    odds_events: &[OddsEvent],
+    pm_markets: &[PolymarketSportsMatch],
+    max_competitiveness_pct: f64,
+) -> Vec<ArbSignal> {
+    let mut signals = Vec::new();
+    let grouped = group_event_markets(odds_events, pm_markets);
+
+    for event in &grouped {
+        if event.competitiveness_pct > max_competitiveness_pct {
+            debug!(
+                "SKIP close_games: {} (comp={:.1}% > {:.1}%)",
+                event.event_title, event.competitiveness_pct, max_competitiveness_pct
+            );
+            continue;
+        }
+
+        info!(
+            "CLOSE GAME: {} | comp={:.1}% | bm: A={:.0}% B={:.0}% D={:.0}%",
+            event.event_title,
+            event.competitiveness_pct,
+            event.bm_prob_a * 100.0,
+            event.bm_prob_b * 100.0,
+            event.bm_prob_draw * 100.0,
+        );
+
+        // Generate Win NO signals for both teams (NO wins when team doesn't win)
+        if let Some(ref win_a) = event.win_a {
+            signals.push(ArbSignal {
+                token_id: win_a.no_token_id.clone(),
+                condition_id: win_a.condition_id.clone(),
+                side: "BUY".to_string(),
+                pm_price: win_a.no_price,
+                implied_prob: win_a.no_price,
+                bookmaker_prob: 1.0 - event.bm_prob_a,
+                edge_pct: event.competitiveness_pct,
+                market_title: format!("{} NO", win_a.title),
+                sport: win_a.sport.clone(),
+                bookmaker: "close_games".to_string(),
+            });
+        }
+
+        if let Some(ref win_b) = event.win_b {
+            signals.push(ArbSignal {
+                token_id: win_b.no_token_id.clone(),
+                condition_id: win_b.condition_id.clone(),
+                side: "BUY".to_string(),
+                pm_price: win_b.no_price,
+                implied_prob: win_b.no_price,
+                bookmaker_prob: 1.0 - event.bm_prob_b,
+                edge_pct: event.competitiveness_pct,
+                market_title: format!("{} NO", win_b.title),
+                sport: win_b.sport.clone(),
+                bookmaker: "close_games".to_string(),
+            });
+        }
+
+        // Generate Draw YES signal
+        if let Some(ref draw) = event.draw {
+            signals.push(ArbSignal {
+                token_id: draw.yes_token_id.clone(),
+                condition_id: draw.condition_id.clone(),
+                side: "BUY".to_string(),
+                pm_price: draw.yes_price,
+                implied_prob: draw.yes_price,
+                bookmaker_prob: event.bm_prob_draw,
+                edge_pct: event.competitiveness_pct,
+                market_title: format!("{} YES", draw.title),
+                sport: draw.sport.clone(),
+                bookmaker: "close_games".to_string(),
+            });
+        }
+    }
+
+    signals
+}
+
+/// Group PM markets by event and match with bookmaker odds
+fn group_event_markets(
+    odds_events: &[OddsEvent],
+    pm_markets: &[PolymarketSportsMatch],
+) -> Vec<GroupedEvent> {
+    // Group PM markets by event: markets with same teams belong to same event
+    let mut event_groups: Vec<GroupedEvent> = Vec::new();
+
+    for pm in pm_markets {
+        let title_lower = pm.title.to_lowercase();
+
+        // Skip non-main-market (O/U, BTTS, spread)
+        let is_win = title_lower.contains("will") && title_lower.contains("win");
+        let is_draw = title_lower.contains("end in a draw");
+        if !is_win && !is_draw {
+            continue;
+        }
+
+        // Find or create event group
+        let group = event_groups.iter_mut().find(|g| {
+            fuzzy_match_teams(&g.team_a, &g.team_b, &pm.team_a, &pm.team_b)
+                || fuzzy_match_teams(&g.team_a, &g.team_b, &pm.team_b, &pm.team_a)
+        });
+
+        let group = match group {
+            Some(g) => g,
+            None => {
+                event_groups.push(GroupedEvent {
+                    event_title: format!("{} vs {}", pm.team_a, pm.team_b),
+                    team_a: pm.team_a.clone(),
+                    team_b: pm.team_b.clone(),
+                    win_a: None,
+                    win_b: None,
+                    draw: None,
+                    bm_prob_a: 0.0,
+                    bm_prob_b: 0.0,
+                    bm_prob_draw: 0.0,
+                    competitiveness_pct: 100.0,
+                });
+                event_groups.last_mut().unwrap()
+            }
+        };
+
+        if is_draw {
+            group.draw = Some(pm.clone());
+        } else if is_win {
+            // Determine which team this "Will X win?" belongs to
+            // Extract team name from title: "Will {Team} win on {date}?"
+            let team_in_title = extract_team_from_win_title(&pm.title);
+            let norm = |s: &str| s.to_lowercase().replace(['-', '_', '.'], " ");
+            let team_norm = norm(&team_in_title);
+            let a_norm = norm(&group.team_a);
+            let b_norm = norm(&group.team_b);
+
+            if team_norm.contains(&a_norm) || a_norm.contains(&team_norm) {
+                group.win_a = Some(pm.clone());
+            } else if team_norm.contains(&b_norm) || b_norm.contains(&team_norm) {
+                group.win_b = Some(pm.clone());
+            } else {
+                // Can't determine — assign to first empty slot
+                if group.win_a.is_none() {
+                    group.win_a = Some(pm.clone());
+                } else if group.win_b.is_none() {
+                    group.win_b = Some(pm.clone());
+                }
+            }
+        }
+    }
+
+    // Match with bookmaker odds and calculate competitiveness
+    for group in &mut event_groups {
+        let matching_event = odds_events.iter().find(|e| {
+            let home = e.home_team.as_deref().unwrap_or("");
+            let away = e.away_team.as_deref().unwrap_or("");
+            fuzzy_match_teams(&group.team_a, &group.team_b, home, away)
+        });
+
+        if let Some(event) = matching_event {
+            let home = event.home_team.as_deref().unwrap_or("");
+            let away = event.away_team.as_deref().unwrap_or("");
+
+            // Get consensus probs with vig removal
+            let prob_home = OddsClient::consensus_probability(event, home).unwrap_or(0.33);
+            let prob_away = OddsClient::consensus_probability(event, away).unwrap_or(0.33);
+            let prob_draw = OddsClient::consensus_probability(event, "Draw").unwrap_or(0.28);
+
+            // Remove vig (normalize to 100%)
+            let total = prob_home + prob_away + prob_draw;
+            if total > 0.0 {
+                group.bm_prob_a = prob_home / total;
+                group.bm_prob_b = prob_away / total;
+                group.bm_prob_draw = prob_draw / total;
+            }
+
+            let fav = group.bm_prob_a.max(group.bm_prob_b);
+            let dog = group.bm_prob_a.min(group.bm_prob_b);
+            group.competitiveness_pct = (fav - dog) * 100.0;
+        }
+        // If no bookmaker match found, competitiveness stays at 100% = filtered out
+    }
+
+    event_groups
+}
+
+/// Extract team name from "Will {Team} win on {date}?" title
+fn extract_team_from_win_title(title: &str) -> String {
+    let t = title.trim();
+    // Remove "Will " prefix
+    let rest = if let Some(r) = t.strip_prefix("Will ") { r } else { t };
+    // Find " win" and take everything before it
+    if let Some(idx) = rest.to_lowercase().find(" win") {
+        rest[..idx].trim().to_string()
+    } else {
+        rest.to_string()
+    }
+}
+
 fn fuzzy_match_teams(pm_a: &str, pm_b: &str, odds_home: &str, odds_away: &str) -> bool {
     let normalize = |s: &str| s.to_lowercase().replace(['-', '_', '.'], " ");
     let pm_a = normalize(pm_a);

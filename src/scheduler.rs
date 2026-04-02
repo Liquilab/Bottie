@@ -16,7 +16,9 @@ pub struct UpcomingGame {
     pub title: String,
     pub start_time: DateTime<Utc>,
     pub condition_ids: Vec<String>,
-    pub token_ids: Vec<(String, String)>, // (outcome, token_id)
+    /// Per-market tokens: (condition_id, question, [(outcome, token_id)])
+    /// The question allows distinguishing draw markets from win markets.
+    pub market_tokens: Vec<(String, String, Vec<(String, String)>)>,
     pub sport_tag: String,
 }
 
@@ -79,6 +81,47 @@ impl GameSchedule {
     pub fn needs_refresh(&self, max_age_minutes: i64) -> bool {
         let age = Utc::now().signed_duration_since(self.last_refresh);
         age.num_minutes() >= max_age_minutes
+    }
+
+    /// Find the "No" token for the opponent's win market.
+    ///
+    /// Given:
+    /// - `event_slug`: the game to look up
+    /// - `hauptbet_cid`: the condition_id of Team A's win market (to exclude)
+    /// - `draw_cids`: condition_ids that belong to draw markets (to exclude)
+    ///
+    /// Returns `(opponent_condition_id, no_token_id)` for the first remaining
+    /// win-type condition (i.e. Team B's win market).
+    pub fn find_opponent_no_token(
+        &self,
+        event_slug: &str,
+        hauptbet_cid: &str,
+        draw_cids: &[&str],
+    ) -> Option<(String, String)> {
+        let game = self.games.iter().find(|g| g.event_slug == event_slug)?;
+        for (cid, question, tokens) in &game.market_tokens {
+            if cid == hauptbet_cid { continue; }
+            if draw_cids.contains(&cid.as_str()) { continue; }
+            // Skip draw markets by question text (e.g. "will it be a draw?")
+            if question.contains("draw") { continue; }
+            // This should be the opponent's win condition
+            if let Some((_, no_tok)) = tokens.iter().find(|(o, _)| o.eq_ignore_ascii_case("No")) {
+                return Some((cid.clone(), no_tok.clone()));
+            }
+        }
+        None
+    }
+
+    /// Find the "Yes" token for a given condition_id.
+    pub fn find_yes_token(&self, event_slug: &str, condition_id: &str) -> Option<String> {
+        let game = self.games.iter().find(|g| g.event_slug == event_slug)?;
+        for (cid, _question, tokens) in &game.market_tokens {
+            if cid != condition_id { continue; }
+            return tokens.iter()
+                .find(|(o, _)| o.eq_ignore_ascii_case("Yes"))
+                .map(|(_, tid)| tid.clone());
+        }
+        None
     }
 }
 
@@ -152,18 +195,24 @@ fn parse_event(event: &GammaSportsEvent, sport_tag: &str) -> Option<UpcomingGame
         .with_timezone(&Utc);
 
     let mut condition_ids = Vec::new();
-    let mut token_ids = Vec::new();
+    let mut market_tokens = Vec::new();
 
     if let Some(markets) = &event.markets {
         for market in markets {
             if let Some(cid) = &market.condition_id {
                 condition_ids.push(cid.clone());
-            }
-            if let Some(tokens) = &market.tokens {
-                for token in tokens {
-                    if let (Some(outcome), Some(tid)) = (&token.outcome, &token.token_id) {
-                        token_ids.push((outcome.clone(), tid.clone()));
-                    }
+                if let Some(tokens) = &market.tokens {
+                    let question = market.question.as_deref().unwrap_or("").to_lowercase();
+                    let pairs: Vec<(String, String)> = tokens.iter()
+                        .filter_map(|t| {
+                            if let (Some(o), Some(tid)) = (&t.outcome, &t.token_id) {
+                                Some((o.clone(), tid.clone()))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    market_tokens.push((cid.clone(), question, pairs));
                 }
             }
         }
@@ -178,7 +227,7 @@ fn parse_event(event: &GammaSportsEvent, sport_tag: &str) -> Option<UpcomingGame
         title,
         start_time,
         condition_ids,
-        token_ids,
+        market_tokens,
         sport_tag: sport_tag.to_string(),
     })
 }
@@ -410,7 +459,7 @@ mod tests {
                     title: "Soon Game".to_string(),
                     start_time: now + chrono::Duration::minutes(20),
                     condition_ids: vec!["cid1".to_string()],
-                    token_ids: vec![],
+                    market_tokens: vec![],
                     sport_tag: "nba".to_string(),
                 },
                 UpcomingGame {
@@ -418,7 +467,7 @@ mod tests {
                     title: "Later Game".to_string(),
                     start_time: now + chrono::Duration::minutes(60),
                     condition_ids: vec!["cid2".to_string()],
-                    token_ids: vec![],
+                    market_tokens: vec![],
                     sport_tag: "nba".to_string(),
                 },
                 UpcomingGame {
@@ -426,7 +475,7 @@ mod tests {
                     title: "Past Game".to_string(),
                     start_time: now - chrono::Duration::minutes(10),
                     condition_ids: vec!["cid3".to_string()],
-                    token_ids: vec![],
+                    market_tokens: vec![],
                     sport_tag: "nba".to_string(),
                 },
             ],
@@ -479,6 +528,7 @@ mod tests {
                     },
                 ]),
                 outcome_prices: None,
+                question: None,
             }]),
             tags: None,
         };
@@ -486,7 +536,8 @@ mod tests {
         let game = parse_event(&event, "nba").unwrap();
         assert_eq!(game.event_slug, "nba-lal-bos-2026-03-23");
         assert_eq!(game.condition_ids, vec!["0xabc"]);
-        assert_eq!(game.token_ids.len(), 2);
+        assert_eq!(game.market_tokens.len(), 1);
+        assert_eq!(game.market_tokens[0].2.len(), 2);
         assert_eq!(game.sport_tag, "nba");
     }
 
@@ -510,6 +561,7 @@ mod tests {
                     token_id: Some("tok1".to_string()),
                 }]),
                 outcome_prices: None,
+                question: None,
             }]),
             tags: None,
         };

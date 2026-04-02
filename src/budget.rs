@@ -234,13 +234,14 @@ impl WaveBudget {
                 .collect();
 
         for (slug, game) in sorted.iter().take(20) {
-            let leg_types: String = game
-                .legs
-                .iter()
-                .take(5)
-                .map(|l| l.game_line.as_str())
-                .collect::<Vec<_>>()
-                .join("+");
+            // Deduplicate leg types for display (show all unique types, not capped at 5)
+            let mut seen_types: Vec<&str> = Vec::new();
+            for l in &game.legs {
+                if !seen_types.contains(&l.game_line.as_str()) {
+                    seen_types.push(l.game_line.as_str());
+                }
+            }
+            let leg_types: String = seen_types.join("+");
             let kickoff = kickoff_map
                 .get(slug.as_str())
                 .map(|dt| dt.format("%H:%M UTC").to_string())
