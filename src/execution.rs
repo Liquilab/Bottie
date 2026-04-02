@@ -141,6 +141,11 @@ impl Executor {
                         if pos.size_f64() < 0.01 {
                             continue;
                         }
+                        // Skip resolved positions (curPrice 0 or 1 = already settled)
+                        let cur = pos.cur_price_f64();
+                        if cur <= 0.01 || cur >= 0.99 {
+                            continue;
+                        }
                         let pos_cid = pos.condition_id.as_deref().unwrap_or("");
 
                         if pos_cid == signal.condition_id {
