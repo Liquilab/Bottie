@@ -11,8 +11,12 @@ pub async fn fetch_sports_markets(
     sports_tags: &[String],
 ) -> Result<Vec<PolymarketSportsMatch>> {
     let mut all_matches = Vec::new();
+    let mut seen_tags = std::collections::HashSet::new();
 
     for tag in sports_tags {
+        if !seen_tags.insert(tag) {
+            continue; // skip duplicate tags (e.g. 11x "soccer")
+        }
         let events = client.search_sports_events(tag).await?;
         debug!("found {} events for tag: {}", events.len(), tag);
 
@@ -24,24 +28,33 @@ pub async fn fetch_sports_markets(
                         None => continue,
                     };
 
-                    // Try to get token IDs and prices
-                    let tokens = match &market.tokens {
-                        Some(t) => t,
-                        None => continue,
-                    };
-
+                    // Try to get token IDs: first from tokens, fallback to clobTokenIds
                     let mut yes_token = String::new();
                     let mut no_token = String::new();
 
-                    for token in tokens {
-                        match token.outcome.as_deref() {
-                            Some("Yes") => {
-                                yes_token = token.token_id.as_deref().unwrap_or("").to_string()
+                    if let Some(tokens) = &market.tokens {
+                        for token in tokens {
+                            match token.outcome.as_deref() {
+                                Some("Yes") => {
+                                    yes_token = token.token_id.as_deref().unwrap_or("").to_string()
+                                }
+                                Some("No") => {
+                                    no_token = token.token_id.as_deref().unwrap_or("").to_string()
+                                }
+                                _ => {}
                             }
-                            Some("No") => {
-                                no_token = token.token_id.as_deref().unwrap_or("").to_string()
+                        }
+                    }
+
+                    // Fallback: clobTokenIds = ["yes_id", "no_id"]
+                    if yes_token.is_empty() || no_token.is_empty() {
+                        if let Some(clob_ids) = &market.clob_token_ids {
+                            if let Some(arr) = clob_ids.as_array() {
+                                if arr.len() >= 2 {
+                                    yes_token = arr[0].as_str().unwrap_or("").to_string();
+                                    no_token = arr[1].as_str().unwrap_or("").to_string();
+                                }
                             }
-                            _ => {}
                         }
                     }
 
@@ -52,12 +65,15 @@ pub async fn fetch_sports_markets(
                     // Parse prices from outcome_prices
                     let (yes_price, no_price) = parse_outcome_prices(&market.outcome_prices);
 
-                    // Extract team names from event title
-                    let title = event.title.as_deref().unwrap_or("");
-                    let (team_a, team_b) = extract_teams(title);
+                    // Use market question as title (e.g. "Will Team X win?")
+                    // Fall back to event title if question is missing
+                    let market_title = market.question.as_deref()
+                        .unwrap_or(event.title.as_deref().unwrap_or(""));
+                    let event_title = event.title.as_deref().unwrap_or("");
+                    let (team_a, team_b) = extract_teams(event_title);
 
                     all_matches.push(PolymarketSportsMatch {
-                        title: title.to_string(),
+                        title: market_title.to_string(),
                         condition_id,
                         yes_token_id: yes_token,
                         no_token_id: no_token,
