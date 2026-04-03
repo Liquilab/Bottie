@@ -625,13 +625,20 @@ async fn execute_stable_game(
             if !win_is_yes {
                 // === WIN NO ===
                 if has_draw_yes {
-                    // Win NO + Draw YES → copy both
+                    // Win NO + Draw YES → copy both, capped at 7% + 3%
                     bets.retain(|b| !(b.game_line == "draw" && b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No")));
-                    info!("GAME MODE: {} → WIN_NO+DRAW_YES ({} bets)", game.event_slug, bets.len());
+                    for b in bets.iter_mut() {
+                        if b.game_line == "win" { b.size_pct = 7.0; }
+                        if b.game_line == "draw" { b.size_pct = 3.0; }
+                    }
+                    info!("GAME MODE: {} → WIN_NO+DRAW_YES (7%+3%, {} bets)", game.event_slug, bets.len());
                 } else {
-                    // Win NO only → no draw
+                    // Win NO only → no draw, capped at 8%
                     bets.retain(|b| b.game_line != "draw");
-                    info!("GAME MODE: {} → WIN_NO ({} bets)", game.event_slug, bets.len());
+                    for b in bets.iter_mut() {
+                        if b.game_line == "win" { b.size_pct = 8.0; }
+                    }
+                    info!("GAME MODE: {} → WIN_NO (8%, {} bets)", game.event_slug, bets.len());
                 }
             } else {
                 // === WIN YES ===
@@ -689,12 +696,40 @@ async fn execute_stable_game(
                     }
                     info!("GAME MODE: {} → WIN_YES+DRAW_NO (7%+3%, {} bets)", game.event_slug, bets.len());
                 } else {
-                    // Win YES only → Win YES 8%
+                    // Win YES only → replace with opponent Win NO at 6%
                     bets.retain(|b| b.game_line != "draw");
-                    for b in bets.iter_mut() {
-                        if b.game_line == "win" { b.size_pct = 8.0; }
+                    let win_cid = win_bet.pos.condition_id.as_deref().unwrap_or("").to_owned();
+                    let draw_cids: Vec<&str> = draw_positions.iter()
+                        .filter_map(|p| p.condition_id.as_deref())
+                        .collect();
+                    match game_schedule.find_opponent_no_token(&game.event_slug, &win_cid, &draw_cids) {
+                        Some((opp_cid, no_token_id)) => {
+                            let no_price = match game_schedule.find_yes_token(&game.event_slug, &opp_cid) {
+                                Some(yes_tok) => {
+                                    client.get_best_bid(&yes_tok).await
+                                        .map(|p| (1.0 - p).max(0.30).min(0.90))
+                                        .unwrap_or(0.55)
+                                }
+                                None => 0.55,
+                            };
+                            let mut sub_pos = win_bet.pos.clone();
+                            sub_pos.asset = Some(no_token_id);
+                            sub_pos.condition_id = Some(opp_cid.clone());
+                            sub_pos.outcome = Some("No".to_string());
+                            sub_pos.avg_price = Some(serde_json::json!(no_price));
+                            sub_pos.cur_price = Some(serde_json::json!(no_price));
+                            bets.retain(|b| b.game_line != "win");
+                            bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 6.0 });
+                            info!("GAME MODE: {} → OPP_NO (win YES only → opp NO 6%, 1 bet)", game.event_slug);
+                        }
+                        None => {
+                            // Fallback: keep Win YES at 6%
+                            for b in bets.iter_mut() {
+                                if b.game_line == "win" { b.size_pct = 6.0; }
+                            }
+                            info!("GAME MODE: {} → WIN_YES (opp NO not found, fallback 6%)", game.event_slug);
+                        }
                     }
-                    info!("GAME MODE: {} → WIN_YES (8%, 1 bet)", game.event_slug);
                 }
             }
         }
