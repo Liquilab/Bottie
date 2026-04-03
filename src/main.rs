@@ -627,6 +627,15 @@ async fn execute_stable_game(
                 if has_draw_yes {
                     // Win NO + Draw YES → copy both, capped at 7% + 3%
                     bets.retain(|b| !(b.game_line == "draw" && b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No")));
+                    // If draw hauptbet was NO (higher CV), it got removed — add Draw YES from positions
+                    if !bets.iter().any(|b| b.game_line == "draw") {
+                        let draw_yes = draw_positions.iter()
+                            .filter(|p| p.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("Yes"))
+                            .max_by(|a, b| a.current_value_f64().partial_cmp(&b.current_value_f64()).unwrap_or(std::cmp::Ordering::Equal));
+                        if let Some(dy) = draw_yes {
+                            bets.push(GameLineBet { pos: (*dy).clone(), game_line: "draw".to_string(), size_pct: 3.0 });
+                        }
+                    }
                     for b in bets.iter_mut() {
                         if b.game_line == "win" { b.size_pct = 7.0; }
                         if b.game_line == "draw" { b.size_pct = 3.0; }
@@ -642,8 +651,8 @@ async fn execute_stable_game(
                 }
             } else {
                 // === WIN YES ===
-                if has_draw_yes && !has_draw_no {
-                    // Win YES + Draw YES → replace Win YES with opponent Win NO (8%)
+                if has_draw_yes {
+                    // Win YES + Draw YES (regardless of Draw NO) → replace Win YES with opponent Win NO (8%)
                     bets.retain(|b| b.game_line != "draw"); // remove draw, only buy opp NO
                     let win_cid = win_bet.pos.condition_id.as_deref().unwrap_or("").to_owned();
                     let draw_cids: Vec<&str> = draw_positions.iter()
@@ -679,8 +688,18 @@ async fn execute_stable_game(
                         }
                     }
                 } else if has_draw_no {
-                    // Win YES + Draw NO → Win YES 7% + Draw NO 3%
-                    bets.retain(|b| b.game_line == "win" || (b.game_line == "draw" && b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No")));
+                    // Win YES + Draw NO → Win YES 7% + Draw NO 3% (only hauptbet win, no extra wins)
+                    let hauptbet_cid = win_bet.pos.condition_id.as_deref().unwrap_or("").to_owned();
+                    bets.retain(|b| {
+                        if b.game_line == "win" {
+                            // Only keep the win hauptbet condition, drop opponent NO etc.
+                            b.pos.condition_id.as_deref().unwrap_or("") == hauptbet_cid.as_str()
+                        } else if b.game_line == "draw" {
+                            b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No")
+                        } else {
+                            false
+                        }
+                    });
                     for b in bets.iter_mut() {
                         if b.game_line == "win" { b.size_pct = 7.0; }
                         if b.game_line == "draw" { b.size_pct = 3.0; }
@@ -733,6 +752,16 @@ async fn execute_stable_game(
                 }
             }
         }
+    }
+
+    // Safety cap: max 10% total per game
+    let total_pct: f64 = bets.iter().map(|b| b.size_pct).sum();
+    if total_pct > 10.0 {
+        let scale = 10.0 / total_pct;
+        for b in bets.iter_mut() {
+            b.size_pct *= scale;
+        }
+        info!("GAME CAP: {} — scaled {:.1}% → 10.0% ({} bets)", game.event_slug, total_pct, bets.len());
     }
 
     if bets.is_empty() {

@@ -103,7 +103,7 @@ impl GameSchedule {
             if cid == hauptbet_cid { continue; }
             if draw_cids.contains(&cid.as_str()) { continue; }
             // Skip draw markets by question text (e.g. "will it be a draw?")
-            if question.contains("draw") { continue; }
+            if question.to_lowercase().contains("draw") { continue; }
             // This should be the opponent's win condition
             if let Some((_, no_tok)) = tokens.iter().find(|(o, _)| o.eq_ignore_ascii_case("No")) {
                 return Some((cid.clone(), no_tok.clone()));
