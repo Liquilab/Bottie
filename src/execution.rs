@@ -41,11 +41,6 @@ impl Executor {
             if pos.size_f64() < 0.01 {
                 continue;
             }
-            // Skip resolved positions (curPrice 0 or 1 = already settled)
-            let cur = pos.cur_price_f64();
-            if cur <= 0.01 || cur >= 0.99 {
-                continue;
-            }
             let cid = pos.condition_id.as_deref().unwrap_or("");
             let outcome = pos.outcome.as_deref().unwrap_or("");
             if cid.is_empty() {
@@ -66,7 +61,7 @@ impl Executor {
     }
 
     /// Execute with flat sizing: bankroll × pct% / price = shares.
-    /// No proportional weighting, no conviction.
+    /// No proportional weighting, no conviction, no Kelly.
     pub async fn execute_flat(
         &mut self,
         signal: &AggregatedSignal,
@@ -190,11 +185,7 @@ impl Executor {
                 Ok((ask, depth)) if ask > 0.0 && ask < 1.0 => {
                     // Round to tick size (0.01) — PM rejects prices like 0.5002
                     let ask = (ask * 100.0).ceil() / 100.0;
-                    // Skip price-drift check for close_games (Gamma outcomePrices are stale)
-                    let is_close_games_signal = signal.sources.iter().any(|s| {
-                        if let SignalSource::OddsArb(arb) = s { arb.bookmaker == "close_games" } else { false }
-                    });
-                    if !is_close_games_signal && ask > signal.price * 1.25 {
+                    if ask > signal.price * 1.25 {
                         info!(
                             "SKIP: price moved too much for {} (was {:.0}ct, now {:.0}ct)",
                             signal.market_title,
@@ -269,7 +260,7 @@ impl Executor {
             }
         }
 
-        // Size the trade using exec_price
+        // Size the trade (using exec_price for accurate Kelly and edge)
         let exec_edge_pct = if signal.combined_confidence > 0.5 && exec_price > 0.0 {
             (signal.combined_confidence - exec_price) / exec_price * 100.0
         } else {
@@ -281,26 +272,12 @@ impl Executor {
             ..signal.clone()
         };
 
-        let is_copy = signal.sources.iter().any(|s| matches!(s, SignalSource::Copy(_)));
-        let is_close_games = signal.sources.iter().any(|s| {
-            if let SignalSource::OddsArb(arb) = s {
-                arb.bookmaker == "close_games"
-            } else {
-                false
-            }
-        });
-        let size = if is_close_games {
-            // Close games: use configured flat USDC size, convert to shares
-            let flat_usdc = {
-                let config = self.config.read().await;
-                config.odds_arb.flat_size_usdc
-            };
-            if exec_price > 0.0 { flat_usdc / exec_price } else { 0.0 }
-        } else if is_copy && market_type_multiplier > 0.0 {
-            // Flat sizing: market_type_multiplier is the size_pct from wave budget
+        let size = if market_type_multiplier > 0.0 {
+            // Flat sizing: market_type_multiplier is the size_pct from confidence_pct()
             sizing::flat_size(risk.bankroll(), market_type_multiplier, exec_price)
         } else {
-            sizing::flat_size(risk.bankroll(), 5.0, exec_price) // fallback 5%
+            info!("SKIP: size_pct=0 for {} — no sizing provided", signal.market_title);
+            0.0
         };
 
         if size <= 0.0 {

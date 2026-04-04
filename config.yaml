@@ -18,7 +18,6 @@ copy_trading:
     - fl1
     - uel
     - arg
-    - mls
     - rou1
     - efa
     - por
@@ -27,24 +26,37 @@ copy_trading:
     - ere
     - es2
     - bl2
-    - sea
     - elc
     - mex
     - fr2
-    - aus
     - spl
     - efl
     - tur
-    - uef
-    - ucl
-    - cdr
     - acn
     - cde
     - nba
-    - nhl
     - mlb
     - nfl
-    - fif
+    - aus
+    market_types: []
+    max_legs_per_event: 0
+    min_price: 0.4
+    max_price: 0.95
+  - address: '0x07921379f7b31ef93da634b688b2fe36897db778'
+    name: ewelmealt
+    weight: 0.01
+    sports:
+    - all
+    leagues:
+    - epl
+    - lal
+    - elc
+    - es2
+    - por
+    - itc
+    - bun
+    - ere
+    - tur
     market_types: []
     max_legs_per_event: 0
     min_price: 0.4
@@ -58,12 +70,19 @@ copy_trading:
   max_resolution_days: 7
   warm_poll_interval_seconds: 60
   batch_size: 8
-  stability_window_minutes: 30
-  stability_threshold_pct: 5.0
+  stability_window_minutes: 0
+  stability_threshold_pct: 0.0
   conflict_resolution:
-    spread: ["Cannae", "kch123", "Tokidoki"]
-    ou: ["Tokidoki", "kch123", "Sovereign"]
-    win: ["Cannae"]
+    spread:
+    - Cannae
+    - kch123
+    - Tokidoki
+    ou:
+    - Tokidoki
+    - kch123
+    - Sovereign
+    win:
+    - Cannae
     ml: []
     draw: []
     min_trades_for_live_roi: 20
@@ -75,6 +94,7 @@ odds_arb:
   - basketball_nba
   min_edge_pct: 3.0
 sizing:
+  kelly_fraction: 0.25
   max_bet_pct: 5.0
   copy_base_size_pct: 20.0
   min_price: 0.4
@@ -86,7 +106,7 @@ take_profit:
   safety_threshold: 0.95
   cancel_timeout_secs: 60
 auto_sell:
-  enabled: true
+  enabled: false
   min_bid: 0.98
 risk:
   max_daily_loss_pct: 15.0
@@ -103,15 +123,19 @@ autoresearch_params:
   sport_multipliers: {}
   timing_rules: []
   active_strategies: []
+# sport_sizing: values >0 = game line ENABLED (actual sizing via confidence_pct)
+#               values  0 = game line DISABLED
 sport_sizing:
-  voetbal_ml_pct: 8.0
-  voetbal_draw_pct: 5.0
-  nhl_ml_pct: 5.0
-  nba_ml_pct: 5.0
-  nba_spread_pct: 0.0
-  fif_ml_pct: 0.0
-  fif_draw_pct: 0.0
-  min_bet_usdc: 2.50
+  voetbal_ml_pct: 1.0    # football win: enabled
+  voetbal_draw_pct: 1.0  # football draw: enabled
+  nhl_ml_pct: 0.0        # NHL: disabled (verliesgevend)
+  nba_ml_pct: 1.0        # NBA ML: enabled
+  nba_spread_pct: 0.0    # NBA spread: disabled
+  fif_ml_pct: 0.0        # FIFA WCQ: disabled
+  fif_draw_pct: 0.0      # FIFA draw: disabled
+  min_bet_usdc: 2.5
+  min_cannae_game_usdc:
+    nba: 500.0
 schedule:
   enabled: true
   t_minus_minutes: 240
@@ -120,7 +144,6 @@ schedule:
   taker_mode: true
   sport_tags:
   - nba
-  - nhl
   - soccer
   - mlb
   - cbb
