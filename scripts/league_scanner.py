@@ -55,13 +55,13 @@ SPORT_TAGS = {
 
 # Sports where events are outright/tournament markets, not individual matches.
 # For these, skip is_match_event filter and use tag-based grouping instead.
-TAG_BASED_SPORTS = {"tennis", "esports"}
+TAG_BASED_SPORTS = {"esports"}
 
 # --- League tiers ---
 
-TIER_1 = {"epl", "bun", "lal", "itc", "nba", "nhl"}
+TIER_1 = {"epl", "bun", "lal", "itc", "nba", "nhl", "atp"}
 TIER_2 = {"fl1", "ere", "es2", "bl2", "tur", "mlb", "mls", "mex",
-          "tennis", "esports"}
+          "wta", "esports"}
 TIER_3 = {"ucl", "uel", "acn", "cdr", "fif", "spl", "elc", "arg", "por",
           "bra", "rou1", "efa", "sea", "fr2", "aus", "efl", "ssc", "cde",
           "nfl", "cbb"}
@@ -754,7 +754,9 @@ def scan_sport(sport: str, target_league: str | None = None, parallel: int = 3, 
     all_candidates = defaultdict(lambda: {"names": set(), "events": set(), "leagues": set(), "conditions": {}})
 
     for league, events in sorted(leagues.items()):
-        holders = scan_league_holders(league, events, max_events=20)
+        # Tennis has many small events (10 mkts each) — scan more to find repeat bettors
+        max_ev = 50 if sport == "tennis" else 20
+        holders = scan_league_holders(league, events, max_events=max_ev)
         print(f"  {league}: {len(holders)} wallets with 5+ events (from {len(events)} events)", flush=True)
         for wallet, stats in holders.items():
             ac = all_candidates[wallet]
@@ -813,16 +815,15 @@ def scan_sport(sport: str, target_league: str | None = None, parallel: int = 3, 
                 print(f"    ✓ {l}: {lr['games']}g WR={lr['wr']}% ROI={lr['roi']:+.1f}%", flush=True)
         return result
 
-    with ThreadPoolExecutor(max_workers=parallel) as pool:
-        futures = {pool.submit(analyse_one, item): item for item in to_analyse}
-        for future in as_completed(futures):
-            try:
-                result = future.result()
-                if result:
-                    results.append(result)
-            except Exception as e:
-                wallet, name, _ = futures[future]
-                print(f"    ✗ {name}: EXCEPTION — {e}", flush=True)
+    # Sequential to avoid rate limits on PM API
+    for item in to_analyse:
+        try:
+            result = analyse_one(item)
+            if result:
+                results.append(result)
+        except Exception as e:
+            _, name, _ = item
+            print(f"    ✗ {name}: EXCEPTION — {e}", flush=True)
 
     # Step 4: Aggregate
     print(f"\nStep 4: Aggregation...", flush=True)

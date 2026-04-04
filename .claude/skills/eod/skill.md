@@ -34,9 +34,11 @@ git -C <PROJECT_ROOT> status --short
 - Tickets bijwerken met resultaten van vandaag
 - Status van draaiende services checken
 
-### Stap 2: Schrijf EOD
+### Stap 2: Schrijf EOD + Session
 
-Schrijf naar `data/sessions/YYYY-MM-DD-eod.md`.
+Schrijf naar **twee bestanden**:
+1. `data/sessions/YYYY-MM-DD-eod.md` — compact (max 200 woorden, voor /morning)
+2. `data/sessions/YYYY-MM-DD-session.md` — identieke inhoud (fallback voor /morning)
 
 **Template (max 200 woorden):**
 

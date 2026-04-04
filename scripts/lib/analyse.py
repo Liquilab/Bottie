@@ -12,6 +12,7 @@ Verified 2026-03-30:
 
 import json
 import re
+import time
 import urllib.request
 from collections import defaultdict
 
@@ -30,6 +31,7 @@ FOOTBALL_SLUGS = {
 SLUG_TO_SPORT = {
     "nba": "nba", "nhl": "nhl", "mlb": "mlb", "nfl": "nfl", "cbb": "nba",
     "nfc": "nfl", "afc": "nfl",
+    "atp": "tennis", "wta": "tennis",
 }
 SLUG_TO_SPORT.update({s: "football" for s in FOOTBALL_SLUGS})
 
@@ -106,21 +108,30 @@ def get_game_line(title: str) -> str:
         return "spread"
     if "o/u" in t or "total" in t:
         return "totals"
+    if "draw" in t:
+        return "draw"
     if "win" in t:
         return "win"
     if " vs. " in t:
         return "win"  # NBA/NHL moneyline = "Team vs. Team"
-    if "draw" in t:
-        return "draw"
     return "other"
 
 
 # --- API fetching ---
 
-def fetch(url: str):
-    """Fetch JSON from URL."""
+def fetch(url: str, _retries: int = 3):
+    """Fetch JSON from URL with retry on rate limit."""
     req = urllib.request.Request(url, headers=HEADERS)
-    return json.loads(urllib.request.urlopen(req, timeout=30).read())
+    for attempt in range(_retries):
+        try:
+            return json.loads(urllib.request.urlopen(req, timeout=30).read())
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < _retries - 1:
+                wait = 2 ** attempt + 1  # 1s, 3s, 5s
+                time.sleep(wait)
+                req = urllib.request.Request(url, headers=HEADERS)
+                continue
+            raise
 
 
 def get_all_positions(address: str) -> list:
@@ -420,7 +431,7 @@ def is_match_event(slug: str, markets_count: int) -> bool:
     Futures like "Will X win the World Cup?" have no date and/or many markets.
     """
     has_date = bool(re.search(r"\d{4}-\d{2}-\d{2}", slug))
-    return has_date and markets_count <= 8
+    return has_date and markets_count <= 10
 
 
 def both_sides_pct(all_conds: dict) -> float:

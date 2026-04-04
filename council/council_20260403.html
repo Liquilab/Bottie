@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Council Report — Cannae Reverse Engineering</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0A0A0A; color: #E0E0E0; font-family: 'SF Mono', 'Fira Code', monospace; padding: 40px 20px; max-width: 1100px; margin: 0 auto; }
+  h1 { color: #F5F5F5; font-size: 1.4em; font-weight: 700; margin-bottom: 8px; letter-spacing: -0.02em; }
+  .meta { color: #666; font-size: 0.8em; margin-bottom: 40px; }
+  .question-block { background: #111; border-left: 3px solid #4A9EFF; padding: 20px 24px; margin-bottom: 40px; border-radius: 4px; }
+  .question-block p { color: #B0C8FF; font-size: 0.95em; line-height: 1.6; }
+  h2 { color: #888; font-size: 0.75em; text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 20px; }
+  .advisors-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; margin-bottom: 40px; }
+  .advisor-card { background: #111; border: 1px solid #1E1E1E; border-radius: 6px; overflow: hidden; }
+  .advisor-header { padding: 14px 18px; cursor: pointer; display: flex; align-items: center; gap: 12px; }
+  .advisor-header:hover { background: #151515; }
+  .advisor-icon { font-size: 1.4em; }
+  .advisor-name { color: #DDD; font-size: 0.9em; font-weight: 600; }
+  .advisor-tagline { color: #666; font-size: 0.78em; margin-top: 2px; }
+  .advisor-body { padding: 0 18px 18px; color: #AAA; font-size: 0.82em; line-height: 1.7; display: none; }
+  .advisor-body.open { display: block; }
+  .advisor-body strong { color: #DDD; }
+  .toggle-hint { color: #444; font-size: 0.7em; margin-left: auto; }
+
+  .peer-section { background: #0E0E0E; border: 1px solid #1E1E1E; border-radius: 6px; padding: 20px 24px; margin-bottom: 40px; }
+  .peer-item { margin-bottom: 14px; padding-bottom: 14px; border-bottom: 1px solid #1A1A1A; }
+  .peer-item:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+  .peer-label { color: #555; font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 6px; }
+  .peer-text { color: #999; font-size: 0.82em; line-height: 1.6; }
+  .peer-text strong { color: #CCC; }
+
+  .verdict-block { background: #0D1A0D; border: 1px solid #1A3A1A; border-radius: 8px; padding: 28px 32px; margin-bottom: 40px; }
+  .verdict-title { color: #4ADE80; font-size: 0.75em; text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 20px; }
+  .verdict-sections { display: grid; gap: 18px; }
+  .verdict-item h3 { color: #86EFAC; font-size: 0.82em; font-weight: 600; margin-bottom: 6px; }
+  .verdict-item p, .verdict-item ul { color: #A0C0A0; font-size: 0.84em; line-height: 1.7; }
+  .verdict-item ul { padding-left: 20px; }
+  .verdict-item li { margin-bottom: 4px; }
+
+  .first-step { background: #1A0D0D; border: 1px solid #3A1A1A; border-radius: 8px; padding: 24px 28px; margin-bottom: 24px; }
+  .first-step-label { color: #F87171; font-size: 0.75em; text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 12px; }
+  .first-step-content { color: #FCA5A5; font-size: 1em; line-height: 1.6; font-weight: 600; }
+  .first-step-sub { color: #888; font-size: 0.82em; margin-top: 8px; line-height: 1.6; }
+
+  .warning-chip { display: inline-block; background: #2A1A00; color: #FBB040; border: 1px solid #5A3A00; border-radius: 4px; font-size: 0.72em; padding: 3px 10px; margin: 2px; }
+  .good-chip { display: inline-block; background: #001A10; color: #4ADE80; border: 1px solid #005530; border-radius: 4px; font-size: 0.72em; padding: 3px 10px; margin: 2px; }
+</style>
+</head>
+<body>
+
+<h1>LLM Council — Cannae Reverse Engineering</h1>
+<div class="meta">2026-04-03 &nbsp;·&nbsp; 5 adviseurs &nbsp;·&nbsp; 5 peer reviews &nbsp;·&nbsp; Chairman synthese</div>
+
+<div class="question-block">
+  <p><strong>Vraag:</strong> Is "bookmaker odds vs Polymarket mispricing" de juiste methode om Cannae's trading strategie te reverse-engineeren? En is het plan methodologisch solide — met name het stoppen van de live copy-trading tijdens paper trading?</p>
+</div>
+
+<h2>De 5 Adviseurs (klik om uit te klappen)</h2>
+<div class="advisors-grid">
+
+  <div class="advisor-card">
+    <div class="advisor-header" onclick="toggle(this)">
+      <span class="advisor-icon">⚔️</span>
+      <div>
+        <div class="advisor-name">De Contrariaan</div>
+        <div class="advisor-tagline">Vier fatale fouten gevonden</div>
+      </div>
+      <span class="toggle-hint">▼</span>
+    </div>
+    <div class="advisor-body">
+      <strong>Kernprobleem:</strong> Je vervangt iets dat werkt met een onbewezen hypothese.<br><br>
+      <strong>Fout 1:</strong> Mispricing hypothese waarschijnlijk onjuist — duizenden bots arbitreren dit al. Als Cannae 22% ROI haalt op een markt die efficiënt wordt gehouden door arb-bots, dan is zijn edge elders. Meest waarschijnlijk: timing, marktspecifieke liquiditeitskennis, of position-sizing die je niet ziet vanuit trade logs.<br><br>
+      <strong>Fout 2:</strong> 50 signals is statistisch een grap. Standaardfout van ±14pp op een ROI-schatting. Je kunt 15% ROI-threshold niet onderscheiden van toeval bij n=50.<br><br>
+      <strong>Fout 3:</strong> Form-adjusted scoring (0.7/0.3 split) is een getal uit de lucht dat je signal corrupted zonder theoretische basis.<br><br>
+      <strong>Fout 4:</strong> Je hebt de 16K closed positions nog niet uitgeput. Cannae's historische data bevat het antwoord.<br><br>
+      <strong>Advies:</strong> Graaf eerst door de 16K positions. Stop niets. Bouw parallel.
+    </div>
+  </div>
+
+  <div class="advisor-card">
+    <div class="advisor-header" onclick="toggle(this)">
+      <span class="advisor-icon">🔬</span>
+      <div>
+        <div class="advisor-name">De Eerste Principes Denker</div>
+        <div class="advisor-tagline">Verkeerde variabele geoptimaliseerd</div>
+      </div>
+      <span class="toggle-hint">▼</span>
+    </div>
+    <div class="advisor-body">
+      <strong>Wat probeert je eigenlijk op te lossen?</strong> Van $906 naar $10K. Dat is compound return optimaliseren.<br><br>
+      De variabele die geoptimaliseerd wordt: <em>controle en begrip van strategie.</em><br>
+      De variabele die er echt toe doet: <em>compound return op bankroll.</em><br><br>
+      <strong>Strip de aannames:</strong><br>
+      (1) "Mispricing = Cannae's edge" — onbewezen. Mispricing scans zijn publiek beschikbaar.<br>
+      (2) "50 signals geeft betrouwbaar signaal" — nee.<br>
+      (3) "Stoppen copy trading is noodzakelijk" — nee.<br><br>
+      <strong>Advies:</strong> Verander niets aan Bottie. Bouw mispricing als additionele laag, niet als vervanging. Je optimaliseert nieuwsgierigheid. Je zou compounding moeten optimaliseren.
+    </div>
+  </div>
+
+  <div class="advisor-card">
+    <div class="advisor-header" onclick="toggle(this)">
+      <span class="advisor-icon">🚀</span>
+      <div>
+        <div class="advisor-name">De Expansionist</div>
+        <div class="advisor-tagline">De alpha zit al in huis</div>
+      </div>
+      <span class="toggle-hint">▼</span>
+    </div>
+    <div class="advisor-body">
+      <strong>De grotere kans die je mist:</strong> je hebt al de alpha. 16K closed positions van Cannae — dat is geen hypothese-materiaal, dat is een dataset.<br><br>
+      Uit 16K trades kun je direct extraheren:<br>
+      • Timing-patroon (hoeveel uur vóór kick-off?)<br>
+      • Entry-prijs range correlaties (wint Cannae structureel bij 0.25-0.45 op NO?)<br>
+      • Leg-combinaties die steeds terugkomen<br><br>
+      De bookmaker-scanner is een buitenom-route naar informatie die je al in huis hebt.<br><br>
+      <strong>Aangrenzende kans:</strong> Multi-wallet specialisatie. Polymarket heeft tientallen wallets met 15%+ ROI. Bottie kopieert al. Voeg gespecialiseerde wallets toe per sport-type — dat schaalt sneller naar $10K dan een eigen signaalsysteem bouwen.
+    </div>
+  </div>
+
+  <div class="advisor-card">
+    <div class="advisor-header" onclick="toggle(this)">
+      <span class="advisor-icon">👁️</span>
+      <div>
+        <div class="advisor-name">De Buitenstaander</div>
+        <div class="advisor-tagline">Je lost een probleem op dat je niet hebt</div>
+      </div>
+      <span class="toggle-hint">▼</span>
+    </div>
+    <div class="advisor-body">
+      <strong>Meteen opvalt:</strong> je vervangt iets dat werkt met iets dat je nog moet bewijzen.<br><br>
+      <strong>Kritieke onzichtbare aannames:</strong><br>
+      (1) "Cannae exploiteert bookmaker mispricing" is verzinnen, geen meten.<br>
+      (2) 3pp drempel is uit de lucht — na vig-correctie mogelijk nul.<br>
+      (3) n=50 statistisch niets bij binaire uitkomsten met hoge variantie.<br>
+      (4) Stoppen copy trading = zekere inkomsten inruilen voor paper trading experiment.<br><br>
+      <strong>Fundamentele fout:</strong> Bottie werkt. De vraag "hoe verdient Cannae geld?" is interessant maar niet urgent. Eerst bewijzen dat scanner Cannae overtreft in paper trading — zonder Cannae los te laten.
+    </div>
+  </div>
+
+  <div class="advisor-card">
+    <div class="advisor-header" onclick="toggle(this)">
+      <span class="advisor-icon">⚡</span>
+      <div>
+        <div class="advisor-name">De Uitvoerder</div>
+        <div class="advisor-tagline">Parallel draaien, 3 stappen</div>
+      </div>
+      <span class="toggle-hint">▼</span>
+    </div>
+    <div class="advisor-body">
+      <strong>Stop Cannae NIET.</strong> Parallel draaien is de enige rationele keuze.<br><br>
+      <strong>Actieplan:</strong><br><br>
+      <strong>Stap 1 (2u):</strong> Zet mispricing_scan.py live als cron. Script bestaat al. Cannae blijft draaien.<br><br>
+      <strong>Stap 2 (3u):</strong> Log signals naar trades.jsonl-formaat met timestamp, markt, edge, PM-prijs. Na 2 weken: welke signals overlap met Cannae?<br><br>
+      <strong>Stap 3 (30 min, week 2):</strong> Beslissmoment: >50% overlap EN paper ROI >15% → switch overwegen. Anders: scanner als filter bovenop Cannae.<br><br>
+      <strong>Eerste stap nu:</strong> python3 scripts/mispricing_scan.py draaien en output bekijken. 10 minuten. Dan weet je of het überhaupt werkt.<br><br>
+      Fase 2 (form/standings) = scope creep. Niet aanraken tot bewijs.
+    </div>
+  </div>
+
+</div>
+
+<h2>Peer Review Highlights</h2>
+<div class="peer-section">
+
+  <div class="peer-item">
+    <div class="peer-label">Sterkste adviseur (4/5 reviewers)</div>
+    <div class="peer-text"><strong>Contrariaan (B)</strong> — Meest onderbouwd: kwantificeert statistische zwakte (±14pp bij n=50), benoemt het arbitrage-argument concreet, wijst op de onbenutte 16K data. Geen vage adviezen.</div>
+  </div>
+
+  <div class="peer-item">
+    <div class="peer-label">Grootste blinde vlek</div>
+    <div class="peer-text"><strong>Uitvoerder (C)</strong> — Stelt "overlap meten na 2 weken" voor, maar overlap bewijst niets over causaliteit. Cannae en de scanner kunnen toevallig dezelfde markten kiezen om totaal andere redenen. Het meetplan lost niets op.</div>
+  </div>
+
+  <div class="peer-item">
+    <div class="peer-label">Wat ALLE vijf gemist hebben (kritiek)</div>
+    <div class="peer-text">
+      <strong>1. Paginatie bias op de 22% ROI:</strong> De claim "Cannae haalt ~22% ROI" is gebaseerd op closed-positions API die bekende win-bias heeft door paginatie. Het fundament van de hele discussie is mogelijk een verkeerd getal. Eerst verifiëren via trades.jsonl.<br><br>
+      <strong>2. Is Cannae's edge recent nog actief?</strong> Niemand vraagt: werkt de edge de laatste 30/60 dagen nog? Als de edge weggearbitreerd is, is reverse-engineeren zinloos.<br><br>
+      <strong>3. Directe falsificatietest ontbreekt:</strong> Correleer Cannae's entry prices met bookmaker closing line movement. Als Cannae vóór line-bewegingen instapt → timing-edge. Als er geen correlatie is → iets anders. Dit is de test die de hypothese direct valideert of falsificeert — niemand noemde het.
+    </div>
+  </div>
+
+</div>
+
+<h2>Chairman Synthese</h2>
+<div class="verdict-block">
+  <div class="verdict-title">Verdict</div>
+  <div class="verdict-sections">
+
+    <div class="verdict-item">
+      <h3>Consensus (5/5 adviseurs)</h3>
+      <ul>
+        <li>Stop Cannae copy-trading NIET. Parallel draaien is de enige rationele keuze.</li>
+        <li>Mispricing als Cannae's edge is onbewezen — behandel het als hypothese, niet als feit.</li>
+        <li>n=50 is statistisch onvoldoende voor go/no-go beslissing (±14pp standaardfout).</li>
+        <li>De 16K closed positions bevatten meer antwoorden dan een nieuwe scanner.</li>
+      </ul>
+    </div>
+
+    <div class="verdict-item">
+      <h3>Kernconflict</h3>
+      <p>De Contrariaan zegt: de mispricing-hypothese is waarschijnlijk al gearbitreerd — bouw de scanner niet eens. De Uitvoerder zegt: bouw hem gewoon parallel, risico is nul. <strong>De Uitvoerder heeft gelijk over tactiek, de Contrariaan heeft gelijk over hypothese.</strong> Oplossing: bouw de scanner parallel, maar prioriteer eerst 16K-data-analyse om te weten of je überhaupt de juiste hypothese test.</p>
+    </div>
+
+    <div class="verdict-item">
+      <h3>Blinde vlek (peer reviews)</h3>
+      <p>De 22% ROI kan een artefact zijn van API paginatie-bias (win-bias op closed-positions). Verifieer eerst dat getal via de correcte databron (trades.jsonl). Daarnaast: test direct of Cannae's entries correleren met bookmaker closing line shifts — dat is de falsificatietest voor de mispricing-hypothese die niemand heeft benoemd.</p>
+    </div>
+
+    <div class="verdict-item">
+      <h3>Verdict</h3>
+      <p><strong>Het plan is structureel correct maar heeft één fatale fout: het stopt Cannae copy-trading.</strong> Dat mag niet. De rest van het plan — scanner bouwen, paper traden, vergelijken — is prima, maar als <em>additionele laag</em>, niet als vervanging. De diepere fout is dat de hypothese (mispricing) nog onbewezen is. Je moet die hypothese eerst falsificeren via Cannae's eigen 16K data, vóórdat je een scanner bouwt die erop gefundeerd is.</p>
+    </div>
+
+  </div>
+</div>
+
+<div class="first-step">
+  <div class="first-step-label">Eerste stap — Vandaag</div>
+  <div class="first-step-content">Analyseer de 16K closed positions: correleer Cannae's entry-prijzen met bookmaker closing line movement.</div>
+  <div class="first-step-sub">
+    Als entry-prijzen systematisch <em>vóór</em> closing line-shifts liggen → timing-edge (niet mispricing).<br>
+    Als entry-prijzen bij bekende mispricing-events liggen → mispricing-hypothese bevestigd.<br>
+    Als geen patroon → andere alpha-bron, scanner bouwen heeft geen zin.<br><br>
+    Daarna: <span class="warning-chip">Cannae blijft draaien</span> <span class="good-chip">scanner parallel</span> <span class="warning-chip">n=50 is niet genoeg</span> <span class="good-chip">16K data eerst uitputten</span>
+  </div>
+</div>
+
+<script>
+function toggle(header) {
+  const body = header.nextElementSibling;
+  const hint = header.querySelector('.toggle-hint');
+  body.classList.toggle('open');
+  hint.textContent = body.classList.contains('open') ? '▲' : '▼';
+}
+</script>
+
+</body>
+</html>

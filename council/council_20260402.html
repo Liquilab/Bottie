@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Council: Overnight Trade Analyse — 2 april 2026</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0A0A0A;
+    color: #E8E8E8;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 14px;
+    line-height: 1.6;
+    padding: 32px 24px;
+    max-width: 960px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 22px; color: #F5F5F5; margin-bottom: 6px; }
+  .subtitle { color: #888; font-size: 13px; margin-bottom: 32px; }
+  .meta { color: #F5A623; font-size: 12px; margin-bottom: 8px; letter-spacing: 0.05em; text-transform: uppercase; }
+
+  .question-block {
+    background: #111;
+    border-left: 3px solid #F5A623;
+    padding: 16px 20px;
+    margin-bottom: 32px;
+    border-radius: 0 6px 6px 0;
+  }
+  .question-block .label { color: #F5A623; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 6px; }
+  .question-block .text { color: #F0F0F0; font-size: 15px; }
+
+  .stats-row {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 32px;
+    flex-wrap: wrap;
+  }
+  .stat-pill {
+    background: #151515;
+    border: 1px solid #222;
+    border-radius: 6px;
+    padding: 10px 16px;
+  }
+  .stat-pill .val { font-size: 20px; font-weight: 700; color: #4ADE80; }
+  .stat-pill .val.red { color: #F87171; }
+  .stat-pill .val.yellow { color: #F5A623; }
+  .stat-pill .lbl { font-size: 11px; color: #666; margin-top: 2px; }
+
+  .section-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #666;
+    margin-bottom: 16px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #1A1A1A;
+  }
+
+  .advisors-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 16px;
+    margin-bottom: 40px;
+  }
+
+  .advisor-card {
+    background: #111;
+    border: 1px solid #1E1E1E;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .advisor-header {
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .advisor-header:hover { background: #161616; }
+  .advisor-icon { font-size: 20px; }
+  .advisor-name { font-size: 13px; font-weight: 600; color: #F0F0F0; }
+  .advisor-core { font-size: 11px; color: #888; margin-top: 2px; }
+  .advisor-body {
+    padding: 0 16px;
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease, padding 0.3s ease;
+  }
+  .advisor-body.open {
+    max-height: 800px;
+    padding: 12px 16px 16px;
+    border-top: 1px solid #1E1E1E;
+  }
+  .advisor-body p { color: #C0C0C0; font-size: 13px; line-height: 1.7; margin-bottom: 10px; }
+  .advisor-body p:last-child { margin-bottom: 0; }
+  .expand-hint { margin-left: auto; color: #444; font-size: 16px; }
+
+  .peer-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+    margin-bottom: 40px;
+  }
+  .peer-card {
+    background: #0E0E0E;
+    border: 1px solid #1A1A1A;
+    border-radius: 6px;
+    padding: 14px 16px;
+  }
+  .peer-card .peer-num { color: #555; font-size: 11px; text-transform: uppercase; margin-bottom: 8px; }
+  .peer-row { margin-bottom: 8px; }
+  .peer-row .label { color: #F5A623; font-size: 11px; }
+  .peer-row .val { color: #C0C0C0; font-size: 12px; margin-top: 2px; }
+  .peer-miss { margin-top: 10px; border-top: 1px solid #1A1A1A; padding-top: 10px; }
+  .peer-miss .label { color: #EF4444; font-size: 11px; }
+  .peer-miss .val { color: #C0C0C0; font-size: 12px; margin-top: 2px; }
+
+  .synthesis {
+    background: #0D0D0D;
+    border: 1px solid #1E1E1E;
+    border-radius: 8px;
+    padding: 24px;
+    margin-bottom: 32px;
+  }
+  .synthesis h3 { color: #F5A623; font-size: 13px; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 12px; }
+  .synthesis p { color: #C0C0C0; font-size: 13px; line-height: 1.75; margin-bottom: 14px; }
+  .synthesis ul { color: #C0C0C0; font-size: 13px; line-height: 1.75; padding-left: 18px; margin-bottom: 14px; }
+  .synthesis ul li { margin-bottom: 6px; }
+
+  .verdict-block {
+    background: #0F1A0A;
+    border: 2px solid #4ADE80;
+    border-radius: 8px;
+    padding: 24px;
+    margin-bottom: 32px;
+  }
+  .verdict-block .verdict-label { color: #4ADE80; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 10px; }
+  .verdict-block .verdict-text { color: #F0F0F0; font-size: 15px; line-height: 1.7; margin-bottom: 16px; }
+  .first-step {
+    background: #0A1A0A;
+    border: 1px solid #2A5A2A;
+    border-radius: 6px;
+    padding: 14px 16px;
+  }
+  .first-step .step-label { color: #4ADE80; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 6px; }
+  .first-step .step-text { color: #A0D0A0; font-size: 13px; line-height: 1.6; }
+
+  .blind-spot-block {
+    background: #1A0A0A;
+    border: 1px solid #3A1A1A;
+    border-radius: 6px;
+    padding: 16px;
+    margin-bottom: 24px;
+  }
+  .blind-spot-block .bs-label { color: #F87171; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 8px; }
+  .blind-spot-block .bs-text { color: #C0A0A0; font-size: 13px; line-height: 1.7; }
+
+  hr { border: none; border-top: 1px solid #1A1A1A; margin: 32px 0; }
+  .footer { color: #444; font-size: 11px; text-align: center; }
+</style>
+</head>
+<body>
+
+<div class="meta">Council Rapport · 2 april 2026 · 5 adviseurs · 5 peer reviewers</div>
+<h1>Overnight Trade Analyse — Cannae Bottie</h1>
+<div class="subtitle">Wat ging goed? Wat hadden we beter moeten doen? Waren de sizes correct?</div>
+
+<div class="question-block">
+  <div class="label">Vraag</div>
+  <div class="text">Analyseer de overnight trades (20:00→06:00 UTC). Waren de sizes goed? Hebben we kansen gemist? Waren de 4 losses vermijdbaar? Was Botafogo-hedge slim?</div>
+</div>
+
+<div class="stats-row">
+  <div class="stat-pill">
+    <div class="val">82.6%</div>
+    <div class="lbl">Win rate (19/23)</div>
+  </div>
+  <div class="stat-pill">
+    <div class="val">+$1.185</div>
+    <div class="lbl">Netto PnL</div>
+  </div>
+  <div class="stat-pill">
+    <div class="val yellow">$3.064</div>
+    <div class="lbl">Bankroll (na Ralph)</div>
+  </div>
+  <div class="stat-pill">
+    <div class="val red">4</div>
+    <div class="lbl">Losses</div>
+  </div>
+  <div class="stat-pill">
+    <div class="val">54%</div>
+    <div class="lbl">Winst uit draws (3 bets)</div>
+  </div>
+</div>
+
+<div class="section-title">5 Adviseurs — klik om te lezen</div>
+<div class="advisors-grid">
+
+  <div class="advisor-card">
+    <div class="advisor-header" onclick="toggle(this)">
+      <div class="advisor-icon">⚠️</div>
+      <div>
+        <div class="advisor-name">De Contrariaan</div>
+        <div class="advisor-core">Braziliaanse cluster = tijdbom</div>
+      </div>
+      <div class="expand-hint">›</div>
+    </div>
+    <div class="advisor-body">
+      <p>43% van alle trades sloeg toe in 90 minuten (03:11–04:37 UTC). Vijf Braziliaanse games tegelijk, sterk gecorreleerd. Slecht weer, arbitrage-drama, of een onverwacht sterk underdog-team treft ze allemaal tegelijk.</p>
+      <p>Bij een slechte Braziliaanse avond verlies je $500–700 in één klap. De sizing groeit automatisch met de bankroll mee, waardoor de Brazilië-blootstelling structureel toeneemt naarmate de bot succesvol is.</p>
+      <p>Draw-bets leverden de hoogste winst MAAR ook het hoogste verliesrisico (laagste implied prob, hoogste leverage). Dit is geen probleem van de strategie, maar de concentratie in één tijdzone is een verborgen risico dat vanavond toevallig uitpakte.</p>
+    </div>
+  </div>
+
+  <div class="advisor-card">
+    <div class="advisor-header" onclick="toggle(this)">
+      <div class="advisor-icon">🔬</div>
+      <div>
+        <div class="advisor-name">Eerste Principes Denker</div>
+        <div class="advisor-core">23 trades = geen statistiek</div>
+      </div>
+      <div class="expand-hint">›</div>
+    </div>
+    <div class="advisor-body">
+      <p>De vraag "was de tradesize goed?" is verkeerd gesteld. De juiste vraag is: "kopiëren we op de juiste odds?" Een 82.6% win rate op één nacht bewijst niets over duurzame EV.</p>
+      <p>Concrete sizing-observatie: Spanje $82 bij bankroll ~$2.050 = 4%. Brazilië $126–131 bij hogere bankroll = ook ~6%. Config zegt 8% max. De gap zit in lage conviction-scores — dit is correct gedrag, geen bug.</p>
+      <p>We hebben GEEN data of Cannae's historische draw-edge significant is. Drie draws winnen in één nacht is statistisch onvoldoende voor sizing-aanpassingen.</p>
+    </div>
+  </div>
+
+  <div class="advisor-card">
+    <div class="advisor-header" onclick="toggle(this)">
+      <div class="advisor-icon">🚀</div>
+      <div>
+        <div class="advisor-name">De Expansionist</div>
+        <div class="advisor-core">Draws zijn de onderbenutte alpha</div>
+      </div>
+      <div class="expand-hint">›</div>
+    </div>
+    <div class="advisor-body">
+      <p>54% van de totale winst ($637 van $1.185) kwam uit slechts 3 draw-bets (14% van trades). Op prijzen van 0.29–0.34 — hoge leverage, laag implied prob. Hier zit de echte edge.</p>
+      <p>De huidige sizing legt $53–131 op draw-bets. Als Cannae 50%+ ROI heeft op draws, is dat te conservatief. Kelly-logica bij 0.32 implied met positieve EV vraagt hogere sizing.</p>
+      <p>De bot kopieert Cannae proportioneel, maar Cannae heeft een veel grotere bankroll. We zijn misschien te bescheiden op precies de legs met de hoogste EV.</p>
+    </div>
+  </div>
+
+  <div class="advisor-card">
+    <div class="advisor-header" onclick="toggle(this)">
+      <div class="advisor-icon">👁️</div>
+      <div>
+        <div class="advisor-name">De Buitenstaander</div>
+        <div class="advisor-core">Is Cannae's edge al in de prijs?</div>
+      </div>
+      <div class="expand-hint">›</div>
+    </div>
+    <div class="advisor-body">
+      <p>Twee aannames die nooit gevalideerd worden: (1) Cannae's edge is duurzaam — maar als hij structureel wint, kopiëren anderen hem ook, waardoor de markt efficiënter wordt. (2) De bot fill-prijs is gelijk aan Cannae's entry-prijs — maar Cannae zet bets eerder. Op het moment dat de bot koopt, kan de odds al bewogen zijn.</p>
+      <p>3 draws winnen bij implied prob 0.30–0.34 is statistisch onverwacht (verwachte winrate ~32%). Een nacht met 3/3 draws is pracht-resultaat — maar verwacht dat deze winrate NIET duurzaam is.</p>
+    </div>
+  </div>
+
+  <div class="advisor-card">
+    <div class="advisor-header" onclick="toggle(this)">
+      <div class="advisor-icon">⚡</div>
+      <div>
+        <div class="advisor-name">De Uitvoerder</div>
+        <div class="advisor-core">3 checks, geen code-wijzigingen</div>
+      </div>
+      <div class="expand-hint">›</div>
+    </div>
+    <div class="advisor-body">
+      <p><strong>Stap 1 (10 min):</strong> Verificeer sizing anomalie. Trek conviction-scores uit logs voor Spanje-bets. Als conviction 0.40–0.55 was, klopt de lagere sizing. Als conviction hoog maar sizing laag: bug.</p>
+      <p><strong>Stap 2 (15 min):</strong> Evalueer NBA bets >0.85 implied prob. Trek alle NBA trades afgelopen 30 dagen. Splits op &lt;70%, 70–85%, >85%. Check netto PnL per bucket.</p>
+      <p><strong>Stap 3 (5 min):</strong> Documenteer Botafogo-case. Cannae had BEIDE kanten (draw YES + win NO) — beide verloren. Was dit geïnformeerd of een hedge? Begrijpen we waarom Cannae beide zijden neemt?</p>
+    </div>
+  </div>
+
+</div>
+
+<div class="section-title">Peer Reviews — Wat viel op?</div>
+<div class="peer-grid">
+
+  <div class="peer-card">
+    <div class="peer-num">Review 1</div>
+    <div class="peer-row">
+      <div class="label">Sterkste adviseur</div>
+      <div class="val">Contrariaan — meest concreet, kwantificeerbaar risico</div>
+    </div>
+    <div class="peer-row">
+      <div class="label">Grootste blinde vlek</div>
+      <div class="val">Expansionist — sizing verhogen op 3 draw-bets is gevaarlijk</div>
+    </div>
+    <div class="peer-miss">
+      <div class="label">Wat allen misten</div>
+      <div class="val">Bot fill-prijs vs. Cannae entry-prijs. Dit bepaalt of we EV-positief of EV-neutraal kopiëren.</div>
+    </div>
+  </div>
+
+  <div class="peer-card">
+    <div class="peer-num">Review 2</div>
+    <div class="peer-row">
+      <div class="label">Sterkste adviseur</div>
+      <div class="val">Uitvoerder — enige die zegt "verifieer EERST"</div>
+    </div>
+    <div class="peer-row">
+      <div class="label">Grootste blinde vlek</div>
+      <div class="val">Expansionist — "push draws naar $180" is speculatief</div>
+    </div>
+    <div class="peer-miss">
+      <div class="label">Wat allen misten</div>
+      <div class="val">Botafogo beide-kanten = Cannae-gedragspatroon (actieve hedge). Bot kopieert de hedge blindelings.</div>
+    </div>
+  </div>
+
+  <div class="peer-card">
+    <div class="peer-num">Review 3</div>
+    <div class="peer-row">
+      <div class="label">Sterkste adviseur</div>
+      <div class="val">Contrariaan — correlatiecluster risico is structureel</div>
+    </div>
+    <div class="peer-row">
+      <div class="label">Grootste blinde vlek</div>
+      <div class="val">Eerste Principes — "controleer de formule" maar geen actie</div>
+    </div>
+    <div class="peer-miss">
+      <div class="label">Wat allen misten</div>
+      <div class="val">Sizing groeit mee met bankroll. Na goede nacht is volgende nacht blootstelling automatisch hoger — spiraal omhoog én omlaag.</div>
+    </div>
+  </div>
+
+  <div class="peer-card">
+    <div class="peer-num">Review 4</div>
+    <div class="peer-row">
+      <div class="label">Sterkste adviseur</div>
+      <div class="val">Buitenstaander — stelt de enige echt kritische vraag</div>
+    </div>
+    <div class="peer-row">
+      <div class="label">Grootste blinde vlek</div>
+      <div class="val">Expansionist — expansie op basis van één nacht is reckless</div>
+    </div>
+    <div class="peer-miss">
+      <div class="label">Wat allen misten</div>
+      <div class="val">3 van de 4 losses clusteren in 04:06–04:37 UTC. Was Cannae's informatievoorsprong die nacht al verdampt?</div>
+    </div>
+  </div>
+
+  <div class="peer-card">
+    <div class="peer-num">Review 5</div>
+    <div class="peer-row">
+      <div class="label">Sterkste adviseur</div>
+      <div class="val">Contrariaan — concrete dollar-kwantificering van risico</div>
+    </div>
+    <div class="peer-row">
+      <div class="label">Grootste blinde vlek</div>
+      <div class="val">Expansionist — vergeet dat draws en Brazil wins in dezelfde cluster zitten</div>
+    </div>
+    <div class="peer-miss">
+      <div class="label">Wat allen misten</div>
+      <div class="val">Timing-gap Cannae entry → bot fill. Meest fundamentele onbeantwoorde vraag.</div>
+    </div>
+  </div>
+
+</div>
+
+<hr>
+
+<div class="section-title">Chairman Synthese</div>
+
+<div class="synthesis">
+  <h3>Consensus — Waar allen het over eens zijn</h3>
+  <ul>
+    <li><strong>Braziliaanse cluster = geconcentreerd risico.</strong> 43% van trades in 90 minuten, sterk gecorreleerd. Slechte Brazilië-avond = $500–700 verlies in één klap.</li>
+    <li><strong>NBA >0.85 implied prob = twijfelachtige EV.</strong> Kings/Raptors op 0.87 verloren. 76ers op 0.91 wonnen maar netto $8.30 bij $94 risico. Slechte verhouding.</li>
+    <li><strong>23 trades = geen statistisch bewijs voor strategiewijzigingen.</strong> Eén nacht, hoe goed ook, rechtvaardigt geen sizing-aanpassing.</li>
+  </ul>
+
+  <h3>Kernconflict — Wie heeft gelijk?</h3>
+  <p>Expansionist: "verhoog draw-sizing naar $180–200." Eerste Principes + Uitvoerder: "verifieer EERST, pas dan aan."</p>
+  <p><strong>Oordeel: Eerste Principes en Uitvoerder winnen.</strong> Het draw-probleem: draws en Brazil wins zitten in dezelfde correlatiecluster. Een avond dat draws goed gaan, gaan Brazil wins ook goed — ze zijn niet onafhankelijk. Sizing verhogen op draws nu is reckless omdat je de correlatie niet breekt, je vergroot hem.</p>
+</div>
+
+<div class="blind-spot-block">
+  <div class="bs-label">🔴 Blinde Vlek — Wat niemand zag</div>
+  <div class="bs-text">
+    <strong>De timing-gap tussen Cannae's entry en de bot's fill.</strong><br><br>
+    Cannae zet bets X minuten eerder. De bot detecteert via positie-snapshot (polling interval). Op het moment dat de bot koopt, kan de marktprijs al bewogen zijn richting Cannae's prijs — de verwachte EV deels verdampt. Hoe groot is die gap? 5 minuten? 30 minuten? Dit bepaalt fundamenteel of we EV-positief of EV-neutraal kopiëren. <strong>Dit is de onbeantwoorde vraag die alle analyse boven drijft.</strong>
+  </div>
+</div>
+
+<div class="verdict-block">
+  <div class="verdict-label">Verdict</div>
+  <div class="verdict-text">
+    De nacht was excellent maar de sizing was correct — niet toevallig. Spanje lager ($82) door lagere conviction is correct gedrag, geen bug. Brazilië hoger ($126) door hogere bankroll + conviction klopt. NBA sizing correct maar de legs >0.85 implied prob waren waarschijnlijk negatieve EV. Botafogo hedge (beide kanten) is Cannae-gedrag, niet een fout — de bot kopieert correct, het resultaat was pech.
+    <br><br>
+    <strong>Wat morgen beter kan:</strong> Stel een cap op NBA-bets met implied prob >0.85. Verwachte winst $8 bij risico $94 is structureel negatief voor een copy-bot (we hebben de informatievoorsprong niet die Cannae misschien heeft).
+    <br><br>
+    <strong>Wat we NIET veranderen:</strong> Draw-sizing, Brazil-strategie, voetbal-logica.
+  </div>
+  <div class="first-step">
+    <div class="step-label">⚡ Eerste Stap — Vandaag doen</div>
+    <div class="step-text">
+      Trek de laatste 30 NBA-trades uit <code>data/trades.jsonl</code>. Splits op implied prob bucket (&lt;70%, 70–85%, >85%). Check netto PnL per bucket. Als >85% negatief is, verhoog NBA <code>min_conviction</code> voor high-odds legs. <strong>30 minuten, geen code-deploy nodig.</strong>
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+  Council · 2026-04-02 · 5 adviseurs · 5 peer reviewers · Chairman: Claude Sonnet 4.6
+</div>
+
+<script>
+function toggle(header) {
+  const body = header.nextElementSibling;
+  const hint = header.querySelector('.expand-hint');
+  body.classList.toggle('open');
+  hint.textContent = body.classList.contains('open') ? '↓' : '›';
+}
+</script>
+
+</body>
+</html>

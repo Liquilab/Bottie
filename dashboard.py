@@ -2,6 +2,7 @@
 """Bottie Trading Dashboard — single-file, no external deps, port 8080."""
 
 import json, re, glob, os
+from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -22,7 +23,6 @@ CONFIG_FILE    = BASE_DIR / "config.yaml"
 PM_CACHE_FILE  = BASE_DIR / "data" / "pm_cache.json"
 CONSENSUS_BULK = BASE_DIR / "data" / "consensus_bulk.json"
 CONSENSUS_RESULTS = BASE_DIR / "data" / "consensus_results.json"
-INITIAL_BANKROLL = 1400.0  # initiële inzet
 EDGE_REPORT_FILE = BASE_DIR / "data" / "edge_analysis_report.md"
 
 # Auth token — all routes require /t/<TOKEN>/ prefix (like webhook URLs)
@@ -30,25 +30,37 @@ AUTH_TOKEN = os.environ.get("DASHBOARD_TOKEN", "8vNADas4jmnOk3IbpeBFrgDHkKHN9Epq
 
 # Polymarket Data API — source of truth
 PM_DATA_API = "https://data-api.polymarket.com"
-PM_FUNDER = "0x89dcA91b49AfB7bEfb953a7658a1B83fC7Ab8F42"
+LB_API     = "https://lb-api.polymarket.com"
+
+# Cannae (bottie, /opt/bottie/)
+PM_FUNDER       = "0x89dcA91b49AfB7bEfb953a7658a1B83fC7Ab8F42"
+INITIAL_BANKROLL = 1400.0  # moved here for clarity
+
+# GIYN (bottie-test, /opt/bottie-test/)
+GIYN_FUNDER          = "0x8A3A19AeC04eeB6E3C183ee5750D06fe5c08066a"
+GIYN_TRADES_FILE     = Path("/opt/bottie-test/data/trades.jsonl")
+GIYN_CONFIG_FILE     = Path("/opt/bottie-test/config.yaml")
 
 
 # ── PM API Data (source of truth) ──────────────────────────────────────────
 
 import urllib.request, urllib.error, time
 
-_pm_cache = {"data": None, "ts": 0}
+_pm_caches = {}  # per-funder cache: {funder: {"data": ..., "ts": ...}}
+_lb_cache   = {}  # per-address lb-api cache: {address: {"val": ..., "ts": ...}}
 
-def fetch_pm_data():
-    """Fetch real data from Polymarket API. Cached for 15 seconds."""
+def fetch_pm_data(funder=None):
+    """Fetch real data from Polymarket API. Cached 15s per funder."""
+    if funder is None:
+        funder = PM_FUNDER
     now = time.time()
-    if _pm_cache["data"] and now - _pm_cache["ts"] < 15:
-        return _pm_cache["data"]
+    cache = _pm_caches.setdefault(funder, {"data": None, "ts": 0})
+    if cache["data"] and now - cache["ts"] < 15:
+        return cache["data"]
 
     result = {"trades": [], "positions": [], "value": 0, "positions_value": 0, "cash": 0, "error": None}
 
     def pm_get(url):
-        """Fetch PM API with proper headers to avoid 403."""
         req = urllib.request.Request(url, headers={
             "User-Agent": "Bottie-Dashboard/1.0",
             "Accept": "application/json",
@@ -56,11 +68,10 @@ def fetch_pm_data():
         return urllib.request.urlopen(req, timeout=15)
 
     try:
-        # Paginate PM trades API (max 1000 per request, safety cap at 10K)
         all_trades = []
         offset = 0
         while offset < 10000:
-            url = "%s/trades?user=%s&limit=1000&offset=%d" % (PM_DATA_API, PM_FUNDER, offset)
+            url = "%s/trades?user=%s&limit=1000&offset=%d" % (PM_DATA_API, funder, offset)
             batch = json.loads(pm_get(url).read())
             all_trades.extend(batch)
             if len(batch) < 1000:
@@ -74,7 +85,7 @@ def fetch_pm_data():
         all_positions = []
         pos_offset = 0
         while pos_offset <= 10000:
-            url = "%s/positions?user=%s&limit=500&offset=%d&sizeThreshold=0" % (PM_DATA_API, PM_FUNDER, pos_offset)
+            url = "%s/positions?user=%s&limit=500&offset=%d&sizeThreshold=0" % (PM_DATA_API, funder, pos_offset)
             batch = json.loads(pm_get(url).read())
             all_positions.extend(batch)
             if len(batch) < 500:
@@ -85,17 +96,17 @@ def fetch_pm_data():
         result["error"] = "positions: %s" % e
 
     try:
-        url = "%s/value?user=%s" % (PM_DATA_API, PM_FUNDER)
+        url = "%s/value?user=%s" % (PM_DATA_API, funder)
         val = json.loads(pm_get(url).read())
         if isinstance(val, list) and val:
             result["positions_value"] = float(val[0].get("value", 0))
     except Exception:
         pass
 
-    # Cash = on-chain USDC.e balance via Polygon RPC (same as bot uses)
+    # Cash = on-chain USDC.e balance via Polygon RPC
     try:
-        addr = PM_FUNDER.lower().replace("0x", "")
-        data = "0x70a08231" + addr.rjust(64, "0")  # balanceOf(address)
+        addr = funder.lower().replace("0x", "")
+        data = "0x70a08231" + addr.rjust(64, "0")
         payload = json.dumps({"jsonrpc": "2.0", "method": "eth_call",
                               "params": [{"to": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174", "data": data}, "latest"], "id": 1})
         rpc_req = urllib.request.Request("https://polygon-bor-rpc.publicnode.com",
@@ -104,16 +115,36 @@ def fetch_pm_data():
                                          method="POST")
         rpc_resp = json.loads(urllib.request.urlopen(rpc_req, timeout=10).read())
         hex_val = rpc_resp.get("result", "0x0").replace("0x", "")
-        result["cash"] = int(hex_val, 16) / 1_000_000.0  # USDC has 6 decimals
+        result["cash"] = int(hex_val, 16) / 1_000_000.0
     except Exception:
         result["cash"] = 0
 
-    # Total portfolio = positions value + cash (matches PM UI exactly)
     result["value"] = result["positions_value"] + result["cash"]
 
-    _pm_cache["data"] = result
-    _pm_cache["ts"] = now
+    cache["data"] = result
+    cache["ts"] = now
     return result
+
+
+def fetch_lb_profit(address):
+    """All-time profit from lb-api (source of truth for PnL). Cached 60s."""
+    now = time.time()
+    entry = _lb_cache.get(address, {"val": None, "ts": 0})
+    if entry["val"] is not None and now - entry["ts"] < 60:
+        return entry["val"]
+    try:
+        req = urllib.request.Request(
+            "%s/profit?address=%s" % (LB_API, address),
+            headers={"User-Agent": "Bottie-Dashboard/1.0", "Accept": "application/json"},
+        )
+        data = json.loads(urllib.request.urlopen(req, timeout=10).read())
+        if isinstance(data, list) and data:
+            val = float(data[0].get("amount", 0))
+            _lb_cache[address] = {"val": val, "ts": now}
+            return val
+    except Exception:
+        pass
+    return None
 
 
 def sf(v):
@@ -125,9 +156,13 @@ def sf(v):
     return 0.0
 
 
-def compute_pm_kpis():
+def compute_pm_kpis(funder=None, initial_bankroll=None):
     """Compute KPIs from Polymarket API data (source of truth)."""
-    pm = fetch_pm_data()
+    if funder is None:
+        funder = PM_FUNDER
+    if initial_bankroll is None:
+        initial_bankroll = INITIAL_BANKROLL
+    pm = fetch_pm_data(funder)
     trades = pm["trades"]
     positions = pm["positions"]
 
@@ -144,10 +179,11 @@ def compute_pm_kpis():
     position_value = sum(sf(p.get("currentValue", 0)) for p in active)
     position_cost = sum(sf(p.get("initialValue", 0)) for p in active)
 
-    # Portfolio = positions value + cash (from Polygon RPC USDC balance)
     portfolio_value = pm["value"] if pm["value"] > 0 else position_value
-
     cash = pm.get("cash", 0)
+
+    # lb-api: source of truth for all-time PnL
+    lb_profit = fetch_lb_profit(funder)
 
     return {
         "portfolio_value": portfolio_value,
@@ -161,9 +197,10 @@ def compute_pm_kpis():
         "total_trades": len(trades),
         "buy_count": len(buys),
         "sell_count": len(sells),
-        "deposited": INITIAL_BANKROLL,
-        "rendement": portfolio_value - INITIAL_BANKROLL if portfolio_value > 0 else 0,
-        "rendement_pct": (portfolio_value / INITIAL_BANKROLL - 1) * 100 if portfolio_value > 0 and INITIAL_BANKROLL > 0 else 0,
+        "deposited": initial_bankroll,
+        "rendement": portfolio_value - initial_bankroll if portfolio_value > 0 else 0,
+        "rendement_pct": (portfolio_value / initial_bankroll - 1) * 100 if portfolio_value > 0 and initial_bankroll > 0 else 0,
+        "lb_profit": lb_profit,
         "pm_error": pm["error"],
     }
 
@@ -192,6 +229,56 @@ def load_trades():
                 except Exception:
                     pass
     return trades
+
+def load_trades_giyn():
+    """Load GIYN (bottie-test) trades from /opt/bottie-test/data/trades.jsonl."""
+    if not GIYN_TRADES_FILE.exists():
+        return []
+    trades = []
+    with open(GIYN_TRADES_FILE) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    t = json.loads(line)
+                    if t.get("signal_source") == "manual" and t.get("result") is not None:
+                        continue
+                    title = (t.get("market_title") or "").lower()
+                    if "up or down" in title:
+                        continue
+                    trades.append(t)
+                except Exception:
+                    pass
+    return trades
+
+
+def parse_config_wallets_giyn():
+    """Parse GIYN watchlist from /opt/bottie-test/config.yaml."""
+    if not GIYN_CONFIG_FILE.exists():
+        return {}
+    try:
+        import yaml
+        with open(GIYN_CONFIG_FILE) as f:
+            config = yaml.safe_load(f)
+        wallets = {}
+        for w in config.get("copy_trading", {}).get("watchlist", []):
+            addr = w.get("address", "").lower()
+            name = w.get("name", addr[:10])
+            weight = w.get("weight", 0.5)
+            tier = "T1" if weight >= 0.85 else "T2" if weight >= 0.65 else "T3"
+            wallets[addr] = {
+                "name": name, "weight": weight, "tier": tier,
+                "market_types": w.get("market_types", []),
+                "min_price": w.get("min_price", 0),
+                "max_price": w.get("max_price", 1),
+                "leagues": w.get("leagues", []),
+                "sports": w.get("sports", []),
+                "max_legs_per_event": w.get("max_legs_per_event", 0),
+            }
+        return wallets
+    except Exception:
+        return {}
+
 
 def load_dag():
     if not DAG_FILE.exists():
@@ -278,9 +365,9 @@ def load_hypotheses():
 
 # ── Aggregations ────────────────────────────────────────────────────────────
 
-def compute_kpis(trades):
+def compute_kpis(trades, funder=None, initial_bankroll=None):
     """Compute KPIs — uses PM API for portfolio/value, trades.jsonl for WR attribution."""
-    pm = compute_pm_kpis()
+    pm = compute_pm_kpis(funder=funder, initial_bankroll=initial_bankroll)
 
     # WR from trades.jsonl (for relative comparison only)
     filled = [t for t in trades if t.get("filled") and not t.get("dry_run")]
@@ -306,6 +393,7 @@ def compute_kpis(trades):
         "rendement": pm["rendement"],
         "rendement_pct": pm["rendement_pct"],
         "total_trades": pm["total_trades"],
+        "lb_profit": pm.get("lb_profit"),
         "pm_error": pm["pm_error"],
         # trades.jsonl data (relative only)
         "total_pnl": sum(t.get("pnl") or 0 for t in resolved),
@@ -549,7 +637,7 @@ def render_why(trade, wallet_map):
                 f'<span class="badge" style="background:#3fb950;color:#000">+{edge:.1f}%</span>')
     return f'<span class="muted">{src or "?"}</span>'
 
-def render_kpi_row(kpis, wallet_map, trades=None):
+def render_kpi_row(kpis, wallet_map, trades=None, funder=None, label="Cannae"):
     # PM API data (source of truth)
     portfolio = kpis.get("portfolio_value", 0)
     rendement = kpis.get("rendement", 0)
@@ -571,15 +659,24 @@ def render_kpi_row(kpis, wallet_map, trades=None):
     cash = kpis.get("cash", 0)
     pos_val = kpis.get("position_value", 0)
 
-    # Use filtered bot open count if trades available, otherwise PM total
-    bot_open = count_real_open_bets(trades) if trades else kpis["open_count"]
+    # lb-api: source of truth for all-time PnL
+    lb_profit = kpis.get("lb_profit")
+    if lb_profit is not None:
+        lb_color = "#3fb950" if lb_profit >= 0 else "#f85149"
+        lb_str = f'{"+" if lb_profit >= 0 else ""}${lb_profit:,.0f}'
+        lb_sub = "lb-api (source of truth)"
+    else:
+        lb_color = "#8b949e"
+        lb_str = "—"
+        lb_sub = "lb-api niet beschikbaar"
+
+    bot_open = count_real_open_bets(trades, funder) if trades else kpis["open_count"]
     pm_total = kpis["open_count"]
 
     tiles = [
         ("Portfolio (PM)", f'${portfolio:.0f}', "#388bfd",
          f'cash: ${cash:.0f} + posities: ${pos_val:.0f}'),
-        ("Rendement", f'{"+" if rendement >= 0 else ""}${rendement:.0f} ({rendement_pct:+.1f}%)', rend_color,
-         f'gestort: ${deposited:.0f}'),
+        ("PnL All-time", lb_str, lb_color, lb_sub),
         ("Open Posities", f'${pos_val:.0f}', unr_color,
          f'{bot_open} bot bets | {pm_total} PM totaal | cash: ${cash:.0f}'),
         ("Win Rate", f"{wr:.1f}%" if kpis["resolved_count"] else "—", wr_color,
@@ -587,15 +684,16 @@ def render_kpi_row(kpis, wallet_map, trades=None):
     ]
 
     tiles_html = ""
-    for label, value, color, subtitle in tiles:
+    for tile_label, value, color, subtitle in tiles:
         tiles_html += f"""
         <div class="kpi-tile" style="border-top:3px solid {color}">
-          <div class="kpi-label">{label}</div>
+          <div class="kpi-label">{tile_label}</div>
           <div class="kpi-value">{value}</div>
           <div class="kpi-sub">{subtitle}</div>
         </div>"""
 
     return f"""
+    <div class="section-title" style="margin-bottom:8px">{label}</div>
     <div class="kpi-row">{tiles_html}</div>{error_badge}
     <div class="goal-bar-wrap">
       <div class="goal-label">
@@ -605,10 +703,10 @@ def render_kpi_row(kpis, wallet_map, trades=None):
       <div class="goal-bar"><div class="goal-fill" style="width:{progress:.1f}%"></div></div>
     </div>"""
 
-def count_real_open_bets(trades):
+def count_real_open_bets(trades, funder=None):
     """Count open bets that actually exist on PM — for accurate headers."""
     open_bets_raw = [t for t in trades if t.get("filled") and t.get("result") is None and not t.get("dry_run")]
-    pm = fetch_pm_data()
+    pm = fetch_pm_data(funder)
     pm_positions = pm.get("positions", [])
     pm_open_keys = set()
     for p in pm_positions:
@@ -1286,7 +1384,7 @@ tr.group-cont .market-title { padding-left: 12px; font-size: 0.85em; }
 """
 
 
-def page_wrap(active_page, body_html, token=""):
+def page_wrap(active_page, body_html, token="", account="cannae"):
     if CET:
         now_str = datetime.now(CET).strftime("%Y-%m-%d %H:%M %Z")
     else:
@@ -1304,7 +1402,18 @@ def page_wrap(active_page, body_html, token=""):
     nav = ""
     for label, href in pages:
         cls = ' class="active"' if href == active_page else ""
-        nav += f'<a href="{prefix}{href}"{cls}>{label}</a>'
+        nav += f'<a href="{prefix}{href}?account={account}"{cls}>{label}</a>'
+
+    sel_cannae = ' selected' if account == 'cannae' else ''
+    sel_giyn   = ' selected' if account == 'giyn' else ''
+    account_selector = (
+        f'<select onchange="window.location.href=window.location.pathname+\'?account=\'+this.value"'
+        f' style="background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:6px;'
+        f'padding:4px 8px;font-size:0.8rem;cursor:pointer;margin-left:8px">'
+        f'<option value="cannae"{sel_cannae}>Cannae</option>'
+        f'<option value="giyn"{sel_giyn}>GIYN</option>'
+        f'</select>'
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="nl">
@@ -1320,7 +1429,8 @@ def page_wrap(active_page, body_html, token=""):
   <h1>BOTTIE</h1>
   <div class="header-right">
     <button onclick="location.reload()" style="background:var(--blue);color:#fff;border:none;border-radius:6px;padding:6px 14px;font-size:0.8rem;font-weight:600;cursor:pointer;margin-right:8px">&#x21BB;</button>
-    <span>{now_str}</span>
+    {account_selector}
+    <span style="margin-left:8px">{now_str}</span>
     {"" if active_page == "/settings" else '<span id="countdown">30</span>s'}
   </div>
 </div>
@@ -1384,13 +1494,13 @@ def render_strategy_summary(wallet_map):
     {sizing_info}"""
 
 
-def _load_cannae_slugs():
-    """Parse Cannae game slugs from bot logs (CANNAE GAMES output)."""
+def _load_cannae_slugs(service="bottie"):
+    """Parse game slugs from bot logs (CANNAE GAMES output)."""
     import subprocess
     cannae_slugs = {}
     try:
         result = subprocess.run(
-            ["journalctl", "-u", "bottie", "--since", "60 min ago", "--no-pager"],
+            ["journalctl", "-u", service, "--since", "60 min ago", "--no-pager"],
             capture_output=True, text=True, timeout=10
         )
         for line in result.stdout.splitlines():
@@ -1410,13 +1520,14 @@ def _load_cannae_slugs():
         pass
     return cannae_slugs
 
-def render_live_board(trades):
-    """Live flight board — only Cannae games (not all PM scheduled games)."""
+def render_live_board(trades, service="bottie"):
+    """Live flight board — games tracked by the given service."""
     import os
-    schedule_file = BASE_DIR / "data" / "schedule_cache.json"
+    svc_base = Path("/opt/bottie-test") if service == "bottie-test" else BASE_DIR
+    schedule_file = svc_base / "data" / "schedule_cache.json"
 
-    # Load Cannae's actual games from bot logs
-    cannae_slugs = _load_cannae_slugs()
+    # Load game slugs from bot logs for this service
+    cannae_slugs = _load_cannae_slugs(service)
 
     games = []
     if schedule_file.exists():
@@ -1720,16 +1831,73 @@ def render_cannae_intel():
     </div>"""
 
 
-def render_overview(trades, wallet_map):
-    kpis = compute_kpis(trades)
+def render_giyn_section():
+    """Render GIYN (bottie-test) KPI row for the overview page."""
+    giyn_trades    = load_trades_giyn()
+    giyn_wallets   = parse_config_wallets_giyn()
+    giyn_kpis      = compute_kpis(giyn_trades, funder=GIYN_FUNDER)
+    giyn_open      = count_real_open_bets(giyn_trades, GIYN_FUNDER)
+
+    html = render_kpi_row(giyn_kpis, giyn_wallets, giyn_trades, funder=GIYN_FUNDER, label="GIYN (bottie-test)")
+
+    # Bot health: last STATUS line from bottie-test logs
+    try:
+        import subprocess
+        log = subprocess.run(
+            ["journalctl", "-u", "bottie-test", "--no-pager", "-n", "200"],
+            capture_output=True, text=True, timeout=5
+        ).stdout
+        status_lines = [l for l in log.splitlines() if "STATUS:" in l]
+        last_status = status_lines[-1] if status_lines else ""
+        svc_color = "#3fb950" if last_status else "#f85149"
+        status_snippet = last_status.split("STATUS:")[-1].strip()[:120] if last_status else "geen STATUS log"
+        html += f'<div style="margin:6px 0 12px 0;font-size:0.8rem;color:{svc_color}">● bottie-test &nbsp;<span class="muted">{status_snippet}</span></div>'
+    except Exception:
+        pass
+
+    return html
+
+
+def render_overview(trades, wallet_map, account="cannae"):
+    if account == "giyn":
+        giyn_trades  = load_trades_giyn()
+        giyn_wallets = parse_config_wallets_giyn()
+        giyn_kpis    = compute_kpis(giyn_trades, funder=GIYN_FUNDER)
+        giyn_open    = count_real_open_bets(giyn_trades, GIYN_FUNDER)
+        body  = render_kpi_row(giyn_kpis, giyn_wallets, giyn_trades, funder=GIYN_FUNDER, label="GIYN (bottie-test)")
+        body += f"""
+    <div class="section">
+      <div class="section-title">Live Board — GIYN</div>
+      {render_live_board(giyn_trades, service="bottie-test")}
+    </div>
+    <div class="section">
+      <div class="section-title">Open Bets ({giyn_open})</div>
+      {render_open_bets(giyn_trades, giyn_wallets)}
+    </div>
+    <div class="section">
+      <div class="section-title">Dagelijkse P&L</div>
+      {render_daily_pnl(giyn_trades)}
+    </div>
+    <div class="section">
+      <div class="section-title">Per Sport</div>
+      {render_sport_grid(compute_sport_stats(giyn_trades))}
+    </div>
+    <div class="section">
+      <div class="section-title">Trade Log (laatste 30)</div>
+      {render_resolved_trades(giyn_trades, giyn_wallets, limit=30)}
+    </div>"""
+        return page_wrap("/", body, account=account)
+
+    kpis = compute_kpis(trades, funder=PM_FUNDER, initial_bankroll=INITIAL_BANKROLL)
     sport_stats = compute_sport_stats(trades)
 
     body = render_bot_health(trades)
-    body += render_kpi_row(kpis, wallet_map, trades)
+    body += render_kpi_row(kpis, wallet_map, trades, funder=PM_FUNDER, label="Cannae (bottie)")
+    body += f"""<div class="section">{render_giyn_section()}</div>"""
     body += f"""
     <div class="section">
-      <div class="section-title">Live Board</div>
-      {render_live_board(trades)}
+      <div class="section-title">Live Board — Cannae</div>
+      {render_live_board(trades, service="bottie")}
     </div>
     <div class="section">
       <div class="section-title">Open Bets ({count_real_open_bets(trades)})</div>
@@ -1751,10 +1919,10 @@ def render_overview(trades, wallet_map):
       <div class="section-title">Trade Log (laatste 30)</div>
       {render_resolved_trades(trades, wallet_map, limit=30)}
     </div>"""
-    return page_wrap("/", body)
+    return page_wrap("/", body, account=account)
 
 
-def render_trades_page(trades, wallet_map):
+def render_trades_page(trades, wallet_map, account="cannae"):
     kpis = compute_kpis(trades)
     real_open = count_real_open_bets(trades)
     body = f"""
@@ -1770,7 +1938,7 @@ def render_trades_page(trades, wallet_map):
       <div class="section-title">Alle Trades (laatste 200)</div>
       {render_all_trades(trades, wallet_map)}
     </div>"""
-    return page_wrap("/trades", body)
+    return page_wrap("/trades", body, account=account)
 
 
 def render_wallet_detail(trades, wallet_map, stats):
@@ -1850,7 +2018,7 @@ def render_wallet_detail(trades, wallet_map, stats):
     return cards
 
 
-def render_wallets_page(trades, wallet_map):
+def render_wallets_page(trades, wallet_map, account="cannae"):
     wallet_stats = compute_wallet_stats(trades, wallet_map)
     body = f"""
     <div class="section">
@@ -1861,10 +2029,10 @@ def render_wallets_page(trades, wallet_map):
       <div class="section-title">Per Wallet Detail</div>
       {render_wallet_detail(trades, wallet_map, wallet_stats)}
     </div>"""
-    return page_wrap("/wallets", body)
+    return page_wrap("/wallets", body, account=account)
 
 
-def render_research_page():
+def render_research_page(account="cannae"):
     dag_entries = load_dag()
     playbook = load_playbook()
     scout = load_scout_report()
@@ -1877,7 +2045,7 @@ def render_research_page():
       <div class="section-title">Playbook (LLM Curator)</div>
       {render_playbook(playbook)}
     </div>"""
-    return page_wrap("/research", body)
+    return page_wrap("/research", body, account=account)
 
 
 # ── Consensus Page ────────────────────────────────────────────────────────────
@@ -2452,7 +2620,7 @@ def render_edge_report_summary():
         return '<div class="empty">Kon edge rapport niet laden.</div>'
 
 
-def render_edge_page(trades, wallet_map):
+def render_edge_page(trades, wallet_map, account="cannae"):
     """Edge analytics page — price brackets, market types, leagues."""
     bracket_data = compute_edge_by_bracket(trades)
     type_data = compute_edge_by_market_type(trades)
@@ -2482,10 +2650,10 @@ def render_edge_page(trades, wallet_map):
       {render_edge_report_summary()}
     </div>"""
 
-    return page_wrap("/edge", body)
+    return page_wrap("/edge", body, account=account)
 
 
-def render_ops_page(trades, wallet_map):
+def render_ops_page(trades, wallet_map, account="cannae"):
     """Operations health page — data freshness, anomalies, PnL validation."""
     import os
 
@@ -2634,7 +2802,7 @@ def render_ops_page(trades, wallet_map):
       {pnl_section}
     </div>"""
 
-    return page_wrap("/ops", body)
+    return page_wrap("/ops", body, account=account)
 
 
 # ── Settings Page ─────────────────────────────────────────────────────────────
@@ -2798,6 +2966,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         page, token = auth
 
+        # Strip query string for routing; extract account param
+        _parsed = urlparse(page)
+        page = _parsed.path
+        account = parse_qs(_parsed.query).get("account", ["cannae"])[0]
+        if account not in ("cannae", "giyn"):
+            account = "cannae"
+
         if page == "/settings":
             try:
                 html = render_settings_page(token)
@@ -2810,23 +2985,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 trades     = load_trades()
                 wallet_map = parse_config_wallets()
                 if page == "/trades":
-                    html = render_trades_page(trades, wallet_map)
+                    html = render_trades_page(trades, wallet_map, account=account)
                 elif page == "/wallets":
-                    html = render_wallets_page(trades, wallet_map)
+                    html = render_wallets_page(trades, wallet_map, account=account)
                 elif page == "/edge":
-                    html = render_edge_page(trades, wallet_map)
+                    html = render_edge_page(trades, wallet_map, account=account)
                 elif page == "/ops":
-                    html = render_ops_page(trades, wallet_map)
+                    html = render_ops_page(trades, wallet_map, account=account)
                 elif page == "/strategy":
-                    html = render_edge_page(trades, wallet_map)
+                    html = render_edge_page(trades, wallet_map, account=account)
                 elif page == "/intel":
                     html = page_wrap("/intel", f"""
     <div class="section">
       <div class="section-title">Cannae Intelligence Report</div>
       {render_cannae_intel()}
-    </div>""", token)
+    </div>""", token, account=account)
                 else:
-                    html = render_overview(trades, wallet_map)
+                    html = render_overview(trades, wallet_map, account=account)
                 # Inject token into page_wrap calls that don't have it yet
                 if token and f"/t/{token}" not in html:
                     html = html.replace('href="/', f'href="/t/{token}/')

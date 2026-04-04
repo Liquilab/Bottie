@@ -1,6 +1,6 @@
 # /morning — Ochtend Kickoff
 
-Laadt overnight state, checkt productie-systemen (beide instanties), en presenteert een actionable ochtend briefing.
+Laadt overnight state, checkt productie-systemen (beide instanties), en presenteert een actionable ochtend briefing met uitgebreide trade-analyse.
 
 **Draai dit EERST bij het starten van een nieuwe sessie in de ochtend.**
 
@@ -18,8 +18,8 @@ Laadt overnight state, checkt productie-systemen (beide instanties), en presente
 
 | Instantie | Service | Pad | Funder | Rol |
 |-----------|---------|-----|--------|-----|
-| **Cannae** | `bottie` | `/opt/bottie/` | `0x9f23f6d5d18f9Fc5aeF42EFEc8f63a7db3dB6D15` | Hoofd-bot, Cannae copy |
-| **GIYN** | `bottie-test` | `/opt/bottie-test/` | `0x8A3A19AeC04eeB6E3C183ee5750D06fe5c08066a` | Expert team (GIYN, Countryside, weflyhigh, bcda) |
+| **Cannae** | `bottie` | `/opt/bottie/` | `0x89dcA91b49AfB7bEfb953a7658a1B83fC7Ab8F42` | Hoofd-bot, Cannae copy trading (live) |
+| **GIYN** | `bottie-test` | `/opt/bottie-test/` | `0x8A3A19AeC04eeB6E3C183ee5750D06fe5c08066a` | Paper trade bot (dry_run=true, odds_arb close_games) |
 
 ---
 
@@ -27,38 +27,32 @@ Laadt overnight state, checkt productie-systemen (beide instanties), en presente
 
 ### Stap 1: Laad Context (PARALLEL)
 
-**A. Laatste session save:**
-```
-Read: data/sessions/YYYY-MM-DD-session.md (vandaag of gisteren)
-```
-Focus op de LAATSTE "Session Save" sectie.
-
-**B. Gisteren's EOD samenvatting:**
+**A. Gisteren's EOD (primary session context):**
 ```
 Read: data/sessions/YYYY-MM-DD-eod.md (datum van gisteren)
 ```
-Lees alleen: "Completed", "In progress", "Blockers", "Context for tomorrow".
+Lees: "Completed", "In progress", "Blockers", "Context voor morgen".
+Als niet gevonden, check `YYYY-MM-DD-session.md` of `YYYY-MM-DD-daily-snapshot.md`.
 
-**C. Git state:**
+**B. Git state:**
 ```bash
-git -C <PROJECT_ROOT> log --oneline -5
-git -C <PROJECT_ROOT> status --short
-git -C <PROJECT_ROOT> branch --show-current
+git log --oneline -5
+git status --short
+git branch --show-current
 ```
 
-**D. Issue tracking** (optioneel):
-- Haal actieve tickets op
+**C. Issue tracking:**
+- Haal actieve In Progress tickets op uit Linear (team: RustedPoly, project: Bottie)
 
-**E. Production checks** (Bottie VPS):
-SSH: `ssh -T -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@78.141.222.227`
+**D. Production checks** (VPS: `ssh -T -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@78.141.222.227`):
 
-1. **Portfolio BEIDE instanties (PM API — source of truth)**:
+**1. Portfolio BEIDE instanties (PM API):**
 ```bash
 python3 -c "
 import json, urllib.request
 API='https://data-api.polymarket.com'
 INSTANCES = {
-    'Cannae': '0x9f23f6d5d18f9Fc5aeF42EFEc8f63a7db3dB6D15',
+    'Cannae': '0x89dcA91b49AfB7bEfb953a7658a1B83fC7Ab8F42',
     'GIYN':   '0x8A3A19AeC04eeB6E3C183ee5750D06fe5c08066a',
 }
 def g(u): return json.loads(urllib.request.urlopen(urllib.request.Request(u,headers={'User-Agent':'B/1','Accept':'application/json'}),timeout=15).read())
@@ -71,7 +65,7 @@ for name, funder in INSTANCES.items():
 "
 ```
 
-2. **Bot status + cash BEIDE services** (uit logs, ALLEEN voor service status en cash):
+**2. Bot status + cash BEIDE services:**
 ```bash
 for svc in bottie bottie-test; do
   echo "=== $svc ==="
@@ -79,24 +73,71 @@ for svc in bottie bottie-test; do
   journalctl -u $svc --no-pager -n 100 | grep STATUS | tail -1
 done
 ```
-Gebruik `bankroll=` uit STATUS regel voor cash. Totaal portfolio per instantie = positions value + bankroll.
+Gebruik `bankroll=` uit STATUS voor cash. **Portfolio = PM /value (posities) + bankroll (cash).**
 
-**⚠️ NOOIT de WR/PnL/trade count uit de STATUS log gebruiken — deze zijn onbetrouwbaar door phantom fills.**
-**Portfolio waarde = PM /value (posities) + bankroll (cash). ALTIJD optellen!**
+**3. Uitgebreide trade-analyse BEIDE instanties (vorige dag + nacht):**
 
-3. **Overnight W/L BEIDE instanties** (trades.jsonl — source of truth voor resolved trades):
+Vervang `GISTEREN` door datum van gisteren (YYYY-MM-DD).
+
 ```bash
 for inst in /opt/bottie /opt/bottie-test; do
-  echo "=== $(basename $inst) ==="
-  jq -r 'select(.resolved_at != null and .resolved_at > "YYYY-MM-DDT22:00") | [.resolved_at[11:16], .result, (.pnl // 0 | tostring), .market_title[0:45], .outcome, (.size_usdc | tostring)] | @tsv' $inst/data/trades.jsonl 2>/dev/null | sort | column -t -s $'\t'
+  echo ""
+  echo "====== $(basename $inst) — trade analyse ======"
+  
+  # Alle resolved trades van gisteren
+  TRADES=$(jq -r 'select(.resolved_at != null and .resolved_at > "GISTEREN T00:00") | [
+    .resolved_at[0:10],
+    (.sport // "unknown"),
+    .result,
+    (.pnl // 0),
+    .market_title[0:50],
+    .outcome,
+    (.size_usdc // 0)
+  ] | @tsv' $inst/data/trades.jsonl 2>/dev/null)
+  
+  if [ -z "$TRADES" ]; then
+    echo "  Geen resolved trades gevonden"
+    continue
+  fi
+
+  # Totaal W/L/PnL
+  echo "--- Totaal ---"
+  echo "$TRADES" | awk -F'\t' '
+    {
+      result=$3; pnl=$4+0
+      total++; totpnl+=pnl
+      if(result=="win") wins++
+      else if(result=="loss") losses++
+      else other++
+    }
+    END {
+      printf "Trades: %d | W: %d | L: %d | Overig: %d | PnL: $%.2f\n", total, wins+0, losses+0, other+0, totpnl
+    }'
+  
+  # Per sport
+  echo "--- Per sport ---"
+  echo "$TRADES" | awk -F'\t' '
+    {
+      sport=$2; result=$3; pnl=$4+0
+      count[sport]++; totpnl[sport]+=pnl
+      if(result=="win") wins[sport]++
+      else if(result=="loss") losses[sport]++
+    }
+    END {
+      for(s in count)
+        printf "  %-12s %dW/%dL  PnL: $%.2f\n", s, wins[s]+0, losses[s]+0, totpnl[s]
+    }' | sort
+  
+  # Top 3 wins en top 3 losses
+  echo "--- Grootste winst ---"
+  echo "$TRADES" | sort -t$'\t' -k4 -rn | head -3 | awk -F'\t' '{printf "  +$%.2f  %s (%s)\n", $4, $5, $6}'
+  
+  echo "--- Grootste verlies ---"
+  echo "$TRADES" | sort -t$'\t' -k4 -n | head -3 | awk -F'\t' '{printf "  $%.2f  %s (%s)\n", $4, $5, $6}'
 done
 ```
-Vervang `YYYY-MM-DD` door de datum van gisteren. Dit toont alle resolved trades (win/loss/take_profit/auto_sell) sinds 22:00.
-Tel W/L op uit de output. **Dit is de enige betrouwbare bron voor W/L en PnL.**
 
 ### Stap 2: Presenteer Briefing
-
-Houd het onder 20 regels:
 
 ```
 Ochtend Briefing — YYYY-MM-DD HH:MM
@@ -105,15 +146,24 @@ Gisteren:
   - [1-2 regels: wat is afgerond]
 
 Production:
-  Cannae:  [status] | $X cash + $Y pos = $Z totaal | overnight W/L
-  GIYN:    [status] | $X cash + $Y pos = $Z totaal | overnight W/L
+  Cannae:  [status] | $X cash + $Y pos = $Z totaal
+  GIYN:    [status] | $X cash (paper bot, dry_run)
+
+Trade Analyse — Cannae (gisteren):
+  Totaal:  NW / NL | PnL: $X
+  Voetbal: NW / NL | PnL: $X
+  NBA:     NW / NL | PnL: $X
+  Beste:   +$X  [markt]
+  Slechtste: -$X  [markt]
+
+Trade Analyse — GIYN Paper (gisteren):
+  Totaal:  NW / NL | PnL: $X (paper)
 
 Actief Werk:
-  - [Ticket/taak 1]
-  - [Ticket/taak 2]
+  - [Ticket/taak]
 
 Checks:
-  - [Belangrijkste ding om te verifiëren op basis van gisteren]
+  - [Ding om te verifiëren]
 
 Volgende Actie: [directe volgende stap]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -123,7 +173,7 @@ Volgende Actie: [directe volgende stap]
 
 Prioriteit:
 1. Als productie down is → onderzoek en rapporteer
-2. Als session zegt "verifieer X" → voer verificatie uit
+2. Als session/EOD zegt "verifieer X" → voer verificatie uit
 3. Als er een lopend experiment/test is → check resultaten
 4. Als er geen urgente actie is → presenteer status en VRAAG wat te doen
 
@@ -134,19 +184,18 @@ Prioriteit:
 | DO | DON'T |
 |----|-------|
 | Check BEIDE instanties (bottie + bottie-test) | Alleen Cannae checken |
-| Lees alleen de LAATSTE session save | Alle saves doorlezen |
-| Focus op "Context for tomorrow" uit EOD | Hele EOD narratief lezen |
-| Check productie EERST | Aannemen dat alles draait |
-| PM API + cash = portfolio | Bot STATUS log WR/PnL gebruiken |
-| Positions value + bankroll optellen | PM /value als totaal behandelen |
-| Presenteer 15-20 regel briefing | Multi-paragraaf status schrijven |
+| Lees de EOD van gisteren als primary context | Alle session files doorlezen |
+| Uitgebreide trade-analyse elke ochtend | Alleen W/L tellen |
+| PM API adres = FUNDER_ADDRESS uit .env | Verkeerde wallet adres gebruiken |
+| Portfolio = PM /value + bankroll | Één van beide weglaten |
+| GIYN label als "(paper)" in briefing | GIYN als live bot behandelen |
 | Handel op duidelijke next steps | Vragen "zal ik doorgaan?" |
 
 ---
 
 ## Fallback
 
-Als geen session file of EOD gevonden:
+Als geen EOD of session file gevonden:
 1. Check MEMORY.md "Current State" sectie
 2. Check git log (laatste 24u)
 3. Presenteer wat beschikbaar is

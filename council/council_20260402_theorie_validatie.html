@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Council: Theorie Validatie — Cannae Strategie</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0A0A0A; color: #E0E0E0; font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; line-height: 1.6; padding: 2rem; max-width: 1200px; margin: 0 auto; }
+  h1 { color: #FF6B35; font-size: 1.8rem; margin-bottom: 0.3rem; }
+  .date { color: #888; font-size: 0.85rem; margin-bottom: 2rem; }
+  .question { background: #1A1A2E; border-left: 4px solid #FF6B35; padding: 1.2rem; margin-bottom: 2rem; border-radius: 0 8px 8px 0; }
+  .question p { color: #CCC; font-size: 0.95rem; }
+  .section-title { color: #FF6B35; font-size: 1.3rem; margin: 2rem 0 1rem; border-bottom: 1px solid #333; padding-bottom: 0.5rem; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
+  .card { background: #141420; border: 1px solid #2A2A3A; border-radius: 12px; overflow: hidden; transition: border-color 0.2s; }
+  .card:hover { border-color: #FF6B35; }
+  .card-header { padding: 1rem 1.2rem; display: flex; align-items: center; gap: 0.8rem; cursor: pointer; }
+  .card-icon { font-size: 1.5rem; }
+  .card-name { color: #FF6B35; font-weight: 700; font-size: 0.95rem; }
+  .card-oneliner { color: #AAA; font-size: 0.8rem; margin-top: 0.2rem; }
+  .card-body { padding: 0 1.2rem 1.2rem; display: none; font-size: 0.85rem; color: #CCC; }
+  .card-body.open { display: block; }
+  .card-body p { margin-bottom: 0.6rem; }
+  .card-body strong { color: #E8E8E8; }
+  .card-body ul { padding-left: 1.2rem; margin-bottom: 0.6rem; }
+  .reviews { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 0.8rem; margin-bottom: 2rem; }
+  .review { background: #141420; border: 1px solid #2A2A3A; border-radius: 8px; padding: 1rem; font-size: 0.82rem; }
+  .review-label { color: #7B68EE; font-weight: 700; margin-bottom: 0.5rem; }
+  .review strong { color: #E0E0E0; }
+  .verdict-box { background: linear-gradient(135deg, #1A1A2E 0%, #16213E 100%); border: 2px solid #FF6B35; border-radius: 16px; padding: 2rem; margin: 2rem 0; }
+  .verdict-title { color: #FF6B35; font-size: 1.4rem; font-weight: 700; margin-bottom: 1rem; }
+  .verdict-text { color: #E0E0E0; font-size: 1rem; margin-bottom: 1rem; }
+  .verdict-subtitle { color: #7B68EE; font-size: 1.1rem; font-weight: 700; margin: 1.2rem 0 0.6rem; }
+  .blind-spot { background: #1E1E2E; border-left: 4px solid #7B68EE; padding: 1rem; margin: 0.8rem 0; border-radius: 0 8px 8px 0; }
+  .blind-spot-title { color: #7B68EE; font-weight: 700; margin-bottom: 0.3rem; }
+  .action-box { background: #0D1B0D; border: 1px solid #2D5A2D; border-radius: 8px; padding: 1rem; margin: 0.5rem 0; }
+  .action-label { color: #4CAF50; font-weight: 700; }
+  .tag { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+  .tag-red { background: #3A1515; color: #FF6B6B; }
+  .tag-green { background: #153A15; color: #6BFF6B; }
+  .tag-yellow { background: #3A3A15; color: #FFD700; }
+  .consensus-list { list-style: none; padding: 0; }
+  .consensus-list li { padding: 0.5rem 0; border-bottom: 1px solid #222; }
+  .consensus-list li:last-child { border: none; }
+  .meta { color: #555; font-size: 0.75rem; margin-top: 2rem; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>Council: Theorie Validatie</h1>
+<div class="date">2 april 2026 — 5 adviseurs + 5 peer reviewers</div>
+
+<div class="question">
+  <p><strong>Vraag:</strong> We hebben Cannae's strategie reverse-engineered: een bot die 5-6 dagen voor wedstrijden Win NO + Draw YES koopt op PM voetbal. ROI ~21.7% op $25.2M. Sizing = conviction-signaal. <strong>Valideer de theorie en identificeer wat er mist voordat we paper trades starten.</strong></p>
+</div>
+
+<!-- ADVISEURS -->
+<div class="section-title">De 5 Adviseurs</div>
+<div class="cards">
+
+  <div class="card">
+    <div class="card-header" onclick="this.nextElementSibling.classList.toggle('open')">
+      <span class="card-icon">&#x1F9E0;</span>
+      <div>
+        <div class="card-name">Eerste Principes Denker</div>
+        <div class="card-oneliner">Data vervuild, observatie &#x2260; verklaring, verliezers ontbreken</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <p><strong>1. Data is vervuild.</strong> Survivorship bias maakt 21.7% ROI een bovengrens. Hauptbet-analyse (64.5-68.4% WR) is realistischer, maar ROI niet herberekend op dat niveau.</p>
+      <p><strong>2. Win NO + Draw YES = observatie.</strong> WAT Cannae doet is beschreven, niet WAAROM. Informatievoorsprong of structureel marktdefect?</p>
+      <p><strong>3. Verliezers ontbreken.</strong> Q1-Q4 bets met 57% WR en 4-8% ROI = nauwelijks boven break-even. We kopieren ook de marginale bets.</p>
+      <p><strong>Gaps:</strong> hauptbet P&L, verliesanalyse, timing-ROI relatie, slippage.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header" onclick="this.nextElementSibling.classList.toggle('open')">
+      <span class="card-icon">&#x1F680;</span>
+      <div>
+        <div class="card-name">Expansionist</div>
+        <div class="card-oneliner">Counterfactual baseline, calibration curve, league-timing</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <p><strong>1. Counter-factual ontbreekt.</strong> Naieve Win NO + Draw YES simulatie = baseline. Verschil met Cannae = zijn echte alpha.</p>
+      <p><strong>2. Calibration curve ontbreekt.</strong> avgPrice vs settlement per league. Koopt hij underpriced? 0.55 avg = 45ct edge. 0.85 avg = dunne edge.</p>
+      <p><strong>3. League-specifieke timing.</strong> 5.7 dagen is gemiddeld. EPL vs CL kan totaal anders. Split per league.</p>
+      <p><strong>Kost 0 API credits</strong> — alleen bestaande dataset nodig.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header" onclick="this.nextElementSibling.classList.toggle('open')">
+      <span class="card-icon">&#x1F440;</span>
+      <div>
+        <div class="card-name">Buitenstaander</div>
+        <div class="card-oneliner">21.7% op $25M te mooi, $3K &#x2260; $3.56M, onzichtbare verliezen</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <p><strong>21.7% op $25.2M klinkt te mooi.</strong> Zonder tijdframe zegt het niets. Fee-structuur en slippage bij die volumes?</p>
+      <p><strong>Survivorship correctie halfbakken.</strong> Correctie naar 65% is een gok. 65% op 50c tokens = breakeven na fees.</p>
+      <p><strong>Sizing &#x2260; skill.</strong> "Meer inzet = hogere winkans" = basale bankroll management. De edge moet voorspelbaar zijn.</p>
+      <p><strong>$3K vs $3.56M = ander spel.</strong> Paper trading valideert weinig, risico zit in executie.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header" onclick="this.nextElementSibling.classList.toggle('open')">
+      <span class="card-icon">&#x26A0;</span>
+      <div>
+        <div class="card-name">Contrariaan</div>
+        <div class="card-oneliner">Conviction-sizing circulair, Win NO ROI opgeblazen, edge dalend?</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <p><strong>Circulaire redenering.</strong> Grote bets op goedkope tokens (30-50c) = inherent hogere ROI. +0.107 correlatie = &lt;2% variantie. Je meet wiskunde, niet skill.</p>
+      <p><strong>Win NO ROI opgeblazen.</strong> 40.6% op $6.6M impliceert PM overschat systematisch team-winkansen. Retail favoriet-bias? Edge verdampt als meer bots het ontdekken.</p>
+      <p><strong>Gaps:</strong> ROI tijdserie (dalend?), Draw YES sample te klein ($0.8M), Pinnacle op 12 posities = anekdotisch, taker fee 0.44% vs maker 0%.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header" onclick="this.nextElementSibling.classList.toggle('open')">
+      <span class="card-icon">&#x1F528;</span>
+      <div>
+        <div class="card-name">Uitvoerder</div>
+        <div class="card-oneliner">Stop backward-looking. Live mispricing meten. Forward-test.</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <p><strong>Stap 1:</strong> Live mispricing (2-3 uur) — PM vs Odds API voor alle EPL/BuLi/CL. Geen mispricing = stop.</p>
+      <p><strong>Stap 2:</strong> Forward-test (1-2 dagen) — log-only, welke wedstrijden mispricing tonen.</p>
+      <p><strong>Stap 3:</strong> Paper trade (1 dag) — drempel bepalen, /opt/bottie-test/ configureren.</p>
+      <p><strong>NIET doen:</strong> historische odds, post-entry analyse. Die data heb je niet. Forward = enige optie.</p>
+    </div>
+  </div>
+
+</div>
+
+<!-- PEER REVIEWS -->
+<div class="section-title">Peer Reviews</div>
+<div class="reviews">
+  <div class="review">
+    <div class="review-label">Review 1</div>
+    <p><strong>Sterkst: A (Contrariaan)</strong> — mathematisch onderbouwd, circulaire correlatie, fee-asymmetrie</p>
+    <p><strong>Blinde vlek: B (Uitvoerder)</strong> — forward-testen zonder gefalsifieerde theorie</p>
+    <p><strong>Gemist:</strong> Fee-asymmetrie: Cannae = maker (0% + rebate), wij = taker (0.44%). Mogelijk onkopieerbaar.</p>
+  </div>
+  <div class="review">
+    <div class="review-label">Review 2</div>
+    <p><strong>Sterkst: D (Expansionist)</strong> — counterfactual is enige falsificeerbare test</p>
+    <p><strong>Blinde vlek: B (Uitvoerder)</strong> — forward-test zonder baseline valideert niets</p>
+    <p><strong>Gemist:</strong> Wat deed Cannae op wedstrijden die hij NIET inzette? Pass-rate = echte selectiviteitstest.</p>
+  </div>
+  <div class="review">
+    <div class="review-label">Review 3</div>
+    <p><strong>Sterkst: E (Eerste Principes)</strong> — observatie &#x2260; strategie, verliesanalyse cruciaal</p>
+    <p><strong>Blinde vlek: B (Uitvoerder)</strong> — onbewezen thesis forward-testen = verkeerde strategie</p>
+    <p><strong>Gemist:</strong> Survivorship bias op Cannae zelf. Hoeveel wallets faalden met dezelfde strategie?</p>
+  </div>
+  <div class="review">
+    <div class="review-label">Review 4</div>
+    <p><strong>Sterkst: C (Buitenstaander)</strong> — netto kasstroom-analyse ontbreekt</p>
+    <p><strong>Blinde vlek: B (Uitvoerder)</strong> — vervuild signaal forward-testen = ruis</p>
+    <p><strong>Gemist:</strong> Market impact. Cannae beweegt de markt. Copybot koopt tegen bewogen prijzen.</p>
+  </div>
+  <div class="review">
+    <div class="review-label">Review 5</div>
+    <p><strong>Sterkst: D (Expansionist)</strong> — baseline is enige falsificeerbare test</p>
+    <p><strong>Blinde vlek: B (Uitvoerder)</strong> — actie zonder kernvraag te beantwoorden</p>
+    <p><strong>Gemist:</strong> Cannae's edge = timing van liquiditeit. Vroeg kopen bij brede spread = negatieve fee (rebate). Verklaart ROI zonder informatie-edge.</p>
+  </div>
+</div>
+
+<!-- VERDICT -->
+<div class="verdict-box">
+  <div class="verdict-title">Verdict: Solide hypothese, geen bewezen strategie</div>
+
+  <div class="verdict-text">
+    De claim "Cannae exploiteert PM's favoriet-bias via Win NO + Draw YES" is consistent met de data maar niet gefalsifieerd. <strong>Drie risico's voor onze bot:</strong>
+  </div>
+
+  <div style="margin: 1rem 0;">
+    <p style="margin-bottom: 0.5rem;"><span class="tag tag-green">Kopieerbaar</span> Edge is structureel (2/3 uitkomsten, PM onderprijst) &#x2192; counterfactual bewijst dit</p>
+    <p style="margin-bottom: 0.5rem;"><span class="tag tag-red">Niet kopieerbaar</span> Edge zit in timing/fees (maker-side, spread-capture) &#x2192; taker betaalt 0.44% meer</p>
+    <p style="margin-bottom: 0.5rem;"><span class="tag tag-yellow">Onzichtbaar</span> Edge zit in selectiviteit (Cannae slaat wedstrijden over) &#x2192; niet in onze data</p>
+  </div>
+
+  <div class="verdict-subtitle">Blinde Vlekken (Peer Reviews)</div>
+
+  <div class="blind-spot">
+    <div class="blind-spot-title">1. Fee-asymmetrie</div>
+    <p>Cannae = maker (0% + rebate). Wij = taker (0.44%). Netto-ROI 1-2% lager. Bij realistische 5-8% hauptbet ROI = dodelijk.</p>
+  </div>
+  <div class="blind-spot">
+    <div class="blind-spot-title">2. Market Impact</div>
+    <p>$25.2M volume beweegt de markt. Copybot koopt tegen door-Cannae-bewogen prijzen. Edge deels verdampt bij instap.</p>
+  </div>
+  <div class="blind-spot">
+    <div class="blind-spot-title">3. Selectiviteits-bias</div>
+    <p>We analyseren Cannae OMDAT hij succesvol is. Hoeveel wallets met dezelfde strategie faalden? Base rate onbekend.</p>
+  </div>
+  <div class="blind-spot">
+    <div class="blind-spot-title">4. Liquiditeits-timing</div>
+    <p>Vroeg kopen bij brede spread = maker = negatieve fee via rebate. Verklaart hoge ROI zonder informatieve edge.</p>
+  </div>
+
+  <div class="verdict-subtitle">Eerste Stappen (PARALLEL, vandaag)</div>
+
+  <div class="action-box">
+    <p><span class="action-label">A. Counterfactual baseline</span> (2 uur, 0 credits)</p>
+    <p>Naief Win NO + Draw YES op alle EPL/BuLi/CL, flat sizing, avgPrice entry. Baseline &gt;15% = structureel. &lt;5% = Cannae's alpha zit elders.</p>
+  </div>
+  <div class="action-box">
+    <p><span class="action-label">B. Live mispricing scan</span> (1 uur, ~10 credits)</p>
+    <p>PM prijs vs bookmaker implied prob voor komende wedstrijden. Mispricing &gt;5% = theorie leeft. &lt;2% = markt efficient.</p>
+  </div>
+  <div class="action-box">
+    <p><span class="action-label">C. Verliesanalyse</span> (1 uur, 0 credits)</p>
+    <p>Kenmerken verliezende hauptbets: league, timing, sizing, avgPrice. Patronen zoeken om te filteren.</p>
+  </div>
+
+  <p style="margin-top: 1.2rem; color: #FF6B35; font-weight: 700;">Na deze drie analyses: go/no-go beslissing voor paper trading.</p>
+</div>
+
+<div class="meta">Council 2026-04-02 &mdash; 5 adviseurs + 5 peer reviewers &mdash; Chairman: Claude Sonnet 4.6</div>
+
+</body>
+</html>

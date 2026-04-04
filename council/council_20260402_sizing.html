@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Council: Optimale Bet-Sizing — 2 april 2026</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0A0A0A; color: #E8E8E8; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 14px; line-height: 1.6; padding: 32px 24px; max-width: 960px; margin: 0 auto; }
+  .meta { color: #F5A623; font-size: 11px; margin-bottom: 8px; letter-spacing: 0.05em; text-transform: uppercase; }
+  h1 { font-size: 22px; color: #F5F5F5; margin-bottom: 6px; }
+  .subtitle { color: #888; font-size: 13px; margin-bottom: 32px; }
+  .q-block { background: #111; border-left: 3px solid #F5A623; padding: 16px 20px; margin-bottom: 32px; border-radius: 0 6px 6px 0; }
+  .q-block .lbl { color: #F5A623; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 6px; }
+  .q-block .txt { color: #F0F0F0; font-size: 15px; }
+  .stats { display: flex; gap: 16px; margin-bottom: 32px; flex-wrap: wrap; }
+  .pill { background: #151515; border: 1px solid #222; border-radius: 6px; padding: 10px 16px; }
+  .pill .v { font-size: 20px; font-weight: 700; color: #4ADE80; }
+  .pill .v.y { color: #F5A623; }
+  .pill .v.r { color: #F87171; }
+  .pill .l { font-size: 11px; color: #666; margin-top: 2px; }
+  .sec { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: #666; margin-bottom: 16px; padding-bottom: 6px; border-bottom: 1px solid #1A1A1A; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; margin-bottom: 40px; }
+  .card { background: #111; border: 1px solid #1E1E1E; border-radius: 8px; overflow: hidden; }
+  .card-h { padding: 12px 16px; display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
+  .card-h:hover { background: #161616; }
+  .icon { font-size: 20px; }
+  .cname { font-size: 13px; font-weight: 600; color: #F0F0F0; }
+  .core { font-size: 11px; color: #888; margin-top: 2px; }
+  .body { padding: 0 16px; max-height: 0; overflow: hidden; transition: max-height 0.3s ease, padding 0.3s ease; }
+  .body.open { max-height: 600px; padding: 12px 16px 16px; border-top: 1px solid #1E1E1E; }
+  .body p { color: #C0C0C0; font-size: 13px; line-height: 1.7; margin-bottom: 10px; }
+  .exp { margin-left: auto; color: #444; font-size: 16px; }
+  .pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; margin-bottom: 40px; }
+  .pc { background: #0E0E0E; border: 1px solid #1A1A1A; border-radius: 6px; padding: 14px 16px; }
+  .pn { color: #555; font-size: 11px; text-transform: uppercase; margin-bottom: 8px; }
+  .pr { margin-bottom: 8px; }
+  .pr .pl { color: #F5A623; font-size: 11px; }
+  .pr .pv { color: #C0C0C0; font-size: 12px; margin-top: 2px; }
+  .pm { margin-top: 10px; border-top: 1px solid #1A1A1A; padding-top: 10px; }
+  .pm .pl { color: #EF4444; font-size: 11px; }
+  .pm .pv { color: #C0A0A0; font-size: 12px; margin-top: 2px; }
+  .synth { background: #0D0D0D; border: 1px solid #1E1E1E; border-radius: 8px; padding: 24px; margin-bottom: 24px; }
+  .synth h3 { color: #F5A623; font-size: 12px; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 10px; }
+  .synth p { color: #C0C0C0; font-size: 13px; line-height: 1.75; margin-bottom: 12px; }
+  .synth ul { color: #C0C0C0; font-size: 13px; line-height: 1.75; padding-left: 18px; margin-bottom: 12px; }
+  .synth li { margin-bottom: 4px; }
+  .blind { background: #1A0A0A; border: 1px solid #3A1A1A; border-radius: 6px; padding: 16px; margin-bottom: 24px; }
+  .blind .bl { color: #F87171; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 8px; }
+  .blind .bt { color: #C0A0A0; font-size: 13px; line-height: 1.7; }
+  .verdict { background: #0A1500; border: 2px solid #4ADE80; border-radius: 8px; padding: 24px; margin-bottom: 24px; }
+  .verdict .vl { color: #4ADE80; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 10px; }
+  .verdict .vt { color: #F0F0F0; font-size: 15px; line-height: 1.7; margin-bottom: 16px; }
+  .step { background: #0A1A0A; border: 1px solid #2A5A2A; border-radius: 6px; padding: 14px 16px; }
+  .step .sl { color: #4ADE80; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 6px; }
+  .step .st { color: #A0D0A0; font-size: 13px; line-height: 1.6; }
+  .new-concept { background: #0A0A1A; border: 1px solid #2A2A5A; border-radius: 6px; padding: 16px; margin-top: 16px; }
+  .new-concept .ncl { color: #818CF8; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 8px; }
+  .new-concept .nct { color: #A0A0D0; font-size: 13px; line-height: 1.7; }
+  code { background: #1A1A1A; padding: 2px 6px; border-radius: 3px; font-size: 12px; color: #F5A623; }
+  hr { border: none; border-top: 1px solid #1A1A1A; margin: 32px 0; }
+  .footer { color: #444; font-size: 11px; text-align: center; }
+</style>
+</head>
+<body>
+
+<div class="meta">Council Rapport · 2 april 2026 · Sizing Strategie · 5 adviseurs · 5 peer reviewers</div>
+<h1>Optimale Bet-Sizing: $3.064 → $10K</h1>
+<div class="subtitle">Moet max_bet_pct omhoog? Cannae zet 0.2-0.6%, wij 4-8% — is dat verantwoord?</div>
+
+<div class="q-block">
+  <div class="lbl">Vraag</div>
+  <div class="txt">Bij bankroll $3.064 en doel $10K: wat is de optimale max_bet_pct? Cannae zet 0.2-0.6% van $3.56M, wij 4-8% van $3.064. Kelly-optimaal? Ruin-risico acceptabel? Mijlpalen voor aanpassing?</div>
+</div>
+
+<div class="stats">
+  <div class="pill"><div class="v">8%</div><div class="l">Huidige max_bet_pct</div></div>
+  <div class="pill"><div class="v y">$3.064</div><div class="l">Bankroll nu</div></div>
+  <div class="pill"><div class="v">$10K</div><div class="l">Doel</div></div>
+  <div class="pill"><div class="v">35%</div><div class="l">Cannae historische ROI</div></div>
+  <div class="pill"><div class="v r">0.6%</div><div class="l">Cannae per bet (van $3.56M)</div></div>
+</div>
+
+<div class="sec">5 Adviseurs — klik om te lezen</div>
+<div class="grid">
+
+  <div class="card">
+    <div class="card-h" onclick="toggle(this)">
+      <div class="icon">🔬</div>
+      <div><div class="cname">Eerste Principes</div><div class="core">Sub-half-Kelly = correct. Sizing niet het probleem.</div></div>
+      <div class="exp">›</div>
+    </div>
+    <div class="body">
+      <p>Cannae's 0.2-0.6% = marktdiepte-beperking, niet voorzichtigheid. Schaalverschil maakt directe vergelijking ongeldig.</p>
+      <p>Kelly bij 35% ROI en ~even odds = Quarter Kelly ≈ 9-10% per bet. Jij op 4-6% = sub-half-Kelly. Conservatief maar verdedigbaar.</p>
+      <p>Verwacht groeipad: ~3-4% dagelijkse bankroll groei. $3K→$10K in ~35-40 handelsdagen bij consistente edge. De enige vraag is of de edge (34-37% ROI) structureel is op voldoende volume.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h" onclick="toggle(this)">
+      <div class="icon">👁️</div>
+      <div><div class="cname">De Buitenstaander</div><div class="core">60% bankroll tegelijk in de markt. Dat is het echte getal.</div></div>
+      <div class="exp">›</div>
+    </div>
+    <div class="body">
+      <p>Hoeveel bets tegelijk? Bij 10 legs × 6% = 60% van je bankroll simultaan in de markt. Dat staat los van de 90% cap maar is het werkelijke risico.</p>
+      <p>82.6% win rate op 23 trades = statistisch toeval. Niet verhogen omdat het goed ging — meest gevaarlijke reden.</p>
+      <p>De echte vraag: wat is de maximale acceptabele drawdown in dollars? Beantwoord dat eerst. Dan heeft de sizing-vraag zin.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h" onclick="toggle(this)">
+      <div class="icon">⚠️</div>
+      <div><div class="cname">De Contrariaan</div><div class="core">20-40% per event. Daily_loss_limit bereikbaar in één nacht.</div></div>
+      <div class="exp">›</div>
+    </div>
+    <div class="body">
+      <p>Fatale fout: 4-6% per bet × 6-10 legs per event = 20-40% deployment per event. Eén slechte game-avond = daily_loss_limit van 15% bereikt.</p>
+      <p>Cannae's kleine percentages zijn structurele marktdiepte-beperking — hij kán niet meer zetten zonder zijn eigen prijs te bewegen. Dat geldt niet voor jou. Maar zijn model is niet voor jouw risicoprofiel.</p>
+      <p>Ruin-risico is 10-30x agressiever dan Cannae proportioneel. 82.6% op 23 trades = survivorship bias in realtime.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h" onclick="toggle(this)">
+      <div class="icon">⚡</div>
+      <div><div class="cname">De Uitvoerder</div><div class="core">Quarter Kelly = 15%. Jij op 4-8% is al conservatief. Niets doen.</div></div>
+      <div class="exp">›</div>
+    </div>
+    <div class="body">
+      <p>Kelly bij observed 82.6% win rate en odds 0.818 = 61% — veel te agressief, gebruik altijd fractional. Half Kelly = 30%, Quarter Kelly = 15%.</p>
+      <p>Jij op 4-8% zit al conservatief onder Quarter Kelly. Dat is niet het probleem.</p>
+      <p><strong>Actieplan:</strong> (1) Verificeer fills in logs (15 min). (2) Check bankroll post-settlement (10 min). (3) Niets wijzigen — wacht minimaal 100+ trades voor sizing-review.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h" onclick="toggle(this)">
+      <div class="icon">🚀</div>
+      <div><div class="cname">De Expansionist</div><div class="core">Draw Kelly = 9.7%. Per-outcome weighting is de echte hefboom.</div></div>
+      <div class="exp">›</div>
+    </div>
+    <div class="body">
+      <p>Liquiditeitsarbitrage: Cannae heeft een zelfopgelegde cap op dunne markets ($3.56M kan de prijs bewegen). Jij niet. Dat zijn je beste legs.</p>
+      <p>Draw Kelly: p=0.30, b=2.33 → f* = 9.7%. Jij zit onder Kelly op draws specifiek.</p>
+      <p>Stop met generiek max_bet_pct verhogen. Bouw per-outcome conviction weighting: draws zwaarder, lage-edge legs lichter. Dat compoundt sneller naar $10K dan een platte sizing-verhoging.</p>
+    </div>
+  </div>
+
+</div>
+
+<div class="sec">Peer Reviews</div>
+<div class="pgrid">
+  <div class="pc">
+    <div class="pn">Review 1</div>
+    <div class="pr"><div class="pl">Sterkste</div><div class="pv">B — benoemt de werkelijke aggregatierisico: gecorreleerde exposure per event</div></div>
+    <div class="pr"><div class="pl">Grootste blinde vlek</div><div class="pv">E — analyseert draw-Kelly maar bot speelt draw NO (veilige kant), niet draw YES</div></div>
+    <div class="pm"><div class="pl">Wat allen misten</div><div class="pv">Cannae denkt in SHARES, niet dollars. Kelly-berekeningen op Cannae's dollar-percentages zijn structureel verkeerd gekalibreerd.</div></div>
+  </div>
+  <div class="pc">
+    <div class="pn">Review 2</div>
+    <div class="pr"><div class="pl">Sterkste</div><div class="pv">B — juiste operationele vragen, sceptisch over kleine sample</div></div>
+    <div class="pr"><div class="pl">Grootste blinde vlek</div><div class="pv">D — Kelly op realized win rate van 23 trades is pseudoprecisie</div></div>
+    <div class="pm"><div class="pl">Wat allen misten</div><div class="pv">Cannae's 34-37% ROI is NIET de bot's eigen edge. Timing-gap = slechtere fill-prijs. Werkelijke edge onbekend.</div></div>
+  </div>
+  <div class="pc">
+    <div class="pn">Review 3</div>
+    <div class="pr"><div class="pl">Sterkste</div><div class="pv">B — simultane exposure en drawdown in dollars zijn juiste sturingsvariabelen</div></div>
+    <div class="pr"><div class="pl">Grootste blinde vlek</div><div class="pv">D — Kelly op observed win rate is circulaire redenering bij 23 trades</div></div>
+    <div class="pm"><div class="pl">Wat allen misten</div><div class="pv">Gecorreleerde legs: 6-10 legs per game gaan tegelijk fout bij één slechte wedstrijd. Kelly gaat uit van onafhankelijke bets — structureel onjuist hier.</div></div>
+  </div>
+  <div class="pc">
+    <div class="pn">Review 4</div>
+    <div class="pr"><div class="pl">Sterkste</div><div class="pv">C — benoemt het concrete mechanisme: gecorreleerde blootstelling per event</div></div>
+    <div class="pr"><div class="pl">Grootste blinde vlek</div><div class="pv">A — vergelijkt Cannae sizing met Kelly alsof bets onafhankelijk zijn</div></div>
+    <div class="pm"><div class="pl">Wat allen misten</div><div class="pv">De juiste risico-eenheid is per EVENT, niet per leg. Eén wedstrijd-uitkomst raakt meerdere legs tegelijk. Alle Kelly-berekeningen zijn daarmee zinloos zonder event-correctie.</div></div>
+  </div>
+  <div class="pc">
+    <div class="pn">Review 5</div>
+    <div class="pr"><div class="pl">Sterkste</div><div class="pv">C — multi-leg concentratie per event is het werkelijke risico</div></div>
+    <div class="pr"><div class="pl">Grootste blinde vlek</div><div class="pv">D — Quarter Kelly zonder gecorreleerde legs = structureel fout</div></div>
+    <div class="pm"><div class="pl">Wat allen misten</div><div class="pv">Shares vs dollars: bij lage-prijs tokens (draws op 0.30) is de share-count hoog → hoge dollar-exposure bij fill. Dit fluctueert meer dan het lijkt.</div></div>
+  </div>
+</div>
+
+<hr>
+
+<div class="sec">Chairman Synthese</div>
+
+<div class="synth">
+  <h3>Consensus</h3>
+  <ul>
+    <li><strong>Sizing NIET verhogen</strong> — alle vijf adviseurs zijn het hierover eens</li>
+    <li><strong>4-6% per leg is verdedigbaar</strong> — sub-half-Kelly bij 35% ROI, niemand zegt "te hoog"</li>
+    <li><strong>23 trades = geen statistisch fundament</strong> voor welke aanpassing dan ook</li>
+    <li><strong>Cannae's percentage vergelijken is zinloos</strong> — schaalverschil + marktdiepte-beperking</li>
+  </ul>
+
+  <h3>Kernconflict</h3>
+  <p>A/D zeggen "sizing prima, niets doen." C zegt "multi-leg concentratie is het werkelijke gevaar." <strong>C wint</strong> — maar om een subtielere reden: "max_bet_pct per leg" is de verkeerde risico-eenheid. De juiste eenheid is de totale gecorreleerde blootstelling per event.</p>
+  <p>Bij 6 legs van elk 5% per wedstrijd = 30% bankroll op één gecorreleerde uitkomst. Dat is het getal dat bewaakt moet worden.</p>
+</div>
+
+<div class="blind">
+  <div class="bl">🔴 Twee Blinde Vlekken — Wat niemand zag</div>
+  <div class="bt">
+    <strong>1. Gecorreleerde legs breken Kelly.</strong> Kelly's formula gaat uit van onafhankelijke bets. Maar 6-10 legs per game zijn volledig gecorreleerd — als Botafogo wint, verliezen draw YES + win NO tegelijk. De effectieve Kelly-eenheid is per EVENT. Als je 20-30% per event inzet op één gecorreleerde uitkomst, ben je agressiever dan de per-leg percentages suggereren.<br><br>
+    <strong>2. De bot's echte edge is onbekend.</strong> Cannae's 34-37% ROI is op zijn entry-prijs. De bot koopt later (polling-delay), op potentieel slechtere odds. Alle Kelly-berekeningen gebruiken Cannae's ROI als proxy voor de bot's ROI. Dat is ongevalideerd.
+  </div>
+</div>
+
+<div class="verdict">
+  <div class="vl">Verdict</div>
+  <div class="vt">
+    <strong>max_bet_pct blijft 8%. Niet verhogen, niet verlagen.</strong><br><br>
+    De config-aanpassing die wél nodig is: voeg een <code>max_game_pct</code> toe — een cap op de totale dollar-blootstelling per wedstrijd (som van alle legs). Stel in op <strong>20-25% van bankroll</strong>.<br><br>
+    Bij $3.064: max per game = $612-766. Als één game 6 legs heeft, worden individuele legs kleiner zodat de som de grens respecteert. Dit lost het correlatie-probleem op zonder per-leg sizing aan te raken.<br><br>
+    Groeipad naar $10K bij 35% ROI: ~35-40 handelsdagen bij onverstoorde edge.
+  </div>
+  <div class="new-concept">
+    <div class="ncl">💡 Nieuw concept: max_game_pct</div>
+    <div class="nct">
+      De bot heeft nu <code>max_bet_pct = 8%</code> per leg. Voeg toe: <code>max_game_pct = 22%</code> (totale inzet per event). Bij 6 legs × 8% = 48% → te hoog. Met cap: elke leg wordt geschaald naar max 22%/6 = 3.7% als de som de limiet overschrijdt. Dit reduceert gecorreleerd ruin-risico zonder de sizing-logica te breken.
+    </div>
+  </div>
+  <br>
+  <div class="step">
+    <div class="sl">⚡ Eerste Stap — Vandaag</div>
+    <div class="st">
+      Bereken de totale event-exposure van afgelopen nacht: groepeer trades.jsonl op event_slug, tel size_usdc op per game. Wat was het maximum per game? Als een game meer dan $612 (20% van $3.064) totaal had, is <code>max_game_pct</code> de prioritaire config-toevoeging.
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+  Council · 2026-04-02 · Sizing strategie · 5 adviseurs · 5 peer reviewers · Chairman: Claude Sonnet 4.6
+</div>
+
+<script>
+function toggle(h) {
+  const b = h.nextElementSibling;
+  const e = h.querySelector('.exp');
+  b.classList.toggle('open');
+  e.textContent = b.classList.contains('open') ? '↓' : '›';
+}
+</script>
+</body>
+</html>

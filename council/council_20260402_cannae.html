@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Council: Cannae Alpha — 2026-04-02</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0A0A0A;
+    color: #E0E0E0;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 14px;
+    line-height: 1.7;
+    padding: 48px 24px;
+    max-width: 960px;
+    margin: 0 auto;
+  }
+
+  .header {
+    border-bottom: 1px solid #1E1E1E;
+    padding-bottom: 32px;
+    margin-bottom: 48px;
+  }
+
+  .label {
+    font-size: 11px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: #444;
+    margin-bottom: 12px;
+  }
+
+  .question {
+    font-size: 18px;
+    color: #F0F0F0;
+    font-family: -apple-system, 'Helvetica Neue', sans-serif;
+    font-weight: 600;
+    line-height: 1.5;
+    max-width: 800px;
+  }
+
+  .meta {
+    margin-top: 16px;
+    font-size: 12px;
+    color: #444;
+    letter-spacing: 0.05em;
+  }
+
+  /* Section titles */
+  .section-title {
+    font-size: 11px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: #555;
+    margin-bottom: 24px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #1A1A1A;
+  }
+
+  /* Advisor cards */
+  .advisors {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 64px;
+  }
+
+  .card {
+    background: #111;
+    border: 1px solid #1E1E1E;
+    border-radius: 4px;
+    padding: 24px;
+    transition: border-color 0.2s;
+  }
+
+  .card:hover {
+    border-color: #333;
+  }
+
+  .card-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    margin-bottom: 16px;
+  }
+
+  .card-icon {
+    font-size: 22px;
+    line-height: 1;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+
+  .card-meta {}
+
+  .card-name {
+    font-size: 13px;
+    font-weight: 700;
+    color: #C8C8C8;
+    font-family: -apple-system, 'Helvetica Neue', sans-serif;
+    letter-spacing: 0.02em;
+  }
+
+  .card-core {
+    font-size: 12px;
+    color: #666;
+    margin-top: 4px;
+    font-style: italic;
+  }
+
+  details {
+    margin-top: 12px;
+  }
+
+  summary {
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #444;
+    cursor: pointer;
+    user-select: none;
+    padding: 6px 0;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  summary::-webkit-details-marker { display: none; }
+
+  summary::before {
+    content: '▶';
+    font-size: 9px;
+    color: #333;
+    transition: transform 0.15s;
+  }
+
+  details[open] summary::before {
+    transform: rotate(90deg);
+  }
+
+  summary:hover { color: #888; }
+
+  .card-body {
+    margin-top: 14px;
+    font-size: 13px;
+    color: #AAA;
+    line-height: 1.75;
+    font-family: -apple-system, 'Helvetica Neue', sans-serif;
+  }
+
+  .card-body p { margin-bottom: 12px; }
+  .card-body p:last-child { margin-bottom: 0; }
+
+  .card-body strong {
+    color: #D0D0D0;
+    font-weight: 600;
+  }
+
+  /* Peer reviews */
+  .reviews {
+    margin-bottom: 64px;
+  }
+
+  .review-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+
+  .review-card {
+    background: #0D0D0D;
+    border: 1px solid #1A1A1A;
+    border-radius: 4px;
+    padding: 20px;
+  }
+
+  .review-number {
+    font-size: 11px;
+    color: #333;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    margin-bottom: 14px;
+  }
+
+  .review-item {
+    margin-bottom: 12px;
+  }
+
+  .review-item-label {
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #444;
+    margin-bottom: 4px;
+  }
+
+  .review-item-text {
+    font-size: 12px;
+    color: #888;
+    line-height: 1.6;
+    font-family: -apple-system, 'Helvetica Neue', sans-serif;
+  }
+
+  .highlight-strong { color: #7EC8A0; }
+  .highlight-weak { color: #C87E7E; }
+
+  /* Verdict */
+  .verdict {
+    background: #0D1117;
+    border: 1px solid #1F2937;
+    border-radius: 6px;
+    padding: 40px;
+    margin-bottom: 64px;
+  }
+
+  .verdict-title {
+    font-size: 11px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: #4B6A8A;
+    margin-bottom: 32px;
+  }
+
+  .consensus-block {
+    margin-bottom: 32px;
+  }
+
+  .consensus-title {
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #555;
+    margin-bottom: 12px;
+  }
+
+  .consensus-list {
+    list-style: none;
+    padding: 0;
+  }
+
+  .consensus-list li {
+    font-size: 13px;
+    color: #AAA;
+    font-family: -apple-system, 'Helvetica Neue', sans-serif;
+    padding: 8px 0;
+    border-bottom: 1px solid #141414;
+    display: flex;
+    gap: 12px;
+  }
+
+  .consensus-list li:last-child { border-bottom: none; }
+
+  .li-num {
+    color: #333;
+    font-size: 11px;
+    padding-top: 2px;
+    flex-shrink: 0;
+  }
+
+  .conflict-block {
+    margin-bottom: 32px;
+    padding: 20px;
+    background: #0A0E15;
+    border-left: 2px solid #2A3F5A;
+    border-radius: 0 4px 4px 0;
+  }
+
+  .conflict-title {
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #2A3F5A;
+    margin-bottom: 10px;
+  }
+
+  .conflict-text {
+    font-size: 13px;
+    color: #888;
+    font-family: -apple-system, 'Helvetica Neue', sans-serif;
+    line-height: 1.7;
+  }
+
+  .pillars {
+    margin-bottom: 32px;
+  }
+
+  .pillar {
+    display: flex;
+    gap: 16px;
+    padding: 16px 0;
+    border-bottom: 1px solid #141414;
+    font-family: -apple-system, 'Helvetica Neue', sans-serif;
+  }
+
+  .pillar:last-child { border-bottom: none; }
+
+  .pillar-num {
+    width: 24px;
+    height: 24px;
+    background: #1A2535;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    color: #4B7ABF;
+    flex-shrink: 0;
+    margin-top: 1px;
+    font-family: monospace;
+  }
+
+  .pillar-content {}
+
+  .pillar-name {
+    font-size: 13px;
+    color: #C0C0C0;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  .pillar-desc {
+    font-size: 12px;
+    color: #777;
+    line-height: 1.6;
+  }
+
+  /* First step — prominent */
+  .first-step {
+    margin-top: 40px;
+    background: #0B1020;
+    border: 1px solid #1E3A5F;
+    border-radius: 6px;
+    padding: 32px;
+  }
+
+  .first-step-label {
+    font-size: 11px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: #1E3A5F;
+    margin-bottom: 16px;
+  }
+
+  .first-step-text {
+    font-size: 15px;
+    color: #D0E4F7;
+    font-family: -apple-system, 'Helvetica Neue', sans-serif;
+    line-height: 1.7;
+    font-weight: 500;
+  }
+
+  .first-step-sub {
+    margin-top: 16px;
+    font-size: 12px;
+    color: #5A7A9A;
+    font-family: -apple-system, 'Helvetica Neue', sans-serif;
+    line-height: 1.6;
+  }
+
+  .delta-rule {
+    display: flex;
+    gap: 24px;
+    margin-top: 16px;
+  }
+
+  .delta-item {
+    background: #0A0F1A;
+    border: 1px solid #1A2535;
+    border-radius: 4px;
+    padding: 12px 18px;
+    font-family: monospace;
+    font-size: 12px;
+  }
+
+  .delta-val {
+    color: #4B7ABF;
+    font-size: 15px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+
+  .delta-label { color: #444; font-size: 11px; }
+
+  /* Footer */
+  .footer {
+    border-top: 1px solid #1A1A1A;
+    padding-top: 24px;
+    font-size: 11px;
+    color: #333;
+    letter-spacing: 0.08em;
+    display: flex;
+    justify-content: space-between;
+  }
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<div class="header">
+  <div class="label">Council — 2026-04-02</div>
+  <div class="question">Cannae heeft aantoonbaar alpha op Polymarket (+7.4% net ROI over $13.6M geïnvesteerd, met uitschieters tot +44% in specifieke competities). Wat is de mechanische bron van die edge, en welke aanpassingen aan onze copy-trading strategie maximaliseren het kopieerrendement?</div>
+  <div class="meta">5 adviseurs &nbsp;·&nbsp; 5 peer reviews &nbsp;·&nbsp; chairman: Claude Sonnet 4.6</div>
+</div>
+
+<!-- ADVISEURS -->
+<div class="section-title">De 5 Adviseurs</div>
+<div class="advisors">
+
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon">⚔</div>
+      <div class="card-meta">
+        <div class="card-name">De Contrariaan</div>
+        <div class="card-core">Je kopieert een prijsstrategie zonder de prijs te weten.</div>
+      </div>
+    </div>
+    <details>
+      <summary>Volledige analyse</summary>
+      <div class="card-body">
+        <p>De fatale fout: je kopieert een prijsstrategie zonder de prijs te weten. Cannae's scherpste edge zit in de 0.3-0.4 prijsrange (+36-38% ROI). Dat betekent: hij koopt onderprijsde underdogs vóórdat de markt ze correct prijst. Zijn alpha IS de timing. Jullie kopiëren T-5 minuten voor kickoff. Cannae is er uren eerder al in.</p>
+        <p>Op een voetbalmarkt beweegt de prijs significant in die uren. Cannae koopt bij 0.35 (ROI +37%). Jullie kopen bij 0.55 (ROI: onbekend, maar structureel slechter). Op La Liga (-10.3%) en MLB (-28.5%) doet hij het al slecht bij zijn eigen entry. Bij jullie entry wordt dat erger.</p>
+        <p>Bijkomend probleem: het "beide kanten" signaal. 50.5% van posities zijn hedges — netto breakeven. Jullie weet niet welke leg de echte directional bet is.</p>
+        <p><strong>De test die ontbreekt:</strong> vergelijk fill-prijs per competitie met Cannae's gereconstrueerde entry-prijs. Tot die data er is, weet je niet wat je kopieert.</p>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon">∴</div>
+      <div class="card-meta">
+        <div class="card-name">De Eerste Principes Denker</div>
+        <div class="card-core">Je kopieert een market maker, geen alpha-speler.</div>
+      </div>
+    </div>
+    <details>
+      <summary>Volledige analyse</summary>
+      <div class="card-body">
+        <p>Het werkelijke probleem: je kopieert een market maker, geen alpha-speler. Bewijs: 50.5% beide kanten, netto +0.5% (breakeven). 2.6% bankroll deployed op $3.56M — geen conviction-trading, liquiditeitsverschaffing. $1M profit op hoofdbets, -$168K netto totaal. Één storting, nooit bijgevuld — ruikt naar een fonds, niet een retail-alpha-speler.</p>
+        <p>Cannae's edge is waarschijnlijk: vroeg instappen bij slechte initiële prijzen, waarna de markt naar hem toekomt. Zijn "alpha" in Bundesliga/EPL is prijs-appreciatie terwijl jij T-5min instapt — dus ná die appreciatie.</p>
+        <p><strong>Stop met optimaliseren van kopieerstrategie</strong> totdat je de prijs-delta kent. Bouw eerst één ding: log Cannae's entry-prijs bij detectie én jouw fill-prijs. Na 50 wedstrijden heb je de echte data.</p>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon">◈</div>
+      <div class="card-meta">
+        <div class="card-name">De Expansionist</div>
+        <div class="card-core">Competentie-gewogen kopiëren — ongelijke alpha vereist ongelijke sizing.</div>
+      </div>
+    </div>
+    <details>
+      <summary>Volledige analyse</summary>
+      <div class="card-body">
+        <p>De mechanische bron: (1) prijsarbitrage bij lage liquiditeit — 0.3-0.4 range is waar PM-markten structureel mispriced zijn; (2) competentie-selectiviteit — Bundesliga/EPL/NFL +21-41%, La Liga -10.3%, MLB -28.5%; (3) hedging = noise, niet alpha.</p>
+        <p>De grotere kans: competitie-gewogen kopiëren. Voeg roi_multiplier toe:<br>
+        Bundesliga = 1.5x &nbsp;·&nbsp; EPL = 1.3x &nbsp;·&nbsp; La Liga = 0x &nbsp;·&nbsp; MLB = 0x &nbsp;·&nbsp; NBA/NHL = 0.5x</p>
+        <p>Tweede kans: log entry-prijsverschillen per competitie. Als verschil &gt;0.05 bij EFL/NFL-legs, niet kopiëren.</p>
+        <p><strong>Stop egalitair kopiëren.</strong> Cannae heeft ongelijke alpha; onze sizing moet dat ongelijk reflecteren.</p>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon">◎</div>
+      <div class="card-meta">
+        <div class="card-name">De Buitenstaander</div>
+        <div class="card-core">Je hebt geen copy-strategie — je hebt een vertraagde versie van zijn portefeuille.</div>
+      </div>
+    </div>
+    <details>
+      <summary>Volledige analyse</summary>
+      <div class="card-body">
+        <p>De edge is prijsarbitrage, niet informatiesuperioriteit. Cannae koopt vroeg bij 0.3-0.4, voordat de markt corrigeert. Jij kopieert hem vijf minuten voor aftrap — op een al gecorrigeerde markt.</p>
+        <p>Drie observaties van buiten:<br>
+        (1) La Liga -10.3%, MLB -28.5% — je kopieert die ook, waarom?<br>
+        (2) 50.5% both-sides breakeven — wat als de hoofdbet de hedge is en de echte alpha in de positie zit die je negeert?<br>
+        (3) 2.6% gedeployed: selectiviteit is zijn edge — jij elimineert die door alles mee te nemen.</p>
+        <p><strong>Ongezouten:</strong> je hebt geen copy-strategie. Je hebt een vertraagde versie van Cannae's portefeuille, gefilterd op de verkeerde criteria, ingekocht op de verkeerde prijzen.</p>
+      </div>
+    </details>
+  </div>
+
+  <div class="card" style="grid-column: 1 / -1;">
+    <div class="card-header">
+      <div class="card-icon">▶</div>
+      <div class="card-meta">
+        <div class="card-name">De Uitvoerder</div>
+        <div class="card-core">Drie concrete stappen — nu uitvoerbaar, data-gedreven.</div>
+      </div>
+    </div>
+    <details>
+      <summary>Volledige analyse</summary>
+      <div class="card-body">
+        <p><strong>Stap 1: Stop MLB volledig, filter hedge-posities (30 min)</strong><br>
+        Data is conclusief, -28.5% is geen signaal, het zijn kosten.</p>
+        <p><strong>Stap 2: Prijsfilter 0.25-0.50 range implementeren (1 uur)</strong><br>
+        ROI +36-38% zit daar, boven 0.8 slechts +9.4%.</p>
+        <p><strong>Stap 3: Log fill-prijs slippage voor één week (passief)</strong><br>
+        Cannae's detected price bij detectie vs. onze fill-prijs. Na één week heb je data.</p>
+        <p>Wat je NIET doet: ACN/EFL targeten (n=13 en n=5, statistisch ruis). Niet verder optimaliseren zonder fill-data.</p>
+      </div>
+    </details>
+  </div>
+
+</div>
+
+<!-- PEER REVIEWS -->
+<div class="reviews">
+  <div class="section-title">Peer Review Highlights</div>
+  <div class="review-grid">
+
+    <div class="review-card">
+      <div class="review-number">Review 01</div>
+      <div class="review-item">
+        <div class="review-item-label highlight-strong">Sterkste</div>
+        <div class="review-item-text">A — enige die de fundamentele vraag stelt: is dit kopieerbare alpha? De observaties wijzen op market maker of fonds.</div>
+      </div>
+      <div class="review-item">
+        <div class="review-item-label highlight-weak">Blinde vlek</div>
+        <div class="review-item-text">E — bouwt precies systeem op statistisch ruis.</div>
+      </div>
+      <div class="review-item">
+        <div class="review-item-label">Gemist</div>
+        <div class="review-item-text">Cannae's entry-prijs is nooit gereconstrueerd. Alle vijf optimaliseren een kopieerstrategie terwijl de kernvraag onbeantwoord blijft.</div>
+      </div>
+    </div>
+
+    <div class="review-card">
+      <div class="review-number">Review 02</div>
+      <div class="review-item">
+        <div class="review-item-label highlight-strong">Sterkste</div>
+        <div class="review-item-text">A — stelt de fundamentele vraag: market maker of alpha-speler? Die diagnose maakt alle optimalisatieadviezen van B/C/D/E potentieel irrelevant.</div>
+      </div>
+      <div class="review-item">
+        <div class="review-item-label highlight-weak">Blinde vlek</div>
+        <div class="review-item-text">B — puur tactisch zonder theoretische basis.</div>
+      </div>
+      <div class="review-item">
+        <div class="review-item-label">Gemist</div>
+        <div class="review-item-text">Zonder tijdgestempelde prijsvergelijking zijn alle aanbevelingen speculatie.</div>
+      </div>
+    </div>
+
+    <div class="review-card">
+      <div class="review-number">Review 03</div>
+      <div class="review-item">
+        <div class="review-item-label highlight-strong">Sterkste</div>
+        <div class="review-item-text">C — enige die een concrete, falsifieerbare test benoemt: vergelijk fill-prijs met Cannae's entry-prijs. Direct uitvoerbaar.</div>
+      </div>
+      <div class="review-item">
+        <div class="review-item-label highlight-weak">Blinde vlek</div>
+        <div class="review-item-text">E — roi_multiplier zonder te begrijpen waarom ROI per league verschilt. Symptoombestrijding.</div>
+      </div>
+      <div class="review-item">
+        <div class="review-item-label">Gemist</div>
+        <div class="review-item-text">Als Cannae's edge in liquiditeitsproviding zit, is die structureel niet kopieerbaar.</div>
+      </div>
+    </div>
+
+    <div class="review-card">
+      <div class="review-number">Review 04</div>
+      <div class="review-item">
+        <div class="review-item-label highlight-strong">Sterkste</div>
+        <div class="review-item-text">C — mechanische kern direct: entry-prijs, niet selectie. Falsifieerbare hypothese.</div>
+      </div>
+      <div class="review-item">
+        <div class="review-item-label highlight-weak">Blinde vlek</div>
+        <div class="review-item-text">E — symptoombehandeling zonder causale structuur.</div>
+      </div>
+      <div class="review-item">
+        <div class="review-item-label">Gemist</div>
+        <div class="review-item-text">On-chain toont de order, niet de werkelijke fill. Hebben we toegang tot Cannae's actual fill-prijzen?</div>
+      </div>
+    </div>
+
+    <div class="review-card" style="grid-column: 1 / -1;">
+      <div class="review-number">Review 05</div>
+      <div class="review-item">
+        <div class="review-item-label highlight-strong">Sterkste</div>
+        <div class="review-item-text">C — benoemt de kern concreet.</div>
+      </div>
+      <div class="review-item">
+        <div class="review-item-label highlight-weak">Blinde vlek</div>
+        <div class="review-item-text">E — roi_multiplier is circulair: past gewicht aan op historische ROI zonder te begrijpen waarom.</div>
+      </div>
+      <div class="review-item">
+        <div class="review-item-label">Gemist</div>
+        <div class="review-item-text">Welk percentage van Cannae's profit komt uit posities die een follower überhaupt kan innemen tegen vergelijkbare prijzen, versus posities waarbij de edge per definitie verdampt bij kopiëren?</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- VERDICT -->
+<div class="verdict">
+  <div class="verdict-title">Chairman Synthese — Verdict</div>
+
+  <div class="consensus-block">
+    <div class="consensus-title">Consensus (alle vijf eens)</div>
+    <ul class="consensus-list">
+      <li><span class="li-num">01</span> Entry-prijs delta is de cruciale onbekende — wij weten niet of onze fill-prijs gelijk is aan Cannae's entry-prijs</li>
+      <li><span class="li-num">02</span> MLB is verlieslatend voor Cannae én voor ons — uitzetten is het laag-hangend fruit</li>
+      <li><span class="li-num">03</span> Het 0.3-0.4 prijsvenster is Cannae's sweet spot — boven 0.8 dramatisch minder ROI</li>
+    </ul>
+  </div>
+
+  <div class="conflict-block">
+    <div class="conflict-title">Kernconflict</div>
+    <div class="conflict-text">A zegt: "stop alles, meet eerst de prijs-delta." E zegt: "maak het systeem slimmer terwijl je wacht." Peer reviews kozen A of C als sterkste. Maar de keuze is vals: je kunt tegelijkertijd de prijs-delta meten EN het laag-hangend fruit implementeren. A's diagnose is correct, maar "stop alles" is analytisch luiheid in omgekeerde richting.</div>
+  </div>
+
+  <div class="pillars">
+    <div class="consensus-title">De drie pijlers van Cannae's alpha</div>
+
+    <div class="pillar">
+      <div class="pillar-num">1</div>
+      <div class="pillar-content">
+        <div class="pillar-name">Entry-timing</div>
+        <div class="pillar-desc">Vroeg instappen (uren voor kickoff) bij 0.3-0.4 prijzen die later bewegen. Wij missen dit volledig door T-5 min kopiëren.</div>
+      </div>
+    </div>
+
+    <div class="pillar">
+      <div class="pillar-num">2</div>
+      <div class="pillar-content">
+        <div class="pillar-name">Competentie-specialisatie</div>
+        <div class="pillar-desc">Bundesliga +30%, EPL +21%, NFL +41% zijn structureel. La Liga -10.3%, MLB -28.5% zijn structureel slecht. Wij negeren La Liga niet expliciet.</div>
+      </div>
+    </div>
+
+    <div class="pillar">
+      <div class="pillar-num">3</div>
+      <div class="pillar-content">
+        <div class="pillar-name">Directionele positie</div>
+        <div class="pillar-desc">Win/draw hoofdbet die wij correct kopiëren. De hedges zijn noise — en die zijn al correct gefilterd uit onze strategie.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- EERSTE STAP -->
+  <div class="first-step">
+    <div class="first-step-label">Eerste Stap — Nu</div>
+    <div class="first-step-text">Bereken de prijs-delta: wat was de marktprijs van elke positie op het moment van onze eerste detectie in de bot-logs, versus onze actual fill-prijs?</div>
+    <div class="first-step-sub">Die delta vertelt in één tabel of timing het lek is. De analyse bestaat al in de data — het is één Python script op de trades.jsonl.</div>
+    <div class="delta-rule">
+      <div class="delta-item">
+        <div class="delta-val">delta &gt; 0.03</div>
+        <div class="delta-label">timing is het probleem</div>
+      </div>
+      <div class="delta-item">
+        <div class="delta-val">delta &lt; 0.01</div>
+        <div class="delta-label">iets anders — verder onderzoeken</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- FOOTER -->
+<div class="footer">
+  <span>Council — Cannae Alpha Reverse Engineering</span>
+  <span>Claude Sonnet 4.6 &nbsp;·&nbsp; 2026-04-02</span>
+</div>
+
+</body>
+</html>
