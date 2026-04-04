@@ -478,7 +478,7 @@ async fn copy_trading_loop(
                         );
                         let executed = execute_stable_game(
                             &game, &mut executor, &risk, &logger, &config, true,
-                            &wave_budget, &client, &game_schedule,
+                            &client, &game_schedule,
                         ).await;
                         if executed {
                             // Mark as executed — don't retry with other wallets
@@ -513,7 +513,6 @@ async fn execute_stable_game(
     logger: &Arc<TradeLogger>,
     config: &SharedConfig,
     taker_mode: bool,
-    wave_budget: &budget::WaveBudget,
     client: &Arc<ClobClient>,
     game_schedule: &scheduler::GameSchedule,
 ) -> bool {
@@ -632,7 +631,7 @@ async fn execute_stable_game(
             if !win_is_yes {
                 // === WIN NO ===
                 if has_draw_yes {
-                    // Win NO + Draw YES → copy both, capped at 7% + 3%
+                    // Win NO + Draw YES → copy both (confidence-sized post-loop)
                     bets.retain(|b| !(b.game_line == "draw" && b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No")));
                     // If draw hauptbet was NO (higher CV), it got removed — add Draw YES from positions
                     if !bets.iter().any(|b| b.game_line == "draw") {
@@ -640,21 +639,14 @@ async fn execute_stable_game(
                             .filter(|p| p.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("Yes"))
                             .max_by(|a, b| a.current_value_f64().partial_cmp(&b.current_value_f64()).unwrap_or(std::cmp::Ordering::Equal));
                         if let Some(dy) = draw_yes {
-                            bets.push(GameLineBet { pos: (*dy).clone(), game_line: "draw".to_string(), size_pct: 3.0 });
+                            bets.push(GameLineBet { pos: (*dy).clone(), game_line: "draw".to_string(), size_pct: 0.0 });
                         }
                     }
-                    for b in bets.iter_mut() {
-                        if b.game_line == "win" { b.size_pct = 7.0; }
-                        if b.game_line == "draw" { b.size_pct = 3.0; }
-                    }
-                    info!("GAME MODE: {} → WIN_NO+DRAW_YES (7%+3%, {} bets)", game.event_slug, bets.len());
+                    info!("GAME MODE: {} → WIN_NO+DRAW_YES ({} bets)", game.event_slug, bets.len());
                 } else {
-                    // Win NO only → no draw, capped at 8%
+                    // Win NO only → no draw
                     bets.retain(|b| b.game_line != "draw");
-                    for b in bets.iter_mut() {
-                        if b.game_line == "win" { b.size_pct = 8.0; }
-                    }
-                    info!("GAME MODE: {} → WIN_NO (8%, {} bets)", game.event_slug, bets.len());
+                    info!("GAME MODE: {} → WIN_NO ({} bets)", game.event_slug, bets.len());
                 }
             } else {
                 // === WIN YES ===
@@ -706,12 +698,12 @@ async fn execute_stable_game(
                                 sub_pos.avg_price = Some(serde_json::json!(no_price));
                                 sub_pos.cur_price = Some(serde_json::json!(no_price));
                                 bets.retain(|b| b.game_line != "win");
-                                bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 5.0 });
-                                info!("GAME MODE: {} → OPP_NO (win YES {:.2}+draw YES → opp NO, 1 bet)", game.event_slug, win_yes_price);
+                                bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 0.0 });
+                                info!("GAME MODE: {} → OPP_NO (win YES {:.2} + draw YES → opp NO, 1 bet)", game.event_slug, win_yes_price);
                             }
                             None => {
                                 // Fallback: keep Win YES
-                                info!("GAME MODE: {} → WIN_YES (opp NO not found, keeping win YES {:.2})", game.event_slug, win_yes_price);
+                                info!("GAME MODE: {} → WIN_YES (opp NO not found, win YES {:.2})", game.event_slug, win_yes_price);
                             }
                         }
                     }
@@ -741,8 +733,8 @@ async fn execute_stable_game(
                                 sub_pos.avg_price = Some(serde_json::json!(no_price));
                                 sub_pos.cur_price = Some(serde_json::json!(no_price));
                                 bets.retain(|b| b.game_line != "win");
-                                bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 5.0 });
-                                info!("GAME MODE: {} → OPP_NO (win_YES {:.2} < 0.50 with draw_NO → opp NO, 1 bet)", game.event_slug, win_yes_price);
+                                bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 0.0 });
+                                info!("GAME MODE: {} → OPP_NO (win_YES {:.2} < 0.50 + draw_NO → opp NO, 1 bet)", game.event_slug, win_yes_price);
                             }
                             None => {
                                 // Fallback: keep Win YES, drop draw NO
@@ -776,7 +768,7 @@ async fn execute_stable_game(
                         info!("GAME MODE: {} → WIN_YES+DRAW_NO ({} bets)", game.event_slug, bets.len());
                     }
                 } else {
-                    // Win YES only → replace with opponent Win NO at 6%
+                    // Win YES only → replace with opponent Win NO
                     bets.retain(|b| b.game_line != "draw");
                     let win_cid = win_bet.pos.condition_id.as_deref().unwrap_or("").to_owned();
                     let draw_cids: Vec<&str> = draw_positions.iter()
@@ -799,15 +791,12 @@ async fn execute_stable_game(
                             sub_pos.avg_price = Some(serde_json::json!(no_price));
                             sub_pos.cur_price = Some(serde_json::json!(no_price));
                             bets.retain(|b| b.game_line != "win");
-                            bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 6.0 });
-                            info!("GAME MODE: {} → OPP_NO (win YES only → opp NO 6%, 1 bet)", game.event_slug);
+                            bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 0.0 });
+                            info!("GAME MODE: {} → OPP_NO (win YES only → opp NO, 1 bet)", game.event_slug);
                         }
                         None => {
-                            // Fallback: keep Win YES at 6%
-                            for b in bets.iter_mut() {
-                                if b.game_line == "win" { b.size_pct = 6.0; }
-                            }
-                            info!("GAME MODE: {} → WIN_YES (opp NO not found, fallback 6%)", game.event_slug);
+                            // Fallback: keep Win YES
+                            info!("GAME MODE: {} → WIN_YES (opp NO not found, fallback)", game.event_slug);
                         }
                     }
                 }
@@ -822,6 +811,22 @@ async fn execute_stable_game(
         let conf = (price * 1.10).min(0.95);
         b.size_pct = crate::sizing::confidence_pct(conf);
     }
+
+    // Minimum price filter: skip bets below 20ct (except draw YES — low-odds draw hedge is valid)
+    bets.retain(|b| {
+        let price = b.pos.avg_price_f64();
+        if price < 0.20 {
+            let is_draw_yes = b.game_line == "draw"
+                && b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("Yes");
+            if !is_draw_yes {
+                info!("SKIP: price {:.2} < 0.20 minimum — {} {} {}",
+                    price, b.pos.outcome.as_deref().unwrap_or(""), b.game_line,
+                    b.pos.title.as_deref().unwrap_or(""));
+                return false;
+            }
+        }
+        true
+    });
 
     // Safety cap: max 10% total per game
     let total_pct: f64 = bets.iter().map(|b| b.size_pct).sum();
