@@ -1,6 +1,29 @@
+/// Confidence-based sizing: maps signal confidence (0-1) to bankroll %.
+///
+/// Confidence is derived from the bet price: (price × 1.10).min(0.95).
+/// Based on 4-week Cannae analysis (142 trades):
+///   < 0.60 → 2.5%  (close games, lower ROI)
+///   0.60-0.70 → 5.0%
+///   0.70-0.80 → 10.0% (best ROI bucket)
+///   0.80-0.90 → 5.0%  (anomaly: n=17, pending more data)
+///   ≥ 0.90 → 10.0%  (strong favorites, solid ROI)
+pub fn confidence_pct(confidence: f64) -> f64 {
+    if confidence >= 0.90 {
+        10.0
+    } else if confidence >= 0.80 {
+        5.0
+    } else if confidence >= 0.70 {
+        10.0
+    } else if confidence >= 0.60 {
+        5.0
+    } else {
+        2.5
+    }
+}
+
 /// Flat sizing: bankroll × pct / price = shares.
 ///
-/// No proportional weighting, no conviction.
+/// No proportional weighting, no conviction, no Kelly.
 /// The pct is determined by sport + game line (from SportSizingConfig),
 /// capped by wave budget (bankroll / total_lines_in_wave).
 ///

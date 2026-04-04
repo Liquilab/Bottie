@@ -591,10 +591,17 @@ async fn execute_stable_game(
             .max_by(|a, b| a.current_value_f64().partial_cmp(&b.current_value_f64()).unwrap_or(std::cmp::Ordering::Equal));
 
         if let Some(pos) = hauptbet {
-            let pct = wave_budget.get_line_pct(bankroll, league, gl);
-            if pct > 0.0 {
-                bets.push(GameLineBet { pos: pos.clone(), game_line: gl.to_string(), size_pct: pct });
+            let price = pos.avg_price_f64();
+            // NBA: minimum price filter (skip weak favorites / underdogs)
+            if league == "nba" && price < 0.65 {
+                info!("SKIP: {} — NBA price {:.2} < 0.65 minimum ({})",
+                    pos.title.as_deref().unwrap_or(""), price, gl);
+                continue;
             }
+            // Confidence-based sizing from bet price
+            let confidence = (price * 1.10).min(0.95);
+            let pct = crate::sizing::confidence_pct(confidence);
+            bets.push(GameLineBet { pos: pos.clone(), game_line: gl.to_string(), size_pct: pct });
         }
     }
 
@@ -652,68 +659,122 @@ async fn execute_stable_game(
             } else {
                 // === WIN YES ===
                 if has_draw_yes {
-                    // Win YES + Draw YES (regardless of Draw NO) → replace Win YES with opponent Win NO (8%)
-                    bets.retain(|b| b.game_line != "draw"); // remove draw, only buy opp NO
-                    let win_cid = win_bet.pos.condition_id.as_deref().unwrap_or("").to_owned();
-                    let draw_cids: Vec<&str> = draw_positions.iter()
-                        .filter_map(|p| p.condition_id.as_deref())
-                        .collect();
-                    match game_schedule.find_opponent_no_token(&game.event_slug, &win_cid, &draw_cids) {
-                        Some((opp_cid, no_token_id)) => {
-                            let no_price = match game_schedule.find_yes_token(&game.event_slug, &opp_cid) {
-                                Some(yes_tok) => {
-                                    client.get_best_bid(&yes_tok).await
-                                        .map(|p| (1.0 - p).max(0.30).min(0.90))
-                                        .unwrap_or(0.55)
-                                }
-                                None => 0.55,
-                            };
-                            let mut sub_pos = win_bet.pos.clone();
-                            sub_pos.asset = Some(no_token_id);
-                            sub_pos.condition_id = Some(opp_cid.clone());
-                            sub_pos.outcome = Some("No".to_string());
-                            sub_pos.avg_price = Some(serde_json::json!(no_price));
-                            sub_pos.cur_price = Some(serde_json::json!(no_price));
-                            bets.retain(|b| b.game_line != "win");
-                            // 8% on opponent NO
-                            bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 8.0 });
-                            info!("GAME MODE: {} → OPP_NO (win YES+draw YES → opp NO 8%, 1 bet)", game.event_slug);
+                    let win_yes_price = win_bet.pos.avg_price_f64();
+                    if win_yes_price < 0.55 {
+                        // Underdog win + draw hedge: low conviction, skip win leg
+                        // Keep draw YES only (lower risk, draw still pays)
+                        bets.retain(|b| b.game_line != "win");
+                        // If hauptbet was draw NO, replace with draw YES
+                        let has_draw_no_in_bets = bets.iter().any(|b| b.game_line == "draw"
+                            && b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No"));
+                        if has_draw_no_in_bets {
+                            bets.retain(|b| !(b.game_line == "draw"
+                                && b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No")));
                         }
-                        None => {
-                            // Fallback: keep Win YES at 8%
-                            for b in bets.iter_mut() {
-                                if b.game_line == "win" { b.size_pct = 8.0; }
+                        if !bets.iter().any(|b| b.game_line == "draw") {
+                            let draw_yes = draw_positions.iter()
+                                .filter(|p| p.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("Yes"))
+                                .max_by(|a, b| a.current_value_f64().partial_cmp(&b.current_value_f64()).unwrap_or(std::cmp::Ordering::Equal));
+                            if let Some(dy) = draw_yes {
+                                let dy_price = (*dy).avg_price_f64();
+                                let dy_conf = (dy_price * 1.10).min(0.95);
+                                bets.push(GameLineBet { pos: (*dy).clone(), game_line: "draw".to_string(), size_pct: crate::sizing::confidence_pct(dy_conf) });
                             }
-                            info!("GAME MODE: {} → WIN_YES (opp NO not found, keeping win YES 8%)", game.event_slug);
+                        }
+                        info!("GAME MODE: {} → DRAW_YES_ONLY (win_YES price {:.2} < 0.55, skip win)", game.event_slug, win_yes_price);
+                    } else {
+                        // Win YES + Draw YES → replace Win YES with opponent Win NO
+                        bets.retain(|b| b.game_line != "draw"); // remove draw, only buy opp NO
+                        let win_cid = win_bet.pos.condition_id.as_deref().unwrap_or("").to_owned();
+                        let draw_cids: Vec<&str> = draw_positions.iter()
+                            .filter_map(|p| p.condition_id.as_deref())
+                            .collect();
+                        match game_schedule.find_opponent_no_token(&game.event_slug, &win_cid, &draw_cids) {
+                            Some((opp_cid, no_token_id)) => {
+                                let no_price = match game_schedule.find_yes_token(&game.event_slug, &opp_cid) {
+                                    Some(yes_tok) => {
+                                        client.get_best_bid(&yes_tok).await
+                                            .map(|p| (1.0 - p).max(0.30).min(0.90))
+                                            .unwrap_or(0.55)
+                                    }
+                                    None => 0.55,
+                                };
+                                let mut sub_pos = win_bet.pos.clone();
+                                sub_pos.asset = Some(no_token_id);
+                                sub_pos.condition_id = Some(opp_cid.clone());
+                                sub_pos.outcome = Some("No".to_string());
+                                sub_pos.avg_price = Some(serde_json::json!(no_price));
+                                sub_pos.cur_price = Some(serde_json::json!(no_price));
+                                bets.retain(|b| b.game_line != "win");
+                                bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 5.0 });
+                                info!("GAME MODE: {} → OPP_NO (win YES {:.2}+draw YES → opp NO, 1 bet)", game.event_slug, win_yes_price);
+                            }
+                            None => {
+                                // Fallback: keep Win YES
+                                info!("GAME MODE: {} → WIN_YES (opp NO not found, keeping win YES {:.2})", game.event_slug, win_yes_price);
+                            }
                         }
                     }
                 } else if has_draw_no {
-                    // Win YES + Draw NO → Win YES 7% + Draw NO 3% (only hauptbet win, no extra wins)
-                    let hauptbet_cid = win_bet.pos.condition_id.as_deref().unwrap_or("").to_owned();
-                    bets.retain(|b| {
-                        if b.game_line == "win" {
-                            // Only keep the win hauptbet condition, drop opponent NO etc.
-                            b.pos.condition_id.as_deref().unwrap_or("") == hauptbet_cid.as_str()
-                        } else if b.game_line == "draw" {
-                            b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No")
-                        } else {
-                            false
+                    let win_yes_price = win_bet.pos.avg_price_f64();
+                    if win_yes_price < 0.50 {
+                        // Win YES below 50%: underdog — convert to OPP_NO (drop draw NO)
+                        bets.retain(|b| b.game_line != "draw");
+                        let win_cid = win_bet.pos.condition_id.as_deref().unwrap_or("").to_owned();
+                        let draw_cids: Vec<&str> = draw_positions.iter()
+                            .filter_map(|p| p.condition_id.as_deref())
+                            .collect();
+                        match game_schedule.find_opponent_no_token(&game.event_slug, &win_cid, &draw_cids) {
+                            Some((opp_cid, no_token_id)) => {
+                                let no_price = match game_schedule.find_yes_token(&game.event_slug, &opp_cid) {
+                                    Some(yes_tok) => {
+                                        client.get_best_bid(&yes_tok).await
+                                            .map(|p| (1.0 - p).max(0.30).min(0.90))
+                                            .unwrap_or(0.55)
+                                    }
+                                    None => 0.55,
+                                };
+                                let mut sub_pos = win_bet.pos.clone();
+                                sub_pos.asset = Some(no_token_id);
+                                sub_pos.condition_id = Some(opp_cid.clone());
+                                sub_pos.outcome = Some("No".to_string());
+                                sub_pos.avg_price = Some(serde_json::json!(no_price));
+                                sub_pos.cur_price = Some(serde_json::json!(no_price));
+                                bets.retain(|b| b.game_line != "win");
+                                bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 5.0 });
+                                info!("GAME MODE: {} → OPP_NO (win_YES {:.2} < 0.50 with draw_NO → opp NO, 1 bet)", game.event_slug, win_yes_price);
+                            }
+                            None => {
+                                // Fallback: keep Win YES, drop draw NO
+                                bets.retain(|b| b.game_line != "draw");
+                                info!("GAME MODE: {} → WIN_YES (opp NO not found, win_YES {:.2} < 0.50)", game.event_slug, win_yes_price);
+                            }
                         }
-                    });
-                    for b in bets.iter_mut() {
-                        if b.game_line == "win" { b.size_pct = 7.0; }
-                        if b.game_line == "draw" { b.size_pct = 3.0; }
-                    }
-                    // If draw NO wasn't in bets yet, add it
-                    if !bets.iter().any(|b| b.game_line == "draw") {
-                        let draw_no = draw_positions.iter()
-                            .filter(|p| p.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No"))
-                            .max_by(|a, b| a.current_value_f64().partial_cmp(&b.current_value_f64()).unwrap_or(std::cmp::Ordering::Equal));
-                        if let Some(dn) = draw_no {
-                            bets.push(GameLineBet { pos: (*dn).clone(), game_line: "draw".to_string(), size_pct: 3.0 });
+                    } else {
+                        // Win YES + Draw NO → Win YES + Draw NO (hauptbet win only)
+                        let hauptbet_cid = win_bet.pos.condition_id.as_deref().unwrap_or("").to_owned();
+                        bets.retain(|b| {
+                            if b.game_line == "win" {
+                                b.pos.condition_id.as_deref().unwrap_or("") == hauptbet_cid.as_str()
+                            } else if b.game_line == "draw" {
+                                b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No")
+                            } else {
+                                false
+                            }
+                        });
+                        // If draw NO wasn't in bets yet, add it
+                        if !bets.iter().any(|b| b.game_line == "draw") {
+                            let draw_no = draw_positions.iter()
+                                .filter(|p| p.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No"))
+                                .max_by(|a, b| a.current_value_f64().partial_cmp(&b.current_value_f64()).unwrap_or(std::cmp::Ordering::Equal));
+                            if let Some(dn) = draw_no {
+                                let dn_price = (*dn).avg_price_f64();
+                                let dn_conf = (dn_price * 1.10).min(0.95);
+                                bets.push(GameLineBet { pos: (*dn).clone(), game_line: "draw".to_string(), size_pct: crate::sizing::confidence_pct(dn_conf) });
+                            }
                         }
+                        info!("GAME MODE: {} → WIN_YES+DRAW_NO ({} bets)", game.event_slug, bets.len());
                     }
-                    info!("GAME MODE: {} → WIN_YES+DRAW_NO (7%+3%, {} bets)", game.event_slug, bets.len());
                 } else {
                     // Win YES only → replace with opponent Win NO at 6%
                     bets.retain(|b| b.game_line != "draw");
@@ -752,6 +813,14 @@ async fn execute_stable_game(
                 }
             }
         }
+    }
+
+    // Confidence-based dynamic sizing: override any placeholder size_pct from game mode logic.
+    // confidence = (avg_price × 1.10).min(0.95) → maps to bankroll %
+    for b in bets.iter_mut() {
+        let price = b.pos.avg_price_f64();
+        let conf = (price * 1.10).min(0.95);
+        b.size_pct = crate::sizing::confidence_pct(conf);
     }
 
     // Safety cap: max 10% total per game
