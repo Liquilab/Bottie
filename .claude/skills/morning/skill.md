@@ -65,15 +65,32 @@ for name, funder in INSTANCES.items():
 "
 ```
 
-**2. Bot status + cash BEIDE services:**
+**2. Bot status + cash + binary verify BEIDE services:**
 ```bash
 for svc in bottie bottie-test; do
   echo "=== $svc ==="
   systemctl is-active $svc
   journalctl -u $svc --no-pager -n 100 | grep STATUS | tail -1
+  # CRITICAL: verify running binary matches compiled binary
+  PID=$(systemctl show $svc --property=ExecMainPID --value)
+  if [ "$PID" -gt 0 ] 2>/dev/null; then
+    RUNNING_MD5=$(md5sum /proc/$PID/exe 2>/dev/null | awk '{print $1}')
+    if [ "$svc" = "bottie" ]; then
+      DISK_MD5=$(md5sum /opt/bottie/bottie-bin 2>/dev/null | awk '{print $1}')
+      BUILD_MD5=$(md5sum /opt/bottie/target/release/bottie 2>/dev/null | awk '{print $1}')
+    else
+      DISK_MD5=$(md5sum /opt/bottie-test/bottie-bin 2>/dev/null | awk '{print $1}')
+      BUILD_MD5=$(md5sum /opt/bottie-test/target/release/bottie 2>/dev/null | awk '{print $1}')
+    fi
+    echo "  binary: running=$RUNNING_MD5 disk=$DISK_MD5 build=$BUILD_MD5"
+    if [ "$RUNNING_MD5" != "$DISK_MD5" ]; then echo "  ⚠️ RUNNING BINARY != DISK BINARY"; fi
+    if [ "$DISK_MD5" != "$BUILD_MD5" ]; then echo "  ⚠️ DISK BINARY != LATEST BUILD"; fi
+  fi
 done
 ```
 Gebruik `bankroll=` uit STATUS voor cash. **Portfolio = PM /value (posities) + bankroll (cash).**
+
+**⚠️ BINARY CHECK IS VERPLICHT.** Op 2026-04-04 draaide de service urenlang een oud binary na een deploy omdat `cp target/release/bottie bottie-bin` ontbrak. Als hashes niet matchen: rapporteer als **CRITICAL** in de briefing.
 
 **3. Uitgebreide trade-analyse BEIDE instanties (vorige dag + nacht):**
 
@@ -200,3 +217,21 @@ Als geen EOD of session file gevonden:
 2. Check git log (laatste 24u)
 3. Presenteer wat beschikbaar is
 4. Vraag: "Geen session data. Wat is de prioriteit vandaag?"
+
+---
+
+## Known Failures
+
+### F1: Binary mismatch niet gedetecteerd (2026-04-04)
+- **Niveau:** Instructie (ontbrekende check)
+- **Wat:** /morning checkte alleen `systemctl is-active` maar niet of het draaiende binary overeenkomt met het laatste build. Na een deploy draaide de service urenlang een oud binary met foute sizing (7%+3% i.p.v. 5%+5%).
+- **Impact:** Foute sizing op live trades voor meerdere wedstrijden.
+- **Fix:** Binary md5 verificatie toegevoegd aan stap 2 (running vs disk vs build).
+
+---
+
+## Changelog
+
+| Datum | Type | Wijziging | Reden |
+|-------|------|-----------|-------|
+| 2026-04-04 | Add condition | Binary md5 check in stap 2 (running vs disk vs build) | F1: oud binary draaide na deploy |
