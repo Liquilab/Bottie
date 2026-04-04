@@ -574,6 +574,7 @@ async fn execute_stable_game(
         pos: crate::clob::types::WalletPosition,
         game_line: String,
         size_pct: f64,
+        fixed_size: bool, // true = skip confidence_pct override
     }
 
     let bankroll = risk.read().await.bankroll();
@@ -600,7 +601,7 @@ async fn execute_stable_game(
             // Confidence-based sizing from bet price
             let confidence = (price * 1.10).min(0.95);
             let pct = crate::sizing::confidence_pct(confidence);
-            bets.push(GameLineBet { pos: pos.clone(), game_line: gl.to_string(), size_pct: pct });
+            bets.push(GameLineBet { pos: pos.clone(), game_line: gl.to_string(), size_pct: pct, fixed_size: false });
         }
     }
 
@@ -631,7 +632,7 @@ async fn execute_stable_game(
             if !win_is_yes {
                 // === WIN NO ===
                 if has_draw_yes {
-                    // Win NO + Draw YES → copy both (confidence-sized post-loop)
+                    // Win NO + Draw YES → fixed 5% + 5% (max 10% per game)
                     bets.retain(|b| !(b.game_line == "draw" && b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No")));
                     // If draw hauptbet was NO (higher CV), it got removed — add Draw YES from positions
                     if !bets.iter().any(|b| b.game_line == "draw") {
@@ -639,10 +640,15 @@ async fn execute_stable_game(
                             .filter(|p| p.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("Yes"))
                             .max_by(|a, b| a.current_value_f64().partial_cmp(&b.current_value_f64()).unwrap_or(std::cmp::Ordering::Equal));
                         if let Some(dy) = draw_yes {
-                            bets.push(GameLineBet { pos: (*dy).clone(), game_line: "draw".to_string(), size_pct: 0.0 });
+                            bets.push(GameLineBet { pos: (*dy).clone(), game_line: "draw".to_string(), size_pct: 5.0, fixed_size: true });
                         }
                     }
-                    info!("GAME MODE: {} → WIN_NO+DRAW_YES ({} bets)", game.event_slug, bets.len());
+                    // Mark all legs as fixed 5%
+                    for b in bets.iter_mut() {
+                        b.size_pct = 5.0;
+                        b.fixed_size = true;
+                    }
+                    info!("GAME MODE: {} → WIN_NO+DRAW_YES (5%+5%, {} bets)", game.event_slug, bets.len());
                 } else {
                     // Win NO only → no draw
                     bets.retain(|b| b.game_line != "draw");
@@ -670,7 +676,7 @@ async fn execute_stable_game(
                             if let Some(dy) = draw_yes {
                                 let dy_price = (*dy).avg_price_f64();
                                 let dy_conf = (dy_price * 1.10).min(0.95);
-                                bets.push(GameLineBet { pos: (*dy).clone(), game_line: "draw".to_string(), size_pct: crate::sizing::confidence_pct(dy_conf) });
+                                bets.push(GameLineBet { pos: (*dy).clone(), game_line: "draw".to_string(), size_pct: crate::sizing::confidence_pct(dy_conf), fixed_size: false });
                             }
                         }
                         info!("GAME MODE: {} → DRAW_YES_ONLY (win_YES price {:.2} < 0.55, skip win)", game.event_slug, win_yes_price);
@@ -698,7 +704,7 @@ async fn execute_stable_game(
                                 sub_pos.avg_price = Some(serde_json::json!(no_price));
                                 sub_pos.cur_price = Some(serde_json::json!(no_price));
                                 bets.retain(|b| b.game_line != "win");
-                                bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 0.0 });
+                                bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 0.0, fixed_size: false });
                                 info!("GAME MODE: {} → OPP_NO (win YES {:.2} + draw YES → opp NO, 1 bet)", game.event_slug, win_yes_price);
                             }
                             None => {
@@ -733,7 +739,7 @@ async fn execute_stable_game(
                                 sub_pos.avg_price = Some(serde_json::json!(no_price));
                                 sub_pos.cur_price = Some(serde_json::json!(no_price));
                                 bets.retain(|b| b.game_line != "win");
-                                bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 0.0 });
+                                bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 0.0, fixed_size: false });
                                 info!("GAME MODE: {} → OPP_NO (win_YES {:.2} < 0.50 + draw_NO → opp NO, 1 bet)", game.event_slug, win_yes_price);
                             }
                             None => {
@@ -762,7 +768,7 @@ async fn execute_stable_game(
                             if let Some(dn) = draw_no {
                                 let dn_price = (*dn).avg_price_f64();
                                 let dn_conf = (dn_price * 1.10).min(0.95);
-                                bets.push(GameLineBet { pos: (*dn).clone(), game_line: "draw".to_string(), size_pct: crate::sizing::confidence_pct(dn_conf) });
+                                bets.push(GameLineBet { pos: (*dn).clone(), game_line: "draw".to_string(), size_pct: crate::sizing::confidence_pct(dn_conf), fixed_size: false });
                             }
                         }
                         info!("GAME MODE: {} → WIN_YES+DRAW_NO ({} bets)", game.event_slug, bets.len());
@@ -791,7 +797,7 @@ async fn execute_stable_game(
                             sub_pos.avg_price = Some(serde_json::json!(no_price));
                             sub_pos.cur_price = Some(serde_json::json!(no_price));
                             bets.retain(|b| b.game_line != "win");
-                            bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 0.0 });
+                            bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 0.0, fixed_size: false });
                             info!("GAME MODE: {} → OPP_NO (win YES only → opp NO, 1 bet)", game.event_slug);
                         }
                         None => {
@@ -804,9 +810,9 @@ async fn execute_stable_game(
         }
     }
 
-    // Confidence-based dynamic sizing: override any placeholder size_pct from game mode logic.
-    // confidence = (avg_price × 1.10).min(0.95) → maps to bankroll %
+    // Confidence-based dynamic sizing: override placeholder size_pct (skip fixed-size bets)
     for b in bets.iter_mut() {
+        if b.fixed_size { continue; }
         let price = b.pos.avg_price_f64();
         let conf = (price * 1.10).min(0.95);
         b.size_pct = crate::sizing::confidence_pct(conf);
