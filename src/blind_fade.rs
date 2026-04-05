@@ -1,12 +1,13 @@
 //! Blind fade strategy: WIN NO on favorite + DRAW YES on all football games.
 //!
-//! Entirely config-driven. When `blind_fade.enabled` is false, this module
-//! does nothing. Runs as an independent loop alongside copy_trading and odds_arb.
+//! Uses the GameSchedule (same as Cannae T-5 scheduler) for real kickoff times.
+//! Entirely config-driven. When `blind_fade.enabled` is false, zero code paths touched.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use chrono::Utc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
@@ -14,24 +15,11 @@ use crate::clob::client::ClobClient;
 use crate::config::{BlindFadeConfig, SharedConfig};
 use crate::execution::Executor;
 use crate::logger::TradeLogger;
-use crate::odds::PolymarketSportsMatch;
 use crate::risk::RiskManager;
+use crate::scheduler::{self, GameSchedule, UpcomingGame};
 use crate::signal;
-use crate::sports;
 
-/// A football event with win markets for both teams and optionally a draw market.
-struct FootballEvent {
-    event_title: String,
-    team_a: String,
-    team_b: String,
-    win_a: Option<PolymarketSportsMatch>,
-    win_b: Option<PolymarketSportsMatch>,
-    draw: Option<PolymarketSportsMatch>,
-    /// Earliest end_date from any market in this event
-    end_date: Option<String>,
-}
-
-/// Main blind fade loop. Scans football markets and places WIN NO + DRAW YES.
+/// Main blind fade loop. Uses GameSchedule for kickoff times (same as T-5 scheduler).
 pub async fn blind_fade_loop(
     client: Arc<ClobClient>,
     config: SharedConfig,
@@ -39,6 +27,7 @@ pub async fn blind_fade_loop(
     risk: Arc<RwLock<RiskManager>>,
 ) {
     let mut executor = Executor::new(client.clone(), config.clone());
+    let mut schedule = GameSchedule::load_from_disk(std::path::Path::new("data/schedule_cache.json"));
 
     // Seed attempted map from live positions (prevent double-buying)
     {
@@ -64,7 +53,12 @@ pub async fn blind_fade_loop(
             continue;
         }
 
-        match run_blind_fade_cycle(&client, &mut executor, &config, &logger, &risk, &fade_config).await {
+        // Refresh schedule if stale (every 60 min, same as Cannae)
+        if schedule.needs_refresh(60) {
+            scheduler::refresh_schedule(&client, &fade_config.sport_tags, &mut schedule).await;
+        }
+
+        match run_blind_fade_cycle(&client, &mut executor, &logger, &risk, &fade_config, &schedule).await {
             Ok(placed) => {
                 if placed > 0 {
                     info!("BLIND_FADE: placed {} bets this cycle", placed);
@@ -80,104 +74,121 @@ pub async fn blind_fade_loop(
 async fn run_blind_fade_cycle(
     client: &Arc<ClobClient>,
     executor: &mut Executor,
-    config: &SharedConfig,
     logger: &TradeLogger,
     risk: &Arc<RwLock<RiskManager>>,
     fade_config: &BlindFadeConfig,
+    schedule: &GameSchedule,
 ) -> Result<u32> {
-    // Fetch all football markets
-    let pm_markets = sports::fetch_sports_markets(client, &fade_config.sport_tags).await?;
+    let now = Utc::now();
 
-    if pm_markets.is_empty() {
+    // Filter: games starting within 75 minutes (real kickoff from GameSchedule)
+    let upcoming: Vec<&UpcomingGame> = schedule.games.iter()
+        .filter(|g| {
+            let mins = g.start_time.signed_duration_since(now).num_minutes();
+            mins > -10 && mins <= 75  // started < 10min ago OR starts within 75min
+        })
+        .collect();
+
+    if upcoming.is_empty() {
+        info!("BLIND_FADE: 0 upcoming games (within 75min) out of {} total", schedule.games.len());
         return Ok(0);
     }
 
-    // Group by event
-    let all_events = group_football_events(&pm_markets);
-
-    // CRITICAL: only buy games starting within 75 minutes (avoid locking capital in distant games)
-    let now = chrono::Utc::now();
-    let events: Vec<_> = all_events.into_iter().filter(|e| {
-        let end_str = match &e.end_date {
-            Some(s) => s,
-            None => return false, // no date = skip
-        };
-        // Parse end_date (game date, not actual end time)
-        let end_dt = chrono::DateTime::parse_from_rfc3339(end_str)
-            .or_else(|_| chrono::DateTime::parse_from_str(end_str, "%Y-%m-%dT%H:%M:%S%.fZ"))
-            .or_else(|_| chrono::DateTime::parse_from_str(end_str, "%Y-%m-%dT%H:%M:%SZ"));
-        match end_dt {
-            Ok(dt) => {
-                let until = dt.signed_duration_since(now);
-                let mins = until.num_minutes();
-                // Game starts within 75 min AND hasn't ended yet (> -120 min grace for late resolution)
-                mins <= 75 && mins > -120
-            }
-            Err(_) => false,
-        }
-    }).collect();
-
-    info!("BLIND_FADE: {} upcoming events (within 75min) out of {} total", events.len(), pm_markets.len());
+    info!("BLIND_FADE: {} upcoming games (within 75min) out of {} total", upcoming.len(), schedule.games.len());
 
     let mut placed = 0u32;
 
-    for event in &events {
-        // Find the favorite: team with highest YES price
-        let (fav_market, _underdog_market) = match (&event.win_a, &event.win_b) {
-            (Some(a), Some(b)) => {
-                if a.yes_price >= b.yes_price {
-                    (a, b)
-                } else {
-                    (b, a)
-                }
+    for game in &upcoming {
+        // Find win markets and draw market from market_tokens
+        // market_tokens: Vec<(condition_id, question, Vec<(outcome, token_id)>)>
+        let mut win_markets: Vec<(&str, &str, &[(String, String)])> = Vec::new(); // (cid, question, tokens)
+        let mut draw_market: Option<(&str, &[(String, String)])> = None;
+
+        for (cid, question, tokens) in &game.market_tokens {
+            if question.contains("win") && !question.contains("draw") {
+                win_markets.push((cid, question, tokens));
+            } else if question.contains("draw") {
+                draw_market = Some((cid, tokens));
             }
-            (Some(a), None) => (a, a), // only one team market
-            (None, Some(b)) => (b, b),
-            (None, None) => continue,
+        }
+
+        // Need at least one win market AND a draw market
+        if win_markets.is_empty() || draw_market.is_none() {
+            continue;
+        }
+        let (draw_cid, draw_tokens) = draw_market.unwrap();
+
+        // Find draw YES token
+        let draw_yes_token = draw_tokens.iter()
+            .find(|(o, _)| o == "Yes")
+            .map(|(_, tid)| tid.as_str());
+        let draw_yes_token = match draw_yes_token {
+            Some(t) => t,
+            None => continue,
         };
 
-        // WIN NO price = price of buying NO on the favorite
-        let win_no_price = fav_market.no_price;
+        // Get draw YES price from orderbook
+        let draw_yes_price = match client.get_best_ask(draw_yes_token).await {
+            Ok(p) if p > 0.0 && p < 1.0 => p,
+            _ => continue,
+        };
 
-        // Price filter: WIN NO must be 30-50ct (configurable)
+        // For each win market, get YES price to find the favorite
+        let mut best_fav: Option<(&str, &str, f64)> = None; // (cid, no_token, yes_price)
+
+        for (cid, _question, tokens) in &win_markets {
+            let yes_token = tokens.iter().find(|(o, _)| o == "Yes").map(|(_, t)| t.as_str());
+            let no_token = tokens.iter().find(|(o, _)| o == "No").map(|(_, t)| t.as_str());
+
+            if let (Some(yes_tok), Some(no_tok)) = (yes_token, no_token) {
+                // Get YES price (= how likely this team wins)
+                let yes_price = match client.get_best_bid(yes_tok).await {
+                    Ok(p) if p > 0.0 => p,
+                    _ => continue,
+                };
+
+                if best_fav.is_none() || yes_price > best_fav.unwrap().2 {
+                    best_fav = Some((cid, no_tok, yes_price));
+                }
+            }
+        }
+
+        let (fav_cid, fav_no_token, fav_yes_price) = match best_fav {
+            Some(f) => f,
+            None => continue,
+        };
+
+        // WIN NO price = ask on the NO token of the favorite
+        let win_no_price = match client.get_best_ask(fav_no_token).await {
+            Ok(p) if p > 0.0 && p < 1.0 => p,
+            _ => continue,
+        };
+
+        // Price filter: WIN NO must be within configured range
         if win_no_price < fade_config.win_no_min_price || win_no_price > fade_config.win_no_max_price {
             continue;
         }
 
-        // MUST have draw market — both legs are required, never place orphan bets
-        let draw = match &event.draw {
-            Some(d) => d,
-            None => {
-                info!("BLIND_FADE: SKIP {} — no draw market found", event.event_title);
-                continue;
-            }
-        };
-
-        // Pre-flight: need enough cash for BOTH legs ($2.50 + $2.50 = $5.00)
+        // Pre-flight: need enough cash for BOTH legs
         let required = fade_config.flat_size_usdc * 2.0;
         let bankroll = risk.read().await.bankroll();
         if bankroll < required {
-            info!("BLIND_FADE: SKIP {} — bankroll ${:.2} < ${:.2} required", event.event_title, bankroll, required);
+            info!("BLIND_FADE: SKIP {} — bankroll ${:.2} < ${:.2} required",
+                game.title, bankroll, required);
             continue;
         }
 
+        let mins_to_kick = game.start_time.signed_duration_since(now).num_minutes();
         info!(
-            "BLIND_FADE: {} | fav={} (YES {:.0}ct) | WIN NO {:.0}ct | draw YES {:.0}ct",
-            event.event_title,
-            extract_team_from_title(&fav_market.title),
-            fav_market.yes_price * 100.0,
-            win_no_price * 100.0,
-            draw.yes_price * 100.0,
+            "BLIND_FADE: {} | T-{}min | fav YES {:.0}ct | WIN NO {:.0}ct | DRAW YES {:.0}ct",
+            game.title, mins_to_kick, fav_yes_price * 100.0,
+            win_no_price * 100.0, draw_yes_price * 100.0,
         );
 
         // Leg 1: WIN NO on favorite
         let win_no_signal = build_signal(
-            &fav_market.no_token_id,
-            &fav_market.condition_id,
-            win_no_price,
-            "No",
-            &fav_market.title,
-            &fav_market.sport,
+            fav_no_token, fav_cid, win_no_price, "No",
+            &game.title, "soccer", &game.event_slug,
         );
 
         let size_pct = fade_config.flat_size_usdc / bankroll * 100.0;
@@ -186,10 +197,10 @@ async fn run_blind_fade_cycle(
             match executor.execute_flat(&win_no_signal, &mut risk_guard, logger, true, size_pct).await {
                 Ok(true) => {
                     placed += 1;
-                    info!("BLIND_FADE: FILLED WIN NO {} @ {:.0}ct", fav_market.title, win_no_price * 100.0);
+                    info!("BLIND_FADE: FILLED WIN NO {} @ {:.0}ct", game.title, win_no_price * 100.0);
                     true
                 }
-                Ok(false) => false, // skipped (dedup, risk, etc)
+                Ok(false) => false,
                 Err(e) => { warn!("BLIND_FADE: WIN NO error: {e}"); false }
             }
         };
@@ -201,12 +212,8 @@ async fn run_blind_fade_cycle(
 
         {
             let draw_signal = build_signal(
-                &draw.yes_token_id,
-                &draw.condition_id,
-                draw.yes_price,
-                "Yes",
-                &draw.title,
-                &draw.sport,
+                draw_yes_token, draw_cid, draw_yes_price, "Yes",
+                &game.title, "soccer", &game.event_slug,
             );
 
             let draw_size_pct = fade_config.flat_size_usdc / risk.read().await.bankroll() * 100.0;
@@ -215,7 +222,7 @@ async fn run_blind_fade_cycle(
                 match executor.execute_flat(&draw_signal, &mut risk_guard, logger, true, draw_size_pct).await {
                     Ok(true) => {
                         placed += 1;
-                        info!("BLIND_FADE: FILLED DRAW YES {} @ {:.0}ct", draw.title, draw.yes_price * 100.0);
+                        info!("BLIND_FADE: FILLED DRAW YES {} @ {:.0}ct", game.title, draw_yes_price * 100.0);
                     }
                     Ok(false) => {}
                     Err(e) => warn!("BLIND_FADE: DRAW YES error: {e}"),
@@ -224,9 +231,7 @@ async fn run_blind_fade_cycle(
         }
 
         // Brief pause between games to avoid rate limits
-        if placed > 0 {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
     Ok(placed)
@@ -239,6 +244,7 @@ fn build_signal(
     outcome: &str,
     title: &str,
     sport: &str,
+    event_slug: &str,
 ) -> signal::AggregatedSignal {
     signal::AggregatedSignal {
         token_id: token_id.to_string(),
@@ -249,7 +255,7 @@ fn build_signal(
         market_type: if outcome == "No" { "win".to_string() } else { "draw".to_string() },
         sport: sport.to_string(),
         outcome: outcome.to_string(),
-        event_slug: String::new(),
+        event_slug: event_slug.to_string(),
         sources: vec![signal::SignalSource::OddsArb(signal::ArbSignal {
             token_id: token_id.to_string(),
             condition_id: condition_id.to_string(),
@@ -267,92 +273,4 @@ fn build_signal(
         source_size_usdc: 0.0,
         source_shares: 0.0,
     }
-}
-
-/// Group PM markets into football events (win A, win B, draw).
-/// Similar to odds.rs group_event_markets but without bookmaker data.
-fn group_football_events(pm_markets: &[PolymarketSportsMatch]) -> Vec<FootballEvent> {
-    let mut events: Vec<FootballEvent> = Vec::new();
-
-    for pm in pm_markets {
-        let title_lower = pm.title.to_lowercase();
-
-        let is_win = title_lower.contains("will") && title_lower.contains("win");
-        let is_draw = title_lower.contains("end in a draw");
-        if !is_win && !is_draw {
-            continue;
-        }
-
-        // Find or create event group by matching teams
-        let group = events.iter_mut().find(|g| {
-            fuzzy_team_match(&g.team_a, &g.team_b, &pm.team_a, &pm.team_b)
-        });
-
-        let group = match group {
-            Some(g) => g,
-            None => {
-                events.push(FootballEvent {
-                    event_title: format!("{} vs {}", pm.team_a, pm.team_b),
-                    team_a: pm.team_a.clone(),
-                    team_b: pm.team_b.clone(),
-                    win_a: None,
-                    win_b: None,
-                    draw: None,
-                    end_date: pm.end_date.clone(),
-                });
-                events.last_mut().unwrap()
-            }
-        };
-
-        // Update end_date if this market has one and group doesn't yet
-        if group.end_date.is_none() {
-            group.end_date = pm.end_date.clone();
-        }
-
-        if is_draw {
-            group.draw = Some(pm.clone());
-        } else if is_win {
-            let team_in_title = extract_team_from_title(&pm.title);
-            let norm = |s: &str| s.to_lowercase().replace(['-', '_', '.'], " ");
-            let team_norm = norm(&team_in_title);
-            let a_norm = norm(&group.team_a);
-            let b_norm = norm(&group.team_b);
-
-            if team_norm.contains(&a_norm) || a_norm.contains(&team_norm) {
-                group.win_a = Some(pm.clone());
-            } else if team_norm.contains(&b_norm) || b_norm.contains(&team_norm) {
-                group.win_b = Some(pm.clone());
-            } else {
-                if group.win_a.is_none() {
-                    group.win_a = Some(pm.clone());
-                } else if group.win_b.is_none() {
-                    group.win_b = Some(pm.clone());
-                }
-            }
-        }
-    }
-
-    // Only keep events with at least one win market
-    events.retain(|e| e.win_a.is_some() || e.win_b.is_some());
-    events
-}
-
-fn extract_team_from_title(title: &str) -> String {
-    let t = title.trim();
-    let rest = if let Some(r) = t.strip_prefix("Will ") { r } else { t };
-    if let Some(idx) = rest.to_lowercase().find(" win") {
-        rest[..idx].trim().to_string()
-    } else {
-        rest.to_string()
-    }
-}
-
-fn fuzzy_team_match(a1: &str, b1: &str, a2: &str, b2: &str) -> bool {
-    let norm = |s: &str| s.to_lowercase().replace(['-', '_', '.'], " ");
-    let (a1, b1, a2, b2) = (norm(a1), norm(b1), norm(a2), norm(b2));
-
-    (a1.contains(&a2) || a2.contains(&a1))
-        && (b1.contains(&b2) || b2.contains(&b1))
-        || (a1.contains(&b2) || b2.contains(&a1))
-            && (b1.contains(&a2) || a2.contains(&b1))
 }
