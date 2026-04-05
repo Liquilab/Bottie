@@ -33,12 +33,14 @@ pub async fn resolver_loop(
     let mut check_state: HashMap<String, MarketCheckState> = HashMap::new();
     let mut auto_sell_cooldown: HashMap<String, DateTime<Utc>> = HashMap::new();
     let mut auto_sell_pending: HashMap<String, String> = HashMap::new();
+    // condition_id → (outcome → last observed price) for CLV tracking
+    let mut last_seen_prices: HashMap<String, HashMap<String, f64>> = HashMap::new();
 
     loop {
         // Phantom sync FIRST — catch false fills before resolution resolves them as win/loss
         sync_phantoms(&client, &logger, &risk).await;
 
-        check_resolutions(&client, &logger, &risk, &tracker, &mut check_state).await;
+        check_resolutions(&client, &logger, &risk, &tracker, &mut check_state, &mut last_seen_prices).await;
 
         // Auto-sell: sell open positions when best bid >= min_bid (e.g. 98ct)
         // Frees cash before PM resolution (2-4 hour delay after game end)
@@ -267,6 +269,7 @@ async fn check_resolutions(
     risk: &Arc<RwLock<RiskManager>>,
     tracker: &Arc<RwLock<WalletTracker>>,
     check_state: &mut HashMap<String, MarketCheckState>,
+    last_seen_prices: &mut HashMap<String, HashMap<String, f64>>,
 ) {
     let mut trades = logger.load_all();
 
@@ -287,6 +290,7 @@ async fn check_resolutions(
 
     // Clean up state for markets no longer open
     check_state.retain(|cid, _| open_markets.contains_key(cid));
+    last_seen_prices.retain(|cid, _| open_markets.contains_key(cid));
 
     // Determine which markets are due for checking
     let now = Utc::now();
@@ -359,6 +363,21 @@ async fn check_resolutions(
             end_date,
         });
 
+        // Capture closing line: store last observed price per outcome while market is open
+        if market_info.winning_outcome().is_none() {
+            if let Some(indices) = open_markets.get(condition_id) {
+                for &idx in indices {
+                    let outcome = trades[idx].outcome.clone();
+                    if let Some(p) = market_info.outcome_price_for(&outcome) {
+                        last_seen_prices
+                            .entry(condition_id.clone())
+                            .or_default()
+                            .insert(outcome, p);
+                    }
+                }
+            }
+        }
+
         let winner = match market_info.winning_outcome() {
             Some(w) => w,
             None => continue, // still open
@@ -398,6 +417,10 @@ async fn check_resolutions(
             );
             trade.pnl = Some(pnl);
             trade.actual_pnl = Some(pnl);
+            trade.closing_price = last_seen_prices
+                .get(condition_id)
+                .and_then(|m| m.get(&trade.outcome))
+                .copied();
             trade.sell_price = Some(if won { 1.0 } else if is_invalid { trade.price } else { 0.0 });
             trade.exit_type = Some("resolution".to_string());
             trade.resolved_at = Some(Utc::now());

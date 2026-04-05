@@ -1,24 +1,9 @@
-/// Confidence-based sizing: maps signal confidence (0-1) to bankroll %.
+/// Flat sizing: all bets get the same bankroll %.
 ///
-/// Confidence is derived from the bet price: (price × 1.10).min(0.95).
-/// Based on 4-week Cannae analysis (142 trades):
-///   < 0.60 → 2.5%  (close games, lower ROI)
-///   0.60-0.70 → 5.0%
-///   0.70-0.80 → 10.0% (best ROI bucket)
-///   0.80-0.90 → 5.0%  (anomaly: n=17, pending more data)
-///   ≥ 0.90 → 10.0%  (strong favorites, solid ROI)
-pub fn confidence_pct(confidence: f64) -> f64 {
-    if confidence >= 0.90 {
-        10.0
-    } else if confidence >= 0.80 {
-        5.0
-    } else if confidence >= 0.70 {
-        10.0
-    } else if confidence >= 0.60 {
-        5.0
-    } else {
-        2.5
-    }
+/// Previously confidence-based (2.5%-10%), now flat 3% pending SSOT
+/// game-level analysis to validate whether variable sizing adds value.
+pub fn confidence_pct(_confidence: f64) -> f64 {
+    3.0
 }
 
 /// Flat sizing: bankroll × pct / price = shares.

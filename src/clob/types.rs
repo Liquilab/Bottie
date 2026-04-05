@@ -295,6 +295,19 @@ impl GammaMarketStatus {
         None
     }
 
+    /// Returns the price for a specific outcome (e.g., "Yes" → 0.65).
+    /// Used by resolver to capture closing line before settlement.
+    pub fn outcome_price_for(&self, outcome_name: &str) -> Option<f64> {
+        let outcomes = self.parse_string_array(&self.outcomes)?;
+        let prices = self.parse_string_array(&self.outcome_prices)?;
+        for (outcome, price_str) in outcomes.iter().zip(prices.iter()) {
+            if outcome.eq_ignore_ascii_case(outcome_name) {
+                return price_str.parse().ok();
+            }
+        }
+        None
+    }
+
     fn parse_string_array(&self, val: &Option<serde_json::Value>) -> Option<Vec<String>> {
         match val {
             Some(serde_json::Value::String(s)) => serde_json::from_str(s).ok(),

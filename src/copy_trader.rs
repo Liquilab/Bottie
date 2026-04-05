@@ -559,35 +559,31 @@ impl CopyTrader {
     }
 
     fn detect_sport(title: &str, event_slug: &str) -> String {
-        let combined = format!("{} {}", title.to_lowercase(), event_slug.to_lowercase());
-        if combined.contains("nba") || combined.contains("basketball") {
+        // Primary: slug prefix IS the league identifier (e.g. "bun-fre-bay-2026-04-04" → "bun")
+        // No hardcoded list needed — all sports use consistent slug prefixes on Polymarket.
+        let slug_prefix = event_slug.split('-').next().unwrap_or("");
+        if !slug_prefix.is_empty() {
+            return slug_prefix.to_string();
+        }
+
+        // Fallback: keyword match for trades without slug (sync.rs manual imports)
+        let lower = title.to_lowercase();
+        if lower.contains("nba") || lower.contains("basketball") {
             "nba".to_string()
-        } else if combined.contains("nfl") {
+        } else if lower.contains("nfl") {
             "nfl".to_string()
-        } else if combined.contains("nhl") || combined.contains("hockey") {
+        } else if lower.contains("nhl") || lower.contains("hockey") {
             "nhl".to_string()
-        } else if combined.contains("mlb") || combined.contains("baseball") {
+        } else if lower.contains("mlb") || lower.contains("baseball") {
             "mlb".to_string()
-        } else if combined.contains("soccer")
-            || combined.contains("epl")
-            || combined.contains("premier league")
-            || combined.contains("champions league")
-            || combined.contains("ucl")
-        {
-            "soccer".to_string()
-        } else if combined.contains("tennis") || combined.contains("atp") || combined.contains("wta")
-        {
+        } else if lower.contains("tennis") || lower.contains("atp") || lower.contains("wta") {
             "tennis".to_string()
-        } else if combined.contains("mma") || combined.contains("ufc") {
+        } else if lower.contains("mma") || lower.contains("ufc") {
             "mma".to_string()
-        } else if combined.contains("esport")
-            || combined.contains("dota")
-            || combined.contains("cs2")
-            || combined.contains("csgo")
-        {
+        } else if lower.contains("esport") || lower.contains("dota") || lower.contains("cs2") || lower.contains("csgo") {
             "esports".to_string()
         } else {
-            "other".to_string()
+            "unknown".to_string()
         }
     }
 }
