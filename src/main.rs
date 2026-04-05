@@ -1,3 +1,4 @@
+mod blind_fade;
 mod budget;
 mod clob;
 mod config;
@@ -221,6 +222,17 @@ async fn main() -> Result<()> {
         })
     };
 
+    let blind_fade_handle = {
+        let client = client.clone();
+        let config = shared_config.clone();
+        let logger = logger.clone();
+        let risk = risk.clone();
+
+        tokio::spawn(async move {
+            blind_fade::blind_fade_loop(client, config, logger, risk).await;
+        })
+    };
+
     // Status report loop
     let status_handle = {
         let logger = logger.clone();
@@ -277,6 +289,9 @@ async fn main() -> Result<()> {
         }
         _ = odds_handle => {
             error!("odds arb loop exited unexpectedly");
+        }
+        _ = blind_fade_handle => {
+            error!("blind fade loop exited unexpectedly");
         }
     }
 

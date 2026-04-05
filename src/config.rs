@@ -102,6 +102,8 @@ pub struct AppConfig {
     pub schedule: ScheduleConfig,
     #[serde(default)]
     pub sport_sizing: SportSizingConfig,
+    #[serde(default)]
+    pub blind_fade: BlindFadeConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -488,6 +490,48 @@ impl SportSizingConfig {
         }
     }
 }
+
+/// Blind fade strategy: WIN NO on favorite + DRAW YES on all football games.
+/// Entirely config-driven. When enabled=false (default), zero code paths are touched.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BlindFadeConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Poll interval in seconds (how often to scan for new games)
+    #[serde(default = "blind_fade_default_poll")]
+    pub poll_interval_seconds: u64,
+    /// Fixed bet size per leg in USDC (e.g. 2.50)
+    #[serde(default = "blind_fade_default_size")]
+    pub flat_size_usdc: f64,
+    /// WIN NO minimum price (e.g. 0.30)
+    #[serde(default = "blind_fade_default_min_price")]
+    pub win_no_min_price: f64,
+    /// WIN NO maximum price (e.g. 0.50)
+    #[serde(default = "blind_fade_default_max_price")]
+    pub win_no_max_price: f64,
+    /// Sport tags to scan (e.g. ["soccer"])
+    #[serde(default = "blind_fade_default_sports")]
+    pub sport_tags: Vec<String>,
+}
+
+impl Default for BlindFadeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval_seconds: 300,
+            flat_size_usdc: 2.50,
+            win_no_min_price: 0.30,
+            win_no_max_price: 0.50,
+            sport_tags: vec!["soccer".to_string()],
+        }
+    }
+}
+
+fn blind_fade_default_poll() -> u64 { 300 }
+fn blind_fade_default_size() -> f64 { 2.50 }
+fn blind_fade_default_min_price() -> f64 { 0.30 }
+fn blind_fade_default_max_price() -> f64 { 0.50 }
+fn blind_fade_default_sports() -> Vec<String> { vec!["soccer".to_string()] }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AutoresearchParams {
