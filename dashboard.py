@@ -1397,6 +1397,7 @@ def page_wrap(active_page, body_html, token="", account="cannae"):
         ("Edge", "/edge"),
         ("Ops", "/ops"),
         ("Intel", "/intel"),
+        ("SSOT", "/ssot"),
         ("Settings", "/settings"),
     ]
     nav = ""
@@ -1867,16 +1868,16 @@ def render_overview(trades, wallet_map, account="cannae"):
         body  = render_kpi_row(giyn_kpis, giyn_wallets, giyn_trades, funder=GIYN_FUNDER, label="GIYN (bottie-test)")
         body += f"""
     <div class="section">
+      <div class="section-title">Dagelijkse P&L</div>
+      {render_daily_pnl(giyn_trades)}
+    </div>
+    <div class="section">
       <div class="section-title">Live Board — GIYN</div>
       {render_live_board(giyn_trades, service="bottie-test")}
     </div>
     <div class="section">
       <div class="section-title">Open Bets ({giyn_open})</div>
       {render_open_bets(giyn_trades, giyn_wallets)}
-    </div>
-    <div class="section">
-      <div class="section-title">Dagelijkse P&L</div>
-      {render_daily_pnl(giyn_trades)}
     </div>
     <div class="section">
       <div class="section-title">Per Sport</div>
@@ -1896,16 +1897,16 @@ def render_overview(trades, wallet_map, account="cannae"):
     body += f"""<div class="section">{render_giyn_section()}</div>"""
     body += f"""
     <div class="section">
+      <div class="section-title">Dagelijkse P&L</div>
+      {render_daily_pnl(trades)}
+    </div>
+    <div class="section">
       <div class="section-title">Live Board — Cannae</div>
       {render_live_board(trades, service="bottie")}
     </div>
     <div class="section">
       <div class="section-title">Open Bets ({count_real_open_bets(trades)})</div>
       {render_open_bets(trades, wallet_map)}
-    </div>
-    <div class="section">
-      <div class="section-title">Dagelijkse P&L</div>
-      {render_daily_pnl(trades)}
     </div>
     <div class="section">
       <div class="section-title">Per Sport</div>
@@ -2931,6 +2932,108 @@ def render_settings_page(token=""):
     return page_wrap("/settings", body, token)
 
 
+# ── SSOT Analysis Page ────────────────────────────────────────────────────────
+
+def render_ssot_page(token="", account="cannae"):
+    """Render the SSOT analysis page using scripts/ssot.py."""
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(CODE_DIR))
+        from scripts.ssot import build_report
+        trades_path = TRADES_FILE
+        report = build_report(trades_path)
+    except Exception as e:
+        import traceback
+        return page_wrap("/ssot", f'<div class="section"><pre>SSOT Error: {e}\n{traceback.format_exc()}</pre></div>', token, account=account)
+
+    s = report["summary"]
+
+    # Summary card
+    pnl_color = "#3fb950" if s["total_pnl"] >= 0 else "#f85149"
+    summary_html = f"""
+    <div class="section">
+      <div class="section-title">Summary — {s['total_games']} games</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:12px">
+        <div class="card"><div class="card-label">Win Rate</div><div class="card-value">{s['wr']}%</div><div class="card-sub">[{s['wr_ci'][0]}-{s['wr_ci'][1]}%] CI</div></div>
+        <div class="card"><div class="card-label">PnL</div><div class="card-value" style="color:{pnl_color}">${s['total_pnl']:+.2f}</div></div>
+        <div class="card"><div class="card-label">ROI</div><div class="card-value">{s['roi']}%</div></div>
+        <div class="card"><div class="card-label">Record</div><div class="card-value">{s['wins']}W / {s['losses']}L</div></div>
+      </div>
+    </div>"""
+
+    # Combo table
+    combo_rows = ""
+    for combo, cs in report["by_combo"].items():
+        pnl_c = "#3fb950" if cs["pnl"] >= 0 else "#f85149"
+        combo_rows += f"""<tr>
+          <td><strong>{combo}</strong></td><td>{cs['games']}</td>
+          <td>{cs['wins']}W/{cs['losses']}L</td><td>{cs['wr']}%</td>
+          <td style="color:#8b949e">[{cs['wr_ci'][0]}-{cs['wr_ci'][1]}%]</td>
+          <td style="color:{pnl_c}">${cs['pnl']:+.2f}</td><td>{cs['roi']}%</td></tr>"""
+
+    combo_html = f"""
+    <div class="section">
+      <div class="section-title">Per Game Combination</div>
+      <table><thead><tr><th>Combo</th><th>Games</th><th>W/L</th><th>WR%</th><th>CI</th><th>PnL</th><th>ROI</th></tr></thead>
+      <tbody>{combo_rows}</tbody></table>
+    </div>"""
+
+    # League table — only show leagues with >= 1 game, skip "other"
+    league_rows = ""
+    for league, ls in report["by_league"].items():
+        if league == "other":
+            continue
+        pnl_c = "#3fb950" if ls["pnl"] >= 0 else "#f85149"
+        league_rows += f"""<tr>
+          <td><strong>{league}</strong></td><td>{ls['sport']}</td><td>{ls['games']}</td>
+          <td>{ls['wins']}W/{ls['losses']}L</td><td>{ls['wr']}%</td>
+          <td style="color:#8b949e">[{ls['wr_ci'][0]}-{ls['wr_ci'][1]}%]</td>
+          <td style="color:{pnl_c}">${ls['pnl']:+.2f}</td><td>{ls['roi']}%</td></tr>"""
+
+    league_html = f"""
+    <div class="section">
+      <div class="section-title">Per League</div>
+      <table><thead><tr><th>League</th><th>Sport</th><th>Games</th><th>W/L</th><th>WR%</th><th>CI</th><th>PnL</th><th>ROI</th></tr></thead>
+      <tbody>{league_rows}</tbody></table>
+    </div>"""
+
+    # CLV
+    clv = report["clv"]
+    if clv.get("available"):
+        clv_html = f"""
+    <div class="section">
+      <div class="section-title">CLV Analysis</div>
+      <p>Mean CLV: <strong>{clv['mean_clv']:+.4f}</strong> | +CLV: {clv['positive_clv']} trades (WR {clv['pos_wr']}%) | -CLV: {clv['negative_clv']} trades (WR {clv['neg_wr']}%)</p>
+    </div>"""
+    else:
+        clv_html = f"""
+    <div class="section">
+      <div class="section-title">CLV Analysis</div>
+      <p style="color:#8b949e">{clv.get('message', 'No data yet')}</p>
+    </div>"""
+
+    # Correlation
+    corr = report["correlation"]
+    corr_html = f"""
+    <div class="section">
+      <div class="section-title">Correlation Analysis</div>
+      <p>Multi-leg games: <strong>{corr['multi_leg_games']}</strong></p>"""
+    wn = corr.get("win_no_draw_yes", {})
+    if wn.get("total", 0) > 0:
+        corr_html += f"""<p>WIN_NO+DRAW_YES: {wn['total']} games — both win: {wn['both_win']}, both lose: {wn['both_lose']}, mixed: {wn['mixed']} (<strong>{wn['correlation']}</strong> correlation)</p>"""
+    corr_html += "</div>"
+
+    # Daily PnL chart (simple bar)
+    daily_html = '<div class="section"><div class="section-title">Daily PnL</div><table><thead><tr><th>Date</th><th>Games</th><th>WR</th><th>PnL</th></tr></thead><tbody>'
+    for d in report["daily"]:
+        pnl_c = "#3fb950" if d["pnl"] >= 0 else "#f85149"
+        daily_html += f'<tr><td>{d["date"]}</td><td>{d["games"]}</td><td>{d["wr"]}%</td><td style="color:{pnl_c}">${d["pnl"]:+.2f}</td></tr>'
+    daily_html += "</tbody></table></div>"
+
+    body = summary_html + combo_html + league_html + clv_html + corr_html + daily_html
+    return page_wrap("/ssot", body, token, account=account)
+
+
 # ── HTTP Server ───────────────────────────────────────────────────────────────
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -2976,6 +3079,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if page == "/settings":
             try:
                 html = render_settings_page(token)
+                self._send_html(html)
+            except Exception as e:
+                import traceback
+                self._send_html(f"<pre>Error: {e}\n{traceback.format_exc()}</pre>", 500)
+        elif page == "/ssot":
+            try:
+                html = render_ssot_page(token, account=account)
                 self._send_html(html)
             except Exception as e:
                 import traceback
