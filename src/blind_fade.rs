@@ -27,6 +27,8 @@ struct FootballEvent {
     win_a: Option<PolymarketSportsMatch>,
     win_b: Option<PolymarketSportsMatch>,
     draw: Option<PolymarketSportsMatch>,
+    /// Earliest end_date from any market in this event
+    end_date: Option<String>,
 }
 
 /// Main blind fade loop. Scans football markets and places WIN NO + DRAW YES.
@@ -91,8 +93,31 @@ async fn run_blind_fade_cycle(
     }
 
     // Group by event
-    let events = group_football_events(&pm_markets);
-    info!("BLIND_FADE: {} football events found ({} markets)", events.len(), pm_markets.len());
+    let all_events = group_football_events(&pm_markets);
+
+    // CRITICAL: only buy games starting within 75 minutes (avoid locking capital in distant games)
+    let now = chrono::Utc::now();
+    let events: Vec<_> = all_events.into_iter().filter(|e| {
+        let end_str = match &e.end_date {
+            Some(s) => s,
+            None => return false, // no date = skip
+        };
+        // Parse end_date (game date, not actual end time)
+        let end_dt = chrono::DateTime::parse_from_rfc3339(end_str)
+            .or_else(|_| chrono::DateTime::parse_from_str(end_str, "%Y-%m-%dT%H:%M:%S%.fZ"))
+            .or_else(|_| chrono::DateTime::parse_from_str(end_str, "%Y-%m-%dT%H:%M:%SZ"));
+        match end_dt {
+            Ok(dt) => {
+                let until = dt.signed_duration_since(now);
+                let mins = until.num_minutes();
+                // Game starts within 75 min AND hasn't ended yet (> -120 min grace for late resolution)
+                mins <= 75 && mins > -120
+            }
+            Err(_) => false,
+        }
+    }).collect();
+
+    info!("BLIND_FADE: {} upcoming events (within 75min) out of {} total", events.len(), pm_markets.len());
 
     let mut placed = 0u32;
 
@@ -119,13 +144,30 @@ async fn run_blind_fade_cycle(
             continue;
         }
 
+        // MUST have draw market — both legs are required, never place orphan bets
+        let draw = match &event.draw {
+            Some(d) => d,
+            None => {
+                info!("BLIND_FADE: SKIP {} — no draw market found", event.event_title);
+                continue;
+            }
+        };
+
+        // Pre-flight: need enough cash for BOTH legs ($2.50 + $2.50 = $5.00)
+        let required = fade_config.flat_size_usdc * 2.0;
+        let bankroll = risk.read().await.bankroll();
+        if bankroll < required {
+            info!("BLIND_FADE: SKIP {} — bankroll ${:.2} < ${:.2} required", event.event_title, bankroll, required);
+            continue;
+        }
+
         info!(
-            "BLIND_FADE: {} | fav={} (YES {:.0}ct) | WIN NO {:.0}ct | draw {}",
+            "BLIND_FADE: {} | fav={} (YES {:.0}ct) | WIN NO {:.0}ct | draw YES {:.0}ct",
             event.event_title,
             extract_team_from_title(&fav_market.title),
             fav_market.yes_price * 100.0,
             win_no_price * 100.0,
-            event.draw.as_ref().map(|d| format!("YES {:.0}ct", d.yes_price * 100.0)).unwrap_or_else(|| "N/A".to_string()),
+            draw.yes_price * 100.0,
         );
 
         // Leg 1: WIN NO on favorite
@@ -138,21 +180,26 @@ async fn run_blind_fade_cycle(
             &fav_market.sport,
         );
 
-        let size_pct = fade_config.flat_size_usdc / risk.read().await.bankroll() * 100.0;
-        if size_pct > 0.0 {
+        let size_pct = fade_config.flat_size_usdc / bankroll * 100.0;
+        let leg1_ok = {
             let mut risk_guard = risk.write().await;
             match executor.execute_flat(&win_no_signal, &mut risk_guard, logger, true, size_pct).await {
                 Ok(true) => {
                     placed += 1;
                     info!("BLIND_FADE: FILLED WIN NO {} @ {:.0}ct", fav_market.title, win_no_price * 100.0);
+                    true
                 }
-                Ok(false) => {} // skipped (dedup, risk, etc)
-                Err(e) => warn!("BLIND_FADE: WIN NO error: {e}"),
+                Ok(false) => false, // skipped (dedup, risk, etc)
+                Err(e) => { warn!("BLIND_FADE: WIN NO error: {e}"); false }
             }
+        };
+
+        // Leg 2: DRAW YES — ONLY if leg 1 succeeded (keep legs paired)
+        if !leg1_ok {
+            continue;
         }
 
-        // Leg 2: DRAW YES (no price filter on draw)
-        if let Some(ref draw) = event.draw {
+        {
             let draw_signal = build_signal(
                 &draw.yes_token_id,
                 &draw.condition_id,
@@ -251,10 +298,16 @@ fn group_football_events(pm_markets: &[PolymarketSportsMatch]) -> Vec<FootballEv
                     win_a: None,
                     win_b: None,
                     draw: None,
+                    end_date: pm.end_date.clone(),
                 });
                 events.last_mut().unwrap()
             }
         };
+
+        // Update end_date if this market has one and group doesn't yet
+        if group.end_date.is_none() {
+            group.end_date = pm.end_date.clone();
+        }
 
         if is_draw {
             group.draw = Some(pm.clone());
