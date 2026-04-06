@@ -319,7 +319,8 @@ async fn copy_trading_loop(
     // Two-phase schedule state
     let mut game_schedule = scheduler::GameSchedule::load_from_disk(std::path::Path::new("data/schedule_cache.json"));
     let mut watched_games: Vec<scheduler::WatchedGame> = Vec::new(); // continuously discovered, waiting for T-5
-    let mut t5_executed: HashSet<String> = HashSet::new(); // event_slugs already bought
+    let mut t5_executed: HashSet<String> = HashSet::new(); // event_slugs already bought at T-5
+    let mut t1_executed: HashSet<String> = HashSet::new(); // event_slugs re-checked at T-1
 
     // Cannae position summary: log every ~30 min (120 polls × 15s = 30 min)
     let cannae_summary_every_n: u32 = 120;
@@ -491,6 +492,44 @@ async fn copy_trading_loop(
                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         }
                         // If not executed (league filter, no bets), let another wallet try
+                    }
+
+                    // 4. T-1 second pass: re-check games close to kickoff to catch late
+                    //    Cannae trades that arrived after T-5 already fired. Uses fresh
+                    //    raw_positions; condition-level dedup (attempted set) prevents
+                    //    double-buying legs already filled at T-5.
+                    let t1_matches = scheduler::confirm_and_execute_t5(
+                        &watched_games,
+                        &watchlist,
+                        schedule_cfg.t1_minutes,
+                        &t1_executed,
+                        &raw_positions,
+                    );
+
+                    for t1_match in &t1_matches {
+                        if t1_executed.contains(&t1_match.game_event_slug) {
+                            continue;
+                        }
+                        let game = stability::StableGame {
+                            event_slug: t1_match.game_event_slug.clone(),
+                            positions: t1_match.positions.clone(),
+                            source_wallet: t1_match.wallet_address.clone(),
+                            source_name: t1_match.wallet_name.clone(),
+                        };
+                        info!(
+                            "T1 EXECUTE: {} from {} ({} positions, t5_already={})",
+                            game.event_slug, game.source_name,
+                            t1_match.positions.len(),
+                            t5_executed.contains(&t1_match.game_event_slug),
+                        );
+                        let executed = execute_stable_game(
+                            &game, &mut executor, &risk, &logger, &config, true,
+                            &client, &game_schedule,
+                        ).await;
+                        if executed {
+                            t1_executed.insert(t1_match.game_event_slug.clone());
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
                     }
 
                     // Cleanup: remove watched games that have already started (past due)

@@ -140,6 +140,7 @@ schedule:
   enabled: true
   t_minus_minutes: 240
   t5_minutes: 5
+  t1_minutes: 1
   refresh_interval_minutes: 60
   taker_mode: true
   sport_tags:
