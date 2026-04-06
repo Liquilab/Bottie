@@ -8,6 +8,7 @@ mod odds;
 mod portfolio;
 mod resolver;
 mod risk;
+mod rules;
 mod scheduler;
 mod signal;
 mod signing;
@@ -77,6 +78,9 @@ async fn main() -> Result<()> {
     let config_path = PathBuf::from(&cli.config);
     let app_config = AppConfig::load(&config_path)?;
     let shared_config: SharedConfig = Arc::new(RwLock::new(app_config));
+
+    // Load SSOT Pilaar 1 — declarative trading rules. Panics if missing/invalid.
+    rules::load("data/ssot/rules.yaml");
 
     // Create signer
     let signer: PrivateKeySigner = bot_config
@@ -592,10 +596,11 @@ async fn execute_stable_game(
 
         if let Some(pos) = hauptbet {
             let price = pos.avg_price_f64();
-            // NBA: minimum price filter (skip weak favorites / underdogs)
-            if league == "nba" && price < 0.65 {
-                info!("SKIP: {} — NBA price {:.2} < 0.65 minimum ({})",
-                    pos.title.as_deref().unwrap_or(""), price, gl);
+            // NBA min price (SSOT Pilaar 1, rules.yaml: nba_min_price)
+            let nba_min = rules::global().nba_min_price;
+            if league == "nba" && price < nba_min {
+                info!("SKIP: {} — NBA price {:.2} < {:.2} minimum ({})",
+                    pos.title.as_deref().unwrap_or(""), price, nba_min, gl);
                 continue;
             }
             // Confidence-based sizing from bet price
@@ -810,6 +815,21 @@ async fn execute_stable_game(
         }
     }
 
+    // SSOT Pilaar 1, Regel 1 — WIN YES ban (rules.yaml: win_yes_ban.enabled)
+    if rules::global().win_yes_ban.enabled {
+        let had_win_yes = bets.iter().any(|b| b.game_line == "win"
+            && b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("Yes"));
+        if had_win_yes {
+            bets.retain(|b| !(b.game_line == "win"
+                && b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("Yes")));
+            if bets.is_empty() {
+                info!("GAME SKIP: {} — WIN YES dropped, no other legs", game.event_slug);
+                return false;
+            }
+            info!("GAME MODE: {} — WIN YES dropped, keeping {} remaining legs", game.event_slug, bets.len());
+        }
+    }
+
     // Confidence-based dynamic sizing: override placeholder size_pct (skip fixed-size bets)
     for b in bets.iter_mut() {
         if b.fixed_size { continue; }
@@ -818,21 +838,39 @@ async fn execute_stable_game(
         b.size_pct = crate::sizing::confidence_pct(conf);
     }
 
-    // Minimum price filter: skip bets below 20ct (except draw YES — low-odds draw hedge is valid)
-    bets.retain(|b| {
-        let price = b.pos.avg_price_f64();
-        if price < 0.20 {
-            let is_draw_yes = b.game_line == "draw"
-                && b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("Yes");
-            if !is_draw_yes {
-                info!("SKIP: price {:.2} < 0.20 minimum — {} {} {}",
-                    price, b.pos.outcome.as_deref().unwrap_or(""), b.game_line,
-                    b.pos.title.as_deref().unwrap_or(""));
-                return false;
+    // SSOT Pilaar 1, Regel 3 — Prijsband per leg-type (rules.yaml: price_band)
+    // DRAW YES bypasses per Regel 4 (min/max null in rules.yaml).
+    {
+        let band = &rules::global().price_band;
+        bets.retain(|b| {
+            let price = b.pos.avg_price_f64();
+            let outcome = b.pos.outcome.as_deref().unwrap_or("");
+            let is_yes = outcome.eq_ignore_ascii_case("Yes");
+            let leg_band = match (b.game_line.as_str(), is_yes) {
+                ("draw", true) => &band.draw_yes,
+                ("draw", false) => &band.draw_no,
+                ("win", false) => &band.win_no,
+                _ => &band.win_no, // win+yes shouldn't reach here (banned in Regel 1)
+            };
+            if let Some(min) = leg_band.min {
+                if price < min {
+                    info!("SKIP: price {:.2} < {:.2} minimum — {} {} {}",
+                        price, min, outcome, b.game_line,
+                        b.pos.title.as_deref().unwrap_or(""));
+                    return false;
+                }
             }
-        }
-        true
-    });
+            if let Some(max) = leg_band.max {
+                if price > max {
+                    info!("SKIP: price {:.2} > {:.2} maximum — {} {} {}",
+                        price, max, outcome, b.game_line,
+                        b.pos.title.as_deref().unwrap_or(""));
+                    return false;
+                }
+            }
+            true
+        });
+    }
 
     // Safety cap: max 10% total per game
     let total_pct: f64 = bets.iter().map(|b| b.size_pct).sum();

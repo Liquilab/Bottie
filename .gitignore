@@ -11,8 +11,11 @@ private/
 tmp/
 
 # Data — ephemeral, fetched from APIs
-data/
+data/*
 !data/.gitkeep
+!data/ssot/
+data/ssot/*
+!data/ssot/*.yaml
 
 # Research data lake — too large for git
 research/data_lake/
