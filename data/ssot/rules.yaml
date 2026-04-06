@@ -1,0 +1,33 @@
+# Bottie SSOT — Pilaar 1: Inkoopregels
+# Single source of truth voor harde trading-regels.
+# Wijzigingen vereisen rebuild + deploy (geen hot-reload in fase 1).
+
+schema_version: 1
+rules_version: "2026-04-06-a"
+last_updated: "2026-04-06T10:50:00Z"
+instance_id: "cannae"
+
+# Regel 1 — WIN YES ban (structureel slechtste leg)
+win_yes_ban:
+  enabled: true
+  flip_to_opp_no: true   # probeer eerst OPP_NO, drop als fallback
+
+# Regel 2 — Alleen WIN en DRAW markten, nooit MORE MARKETS
+allowed_game_lines: ["win", "draw"]
+forbidden_slug_suffixes: ["-more-markets"]
+
+# Regel 3 — Prijsband per leg-type
+# DRAW YES is ongefilterd per user rule (min/max null)
+price_band:
+  win_no:
+    min: 0.30
+    max: 0.95
+  draw_no:
+    min: 0.30
+    max: 0.95
+  draw_yes:
+    min: null
+    max: null
+
+# Bonus regels (al aanwezig in code, hier gedocumenteerd)
+nba_min_price: 0.65

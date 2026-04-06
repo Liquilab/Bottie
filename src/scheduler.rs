@@ -389,6 +389,12 @@ pub fn confirm_and_execute_t5(
     let strip_more = |s: &str| s.trim_end_matches("-more-markets").to_string();
 
     for game in &due_games {
+        // SSOT Pilaar 1, Regel 2 — forbidden slug suffixes (rules.yaml).
+        // Skip "-more-markets" events — same game, different condition_ids.
+        // Positions are already matched via strip_more() on the base event.
+        if crate::rules::is_forbidden_slug(&game.event_slug) {
+            continue;
+        }
         let game_slug_base = strip_more(&game.event_slug);
 
         // Try ALL wallets that have positions in this game (not just the first).
