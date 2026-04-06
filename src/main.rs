@@ -319,7 +319,8 @@ async fn copy_trading_loop(
     // Two-phase schedule state
     let mut game_schedule = scheduler::GameSchedule::load_from_disk(std::path::Path::new("data/schedule_cache.json"));
     let mut watched_games: Vec<scheduler::WatchedGame> = Vec::new(); // continuously discovered, waiting for T-5
-    let mut t5_executed: HashSet<String> = HashSet::new(); // event_slugs already bought
+    let mut t5_executed: HashSet<String> = HashSet::new(); // event_slugs already bought at T-5
+    let mut t1_executed: HashSet<String> = HashSet::new(); // event_slugs re-checked at T-1
 
     // Cannae position summary: log every ~30 min (120 polls × 15s = 30 min)
     let cannae_summary_every_n: u32 = 120;
@@ -438,7 +439,8 @@ async fn copy_trading_loop(
                         watched_games.extend(new_watched);
                     }
 
-                    // 3. T-5 Confirm+Buy: use pre-fetched positions (no extra API calls)
+                    // 3. T-5 Confirm+Buy: use pre-fetched positions (no extra API calls).
+                    //    Window = 0..t5_minutes (explicit, no hidden cushion).
                     let t5_matches = scheduler::confirm_and_execute_t5(
                         &watched_games,
                         &watchlist,
@@ -449,6 +451,14 @@ async fn copy_trading_loop(
 
                     // Always use latest config for sizing (hot-reload may have changed %)
                     wave_budget.update_config(config.read().await.sport_sizing.clone());
+
+                    // Per-poll dedup: T-5 and T-1 windows overlap (e.g. 0..12 vs 0..3),
+                    // so a game in the 0..3 zone could trigger both passes in the same
+                    // poll cycle. Track every game T-5 *evaluated* this iteration so the
+                    // T-1 pass skips it within the same poll. Reset every loop iteration —
+                    // on the next poll, T-5 will skip via t5_executed and T-1 will get
+                    // its own fresh shot at any newly-arrived Cannae positions.
+                    let mut tried_this_poll: HashSet<String> = HashSet::new();
 
                     // Sort T5 matches by Cannae game total DESC (biggest games first)
                     let mut t5_sorted = t5_matches;
@@ -469,6 +479,8 @@ async fn copy_trading_loop(
                         if t5_executed.contains(&t5_match.game_event_slug) {
                             continue;
                         }
+                        // Mark as tried this poll cycle so the T-1 pass below skips it.
+                        tried_this_poll.insert(t5_match.game_event_slug.clone());
                         let game = stability::StableGame {
                             event_slug: t5_match.game_event_slug.clone(),
                             positions: t5_match.positions.clone(),
@@ -491,6 +503,66 @@ async fn copy_trading_loop(
                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         }
                         // If not executed (league filter, no bets), let another wallet try
+                    }
+
+                    // 4. T-1 second pass: re-check games close to kickoff to catch late
+                    //    Cannae trades that arrived after T-5 already fired. Uses fresh
+                    //    raw_positions; condition-level dedup (attempted set) prevents
+                    //    double-buying legs already filled at T-5.
+                    //    Window = 0..t1_minutes (explicit, no hidden cushion — fires at
+                    //    actual T-1, not T-3 like the old +2 cushion would have caused).
+                    let t1_matches = scheduler::confirm_and_execute_t5(
+                        &watched_games,
+                        &watchlist,
+                        schedule_cfg.t1_minutes,
+                        &t1_executed,
+                        &raw_positions,
+                    );
+
+                    // Same sort as T-5: biggest Cannae games first so they get priority
+                    // when capital allocation is tight.
+                    let mut t1_sorted = t1_matches;
+                    t1_sorted.sort_by(|a, b| {
+                        let a_total = wave_budget.cannae_games
+                            .get(&a.game_event_slug)
+                            .map(|g| g.total_usdc)
+                            .unwrap_or(0.0);
+                        let b_total = wave_budget.cannae_games
+                            .get(&b.game_event_slug)
+                            .map(|g| g.total_usdc)
+                            .unwrap_or(0.0);
+                        b_total.partial_cmp(&a_total).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+
+                    for t1_match in &t1_sorted {
+                        // Same-poll dedup: skip if T-5 already evaluated this game in
+                        // this iteration. Next poll cycle resets tried_this_poll.
+                        if tried_this_poll.contains(&t1_match.game_event_slug) {
+                            continue;
+                        }
+                        if t1_executed.contains(&t1_match.game_event_slug) {
+                            continue;
+                        }
+                        let game = stability::StableGame {
+                            event_slug: t1_match.game_event_slug.clone(),
+                            positions: t1_match.positions.clone(),
+                            source_wallet: t1_match.wallet_address.clone(),
+                            source_name: t1_match.wallet_name.clone(),
+                        };
+                        info!(
+                            "T1 EXECUTE: {} from {} ({} positions, t5_bought={})",
+                            game.event_slug, game.source_name,
+                            t1_match.positions.len(),
+                            t5_executed.contains(&t1_match.game_event_slug),
+                        );
+                        let executed = execute_stable_game(
+                            &game, &mut executor, &risk, &logger, &config, true,
+                            &client, &game_schedule,
+                        ).await;
+                        if executed {
+                            t1_executed.insert(t1_match.game_event_slug.clone());
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
                     }
 
                     // Cleanup: remove watched games that have already started (past due)
