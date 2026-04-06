@@ -139,7 +139,7 @@ sport_sizing:
 schedule:
   enabled: true
   t_minus_minutes: 240
-  t5_minutes: 10
+  t5_minutes: 12
   t1_minutes: 1
   refresh_interval_minutes: 60
   taker_mode: true

@@ -352,27 +352,30 @@ pub fn discover_continuous_from_positions(
     watched_games.into_values().collect()
 }
 
-/// T-5 Confirm + Execute: For watched games starting in ~5 min,
+/// Confirm + Execute: For watched games starting within `window_minutes`,
 /// re-fetch wallet positions, compare with T-30 snapshot, return confirmed matches.
 /// Uses pre-fetched positions from the poll loop (no extra API calls).
+///
+/// `window_minutes` is the explicit upper bound (in minutes-to-kickoff). No hidden cushion.
+/// Caller is responsible for picking the correct window per phase (e.g. 12 for T-5/T-10, 1 for T-1).
 pub fn confirm_and_execute_t5(
     watched_games: &[WatchedGame],
     watchlist: &[WatchlistEntry],
-    t5_minutes: u32,
-    t5_executed: &HashSet<String>,
+    window_minutes: u32,
+    already_executed: &HashSet<String>,
     raw_positions: &[(String, String, Vec<WalletPosition>)],
 ) -> Vec<T5Match> {
     let now = Utc::now();
     let mut matches = Vec::new();
 
-    // Filter to games starting in 0..t5_minutes+2 window (with margin)
-    let window_max = chrono::Duration::minutes((t5_minutes as i64) + 2);
+    // Filter to games starting in 0..window_minutes
+    let window_max = chrono::Duration::minutes(window_minutes as i64);
     let due_games: Vec<&WatchedGame> = watched_games.iter()
         .filter(|g| {
             let until_start = g.start_time.signed_duration_since(now);
             until_start >= chrono::Duration::zero() && until_start <= window_max
         })
-        .filter(|g| !t5_executed.contains(&g.event_slug))
+        .filter(|g| !already_executed.contains(&g.event_slug))
         .collect();
 
     if due_games.is_empty() {

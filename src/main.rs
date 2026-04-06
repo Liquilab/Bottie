@@ -439,7 +439,8 @@ async fn copy_trading_loop(
                         watched_games.extend(new_watched);
                     }
 
-                    // 3. T-5 Confirm+Buy: use pre-fetched positions (no extra API calls)
+                    // 3. T-5 Confirm+Buy: use pre-fetched positions (no extra API calls).
+                    //    Window = 0..t5_minutes (explicit, no hidden cushion).
                     let t5_matches = scheduler::confirm_and_execute_t5(
                         &watched_games,
                         &watchlist,
@@ -508,6 +509,8 @@ async fn copy_trading_loop(
                     //    Cannae trades that arrived after T-5 already fired. Uses fresh
                     //    raw_positions; condition-level dedup (attempted set) prevents
                     //    double-buying legs already filled at T-5.
+                    //    Window = 0..t1_minutes (explicit, no hidden cushion — fires at
+                    //    actual T-1, not T-3 like the old +2 cushion would have caused).
                     let t1_matches = scheduler::confirm_and_execute_t5(
                         &watched_games,
                         &watchlist,
