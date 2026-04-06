@@ -451,6 +451,14 @@ async fn copy_trading_loop(
                     // Always use latest config for sizing (hot-reload may have changed %)
                     wave_budget.update_config(config.read().await.sport_sizing.clone());
 
+                    // Per-poll dedup: T-5 and T-1 windows overlap (e.g. 0..12 vs 0..3),
+                    // so a game in the 0..3 zone could trigger both passes in the same
+                    // poll cycle. Track every game T-5 *evaluated* this iteration so the
+                    // T-1 pass skips it within the same poll. Reset every loop iteration —
+                    // on the next poll, T-5 will skip via t5_executed and T-1 will get
+                    // its own fresh shot at any newly-arrived Cannae positions.
+                    let mut tried_this_poll: HashSet<String> = HashSet::new();
+
                     // Sort T5 matches by Cannae game total DESC (biggest games first)
                     let mut t5_sorted = t5_matches;
                     t5_sorted.sort_by(|a, b| {
@@ -470,6 +478,8 @@ async fn copy_trading_loop(
                         if t5_executed.contains(&t5_match.game_event_slug) {
                             continue;
                         }
+                        // Mark as tried this poll cycle so the T-1 pass below skips it.
+                        tried_this_poll.insert(t5_match.game_event_slug.clone());
                         let game = stability::StableGame {
                             event_slug: t5_match.game_event_slug.clone(),
                             positions: t5_match.positions.clone(),
@@ -506,7 +516,27 @@ async fn copy_trading_loop(
                         &raw_positions,
                     );
 
-                    for t1_match in &t1_matches {
+                    // Same sort as T-5: biggest Cannae games first so they get priority
+                    // when capital allocation is tight.
+                    let mut t1_sorted = t1_matches;
+                    t1_sorted.sort_by(|a, b| {
+                        let a_total = wave_budget.cannae_games
+                            .get(&a.game_event_slug)
+                            .map(|g| g.total_usdc)
+                            .unwrap_or(0.0);
+                        let b_total = wave_budget.cannae_games
+                            .get(&b.game_event_slug)
+                            .map(|g| g.total_usdc)
+                            .unwrap_or(0.0);
+                        b_total.partial_cmp(&a_total).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+
+                    for t1_match in &t1_sorted {
+                        // Same-poll dedup: skip if T-5 already evaluated this game in
+                        // this iteration. Next poll cycle resets tried_this_poll.
+                        if tried_this_poll.contains(&t1_match.game_event_slug) {
+                            continue;
+                        }
                         if t1_executed.contains(&t1_match.game_event_slug) {
                             continue;
                         }
@@ -517,7 +547,7 @@ async fn copy_trading_loop(
                             source_name: t1_match.wallet_name.clone(),
                         };
                         info!(
-                            "T1 EXECUTE: {} from {} ({} positions, t5_already={})",
+                            "T1 EXECUTE: {} from {} ({} positions, t5_bought={})",
                             game.event_slug, game.source_name,
                             t1_match.positions.len(),
                             t5_executed.contains(&t1_match.game_event_slug),
