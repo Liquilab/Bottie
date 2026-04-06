@@ -2,12 +2,20 @@
 Description=Bottie — Polymarket copy trading bot
 After=network-online.target
 Wants=network-online.target
+# Stop restart storms from wiping in-memory daily_pnl (Apr 5 2026 pattern).
+# After 3 failures in 60s, give up and require manual intervention.
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple
 User=bottie
 Group=bottie
 WorkingDirectory=/opt/bottie
+
+# SSOT Pilaar 1 — rules.yaml load asserts cfg.instance_id == BOTTIE_INSTANCE.
+# Must be "cannae" on /opt/bottie and "giyn" on /opt/bottie-test.
+Environment=BOTTIE_INSTANCE=cannae
 
 # Load secrets from .env file (not visible in process list)
 EnvironmentFile=/opt/bottie/.env

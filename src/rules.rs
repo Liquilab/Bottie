@@ -5,8 +5,13 @@
 //! scheduler.rs so that rule changes live in one place.
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use std::path::Path;
 use std::sync::OnceLock;
 use tracing::info;
+
+/// Schema version this binary expects. Bump when required fields change.
+pub const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RulesConfig {
@@ -42,18 +47,64 @@ pub struct Band {
 
 static RULES: OnceLock<RulesConfig> = OnceLock::new();
 
-/// Load rules from disk. Panics if file missing or invalid — SSOT must exist.
-pub fn load(path: &str) -> &'static RulesConfig {
-    let raw = std::fs::read_to_string(path)
+/// Load rules from disk. Panics if file missing, invalid, wrong schema,
+/// or `instance_id` mismatches the `BOTTIE_INSTANCE` env var.
+///
+/// The panic is intentional — systemd will log and exit. This is safer
+/// than silently falling back to hardcoded defaults.
+pub fn load(path: &str) {
+    // Resolve to absolute path for unambiguous logging / postmortem.
+    let abs_path = Path::new(path)
+        .canonicalize()
         .unwrap_or_else(|e| panic!("SSOT rules file missing at {}: {}", path, e));
+
+    let raw = std::fs::read_to_string(&abs_path)
+        .unwrap_or_else(|e| panic!("SSOT rules file unreadable at {}: {}", abs_path.display(), e));
+
+    // Hash BEFORE parse so we can attribute a parse failure to an exact file content.
+    let sha = Sha256::digest(raw.as_bytes());
+    let sha_hex: String = sha.iter().map(|b| format!("{:02x}", b)).collect();
+    let sha_short = &sha_hex[..12];
+
     let cfg: RulesConfig = serde_yaml::from_str(&raw)
-        .unwrap_or_else(|e| panic!("SSOT rules file invalid at {}: {}", path, e));
+        .unwrap_or_else(|e| panic!(
+            "SSOT rules file invalid at {} (sha256={}): {}",
+            abs_path.display(), sha_short, e
+        ));
+
+    // Schema-version guard — binary-vs-file drift detection.
+    if cfg.schema_version != SCHEMA_VERSION {
+        panic!(
+            "SSOT rules schema mismatch at {}: file says schema={}, binary expects schema={}",
+            abs_path.display(), cfg.schema_version, SCHEMA_VERSION
+        );
+    }
+
+    // Instance-scope guard — enforces Cannae/GIYN separation at load time.
+    // Each systemd unit MUST set BOTTIE_INSTANCE=cannae or =giyn.
+    let expected_instance = std::env::var("BOTTIE_INSTANCE").unwrap_or_else(|_| panic!(
+        "BOTTIE_INSTANCE env var not set — cannot validate rules.yaml instance_id. \
+         Set BOTTIE_INSTANCE=cannae (or =giyn) in the systemd unit."
+    ));
+    if cfg.instance_id != expected_instance {
+        panic!(
+            "SSOT rules instance mismatch at {}: file instance_id={:?} but BOTTIE_INSTANCE={:?}. \
+             This would apply the wrong instance's rules — refusing to boot.",
+            abs_path.display(), cfg.instance_id, expected_instance
+        );
+    }
+
     info!(
-        "SSOT RULES LOADED: version={} instance={} schema={} updated={}",
-        cfg.rules_version, cfg.instance_id, cfg.schema_version, cfg.last_updated
+        "SSOT RULES LOADED: version={} instance={} schema={} updated={} path={} sha256={}",
+        cfg.rules_version,
+        cfg.instance_id,
+        cfg.schema_version,
+        cfg.last_updated,
+        abs_path.display(),
+        sha_short,
     );
+
     RULES.set(cfg).expect("rules already loaded");
-    RULES.get().unwrap()
 }
 
 /// Access the global rules. Panics if load() was never called.
