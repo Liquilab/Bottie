@@ -616,21 +616,34 @@ async fn execute_stable_game(
         return false;
     }
 
-    // Min Cannae stake filter — sum only positions on COPYABLE lines (allowed_lines).
-    // For NBA: only Cannae's ML/win positions count (spread/OU excluded).
-    // For football: only Cannae's win + draw positions count (BTTS/OU excluded).
-    // Renamed semantic: was per-game-total, now per-copyable-leg-sum.
+    // Min Cannae stake filter — measures TOTAL game conviction across ALL legs
+    // (win/draw/spread/ou/btts/player_prop), not just copyable ones.
+    //
+    // Reden (2026-04-07, na strategy-shift onderzoek): sinds W11 (2026-03-09) is in
+    // 54% van NBA-games Cannae's hauptbet géén ML maar spread/ou. Een per-leg ML gate
+    // filtert juist die high-conviction games eruit. Total game CV reflecteert
+    // Cannae's overall conviction in het spel ongeacht welke leg het zit.
+    //
+    // Aanvullende eis: ml_cv > 0 — we kopiëren alleen ML, dus geen punt om een game
+    // te onboarden waar Cannae geen ML-positie heeft.
     if let Some(&min_usdc) = sport_sizing.min_cannae_game_usdc.get(league) {
-        let copyable_total: f64 = game.positions.iter()
+        let total_cv: f64 = game.positions.iter()
+            .map(|p| p.current_value_f64())
+            .sum();
+        let ml_cv: f64 = game.positions.iter()
             .filter(|p| {
-                let mt = CopyTrader::detect_market_type(p.title.as_deref().unwrap_or(""));
-                allowed_lines.iter().any(|al| *al == mt.as_str())
+                CopyTrader::detect_market_type(p.title.as_deref().unwrap_or("")) == "win"
             })
             .map(|p| p.current_value_f64())
             .sum();
-        if copyable_total < min_usdc {
-            info!("GAME SKIP: {} — Cannae copyable stake ${:.0} < min ${:.0} for {} (lines: {:?})",
-                game.event_slug, copyable_total, min_usdc, league, allowed_lines);
+        if total_cv < min_usdc {
+            info!("GAME SKIP: {} — Cannae total game CV ${:.0} < min ${:.0} for {}",
+                game.event_slug, total_cv, min_usdc, league);
+            return false;
+        }
+        if ml_cv <= 0.0 {
+            info!("GAME SKIP: {} — Cannae has no ML position (total CV ${:.0} on non-ML legs only)",
+                game.event_slug, total_cv);
             return false;
         }
     }
