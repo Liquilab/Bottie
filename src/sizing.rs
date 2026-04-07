@@ -1,9 +1,8 @@
 /// Flat sizing: all bets get the same bankroll %.
 ///
-/// Previously confidence-based (2.5%-10%), now flat 3% pending SSOT
-/// game-level analysis to validate whether variable sizing adds value.
+/// Previously confidence-based (2.5%-10%), now flat 5%.
 pub fn confidence_pct(_confidence: f64) -> f64 {
-    3.0
+    5.0
 }
 
 /// Flat sizing: bankroll × pct / price = shares.
