@@ -92,7 +92,6 @@ odds_arb:
   - basketball_nba
   min_edge_pct: 3.0
 sizing:
-  kelly_fraction: 0.25
   max_bet_pct: 2.0
   copy_base_size_pct: 20.0
   min_price: 0.3
