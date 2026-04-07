@@ -651,6 +651,7 @@ async fn execute_stable_game(
         game_line: String,
         size_pct: f64,
         fixed_size: bool, // true = skip confidence_pct override
+        exempt_win_yes_ban: bool, // true = bypass SSOT win_yes_ban (3-leg case 1)
     }
 
     let bankroll = risk.read().await.bankroll();
@@ -678,7 +679,7 @@ async fn execute_stable_game(
             // Confidence-based sizing from bet price
             let confidence = (price * 1.10).min(0.95);
             let pct = crate::sizing::confidence_pct(confidence);
-            bets.push(GameLineBet { pos: pos.clone(), game_line: gl.to_string(), size_pct: pct, fixed_size: false });
+            bets.push(GameLineBet { pos: pos.clone(), game_line: gl.to_string(), size_pct: pct, fixed_size: false, exempt_win_yes_ban: false });
         }
     }
 
@@ -708,28 +709,58 @@ async fn execute_stable_game(
 
             if !win_is_yes {
                 // === WIN NO ===
-                if has_draw_yes {
-                    // Win NO + Draw YES → fixed 5% + 5% (max 10% per game)
+                let win_no_cv = win_bet.pos.current_value_f64();
+                let draw_yes_ratio = if win_no_cv > 0.0 { draw_yes_cv / win_no_cv } else { 0.0 };
+                if has_draw_yes && draw_yes_ratio >= 0.05 {
+                    // Win NO + Draw YES (>=5% ratio) → 3-leg: WIN_NO 5% + DRAW_YES 2.5% + WIN_NO_B 2.5%
+                    // Drop any draw_no from bets, ensure draw_yes is present
                     bets.retain(|b| !(b.game_line == "draw" && b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No")));
-                    // If draw hauptbet was NO (higher CV), it got removed — add Draw YES from positions
                     if !bets.iter().any(|b| b.game_line == "draw") {
                         let draw_yes = draw_positions.iter()
                             .filter(|p| p.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("Yes"))
                             .max_by(|a, b| a.current_value_f64().partial_cmp(&b.current_value_f64()).unwrap_or(std::cmp::Ordering::Equal));
                         if let Some(dy) = draw_yes {
-                            bets.push(GameLineBet { pos: (*dy).clone(), game_line: "draw".to_string(), size_pct: 5.0, fixed_size: true });
+                            bets.push(GameLineBet { pos: (*dy).clone(), game_line: "draw".to_string(), size_pct: 2.5, fixed_size: true, exempt_win_yes_ban: false });
                         }
                     }
-                    // Mark all legs as fixed 5%
+                    // Set sizes: WIN_NO_A 5%, DRAW_YES 2.5%
                     for b in bets.iter_mut() {
-                        b.size_pct = 5.0;
+                        if b.game_line == "win" {
+                            b.size_pct = 5.0;
+                        } else if b.game_line == "draw" {
+                            b.size_pct = 2.5;
+                        }
                         b.fixed_size = true;
                     }
-                    info!("GAME MODE: {} → WIN_NO+DRAW_YES (5%+5%, {} bets)", game.event_slug, bets.len());
+                    // Add WIN_NO_B (opponent's NO) as 3rd leg @ 2.5%
+                    let win_cid = win_bet.pos.condition_id.as_deref().unwrap_or("").to_owned();
+                    let draw_cids: Vec<&str> = draw_positions.iter()
+                        .filter_map(|p| p.condition_id.as_deref())
+                        .collect();
+                    if let Some((opp_cid, no_token_id)) = game_schedule.find_opponent_no_token(&game.event_slug, &win_cid, &draw_cids) {
+                        let no_price = match game_schedule.find_yes_token(&game.event_slug, &opp_cid) {
+                            Some(yes_tok) => client.get_best_bid(&yes_tok).await.map(|p| (1.0 - p).max(0.30).min(0.90)).unwrap_or(0.55),
+                            None => 0.55,
+                        };
+                        let mut opp_pos = win_bet.pos.clone();
+                        opp_pos.asset = Some(no_token_id);
+                        opp_pos.condition_id = Some(opp_cid);
+                        opp_pos.outcome = Some("No".to_string());
+                        opp_pos.avg_price = Some(serde_json::json!(no_price));
+                        opp_pos.cur_price = Some(serde_json::json!(no_price));
+                        bets.push(GameLineBet { pos: opp_pos, game_line: "win".to_string(), size_pct: 2.5, fixed_size: true, exempt_win_yes_ban: false });
+                        info!("GAME MODE: {} → 3-LEG WIN_NO+DRAW_YES+OPP_NO (5%+2.5%+2.5%, draw/win ratio {:.1}%)", game.event_slug, draw_yes_ratio*100.0);
+                    } else {
+                        info!("GAME MODE: {} → WIN_NO+DRAW_YES (opp NO not found, 2 legs only, ratio {:.1}%)", game.event_slug, draw_yes_ratio*100.0);
+                    }
                 } else {
-                    // Win NO only → no draw
+                    // Win NO only (no draw, or draw < 5% dust)
                     bets.retain(|b| b.game_line != "draw");
-                    info!("GAME MODE: {} → WIN_NO ({} bets)", game.event_slug, bets.len());
+                    if has_draw_yes {
+                        info!("GAME MODE: {} → WIN_NO (draw_yes ratio {:.1}% < 5% dust, dropped)", game.event_slug, draw_yes_ratio*100.0);
+                    } else {
+                        info!("GAME MODE: {} → WIN_NO ({} bets)", game.event_slug, bets.len());
+                    }
                 }
             } else {
                 // === WIN YES ===
@@ -753,7 +784,7 @@ async fn execute_stable_game(
                             if let Some(dy) = draw_yes {
                                 let dy_price = (*dy).avg_price_f64();
                                 let dy_conf = (dy_price * 1.10).min(0.95);
-                                bets.push(GameLineBet { pos: (*dy).clone(), game_line: "draw".to_string(), size_pct: crate::sizing::confidence_pct(dy_conf), fixed_size: false });
+                                bets.push(GameLineBet { pos: (*dy).clone(), game_line: "draw".to_string(), size_pct: crate::sizing::confidence_pct(dy_conf), fixed_size: false, exempt_win_yes_ban: false });
                             }
                         }
                         info!("GAME MODE: {} → DRAW_YES_ONLY (win_YES price {:.2} < 0.55, skip win)", game.event_slug, win_yes_price);
@@ -781,7 +812,7 @@ async fn execute_stable_game(
                                 sub_pos.avg_price = Some(serde_json::json!(no_price));
                                 sub_pos.cur_price = Some(serde_json::json!(no_price));
                                 bets.retain(|b| b.game_line != "win");
-                                bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 0.0, fixed_size: false });
+                                bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 0.0, fixed_size: false, exempt_win_yes_ban: false });
                                 info!("GAME MODE: {} → OPP_NO (win YES {:.2} + draw YES → opp NO, 1 bet)", game.event_slug, win_yes_price);
                             }
                             None => {
@@ -816,7 +847,7 @@ async fn execute_stable_game(
                                 sub_pos.avg_price = Some(serde_json::json!(no_price));
                                 sub_pos.cur_price = Some(serde_json::json!(no_price));
                                 bets.retain(|b| b.game_line != "win");
-                                bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 0.0, fixed_size: false });
+                                bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 0.0, fixed_size: false, exempt_win_yes_ban: false });
                                 info!("GAME MODE: {} → OPP_NO (win_YES {:.2} < 0.50 + draw_NO → opp NO, 1 bet)", game.event_slug, win_yes_price);
                             }
                             None => {
@@ -826,7 +857,9 @@ async fn execute_stable_game(
                             }
                         }
                     } else {
-                        // Win YES + Draw NO → Win YES + Draw NO (hauptbet win only)
+                        // Win YES + Draw NO
+                        let win_yes_cv = win_bet.pos.current_value_f64();
+                        let draw_no_ratio = if win_yes_cv > 0.0 { draw_no_cv / win_yes_cv } else { 0.0 };
                         let hauptbet_cid = win_bet.pos.condition_id.as_deref().unwrap_or("").to_owned();
                         bets.retain(|b| {
                             if b.game_line == "win" {
@@ -837,18 +870,49 @@ async fn execute_stable_game(
                                 false
                             }
                         });
-                        // If draw NO wasn't in bets yet, add it
+                        // Ensure draw NO is in bets
                         if !bets.iter().any(|b| b.game_line == "draw") {
                             let draw_no = draw_positions.iter()
                                 .filter(|p| p.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No"))
                                 .max_by(|a, b| a.current_value_f64().partial_cmp(&b.current_value_f64()).unwrap_or(std::cmp::Ordering::Equal));
                             if let Some(dn) = draw_no {
-                                let dn_price = (*dn).avg_price_f64();
-                                let dn_conf = (dn_price * 1.10).min(0.95);
-                                bets.push(GameLineBet { pos: (*dn).clone(), game_line: "draw".to_string(), size_pct: crate::sizing::confidence_pct(dn_conf), fixed_size: false });
+                                bets.push(GameLineBet { pos: (*dn).clone(), game_line: "draw".to_string(), size_pct: 2.5, fixed_size: true, exempt_win_yes_ban: false });
                             }
                         }
-                        info!("GAME MODE: {} → WIN_YES+DRAW_NO ({} bets)", game.event_slug, bets.len());
+                        if draw_no_ratio >= 0.05 {
+                            // 3-LEG: WIN_YES_A 5% (EXEMPT from win_yes_ban) + DRAW_NO 2.5% + WIN_NO_B 2.5%
+                            for b in bets.iter_mut() {
+                                if b.game_line == "win" {
+                                    b.size_pct = 5.0;
+                                    b.exempt_win_yes_ban = true;
+                                } else if b.game_line == "draw" {
+                                    b.size_pct = 2.5;
+                                }
+                                b.fixed_size = true;
+                            }
+                            // Add WIN_NO_B (opponent NO) as 3rd leg
+                            let draw_cids: Vec<&str> = draw_positions.iter()
+                                .filter_map(|p| p.condition_id.as_deref())
+                                .collect();
+                            if let Some((opp_cid, no_token_id)) = game_schedule.find_opponent_no_token(&game.event_slug, &hauptbet_cid, &draw_cids) {
+                                let no_price = match game_schedule.find_yes_token(&game.event_slug, &opp_cid) {
+                                    Some(yes_tok) => client.get_best_bid(&yes_tok).await.map(|p| (1.0 - p).max(0.30).min(0.90)).unwrap_or(0.55),
+                                    None => 0.55,
+                                };
+                                let mut opp_pos = win_bet.pos.clone();
+                                opp_pos.asset = Some(no_token_id);
+                                opp_pos.condition_id = Some(opp_cid);
+                                opp_pos.outcome = Some("No".to_string());
+                                opp_pos.avg_price = Some(serde_json::json!(no_price));
+                                opp_pos.cur_price = Some(serde_json::json!(no_price));
+                                bets.push(GameLineBet { pos: opp_pos, game_line: "win".to_string(), size_pct: 2.5, fixed_size: true, exempt_win_yes_ban: false });
+                                info!("GAME MODE: {} → 3-LEG WIN_YES+DRAW_NO+OPP_NO (5%+2.5%+2.5%, draw/win ratio {:.1}%, WIN_YES exempt)", game.event_slug, draw_no_ratio*100.0);
+                            } else {
+                                info!("GAME MODE: {} → WIN_YES+DRAW_NO (opp NO not found, 2 legs, ratio {:.1}%)", game.event_slug, draw_no_ratio*100.0);
+                            }
+                        } else {
+                            info!("GAME MODE: {} → WIN_YES+DRAW_NO (legacy, ratio {:.1}% < 5%)", game.event_slug, draw_no_ratio*100.0);
+                        }
                     }
                 } else {
                     // Win YES only → replace with opponent Win NO
@@ -874,7 +938,7 @@ async fn execute_stable_game(
                             sub_pos.avg_price = Some(serde_json::json!(no_price));
                             sub_pos.cur_price = Some(serde_json::json!(no_price));
                             bets.retain(|b| b.game_line != "win");
-                            bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 0.0, fixed_size: false });
+                            bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 0.0, fixed_size: false, exempt_win_yes_ban: false });
                             info!("GAME MODE: {} → OPP_NO (win YES only → opp NO, 1 bet)", game.event_slug);
                         }
                         None => {
@@ -888,12 +952,15 @@ async fn execute_stable_game(
     }
 
     // SSOT Pilaar 1, Regel 1 — WIN YES ban (rules.yaml: win_yes_ban.enabled)
+    // Exempt: 3-leg case 1 (WIN_YES + DRAW_NO + OPP_NO) marks the WIN_YES leg as exempt.
     if rules::global().win_yes_ban.enabled {
-        let had_win_yes = bets.iter().any(|b| b.game_line == "win"
-            && b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("Yes"));
-        if had_win_yes {
+        let had_banned_win_yes = bets.iter().any(|b| b.game_line == "win"
+            && b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("Yes")
+            && !b.exempt_win_yes_ban);
+        if had_banned_win_yes {
             bets.retain(|b| !(b.game_line == "win"
-                && b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("Yes")));
+                && b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("Yes")
+                && !b.exempt_win_yes_ban));
             if bets.is_empty() {
                 info!("GAME SKIP: {} — WIN YES dropped, no other legs", game.event_slug);
                 return false;

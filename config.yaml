@@ -12,32 +12,29 @@ copy_trading:
     sports:
     - all
     leagues:
-    - epl
+    # winners (keep)
     - bun
-    - lal
-    - fl1
-    - uel
-    - arg
-    - rou1
-    - efa
-    - por
-    - bra
-    - itc
-    - ere
-    - es2
-    - bl2
     - elc
+    - arg
+    - efa
+    - bra
     - mex
     - fr2
-    - spl
+    - aus
+    - sea
+    - itc
     - efl
-    - tur
     - acn
     - cde
-    - nba
-    - mlb
+    - uel
+    # monitor (n<8 in Bottie data, retain pending more samples)
+    - fl1
+    - rou1
+    - por
+    - ere
+    - tur
     - nfl
-    - aus
+    # blacklisted 2026-04-07: epl, lal, nba, mlb, es2, bl2, spl (Bottie ROI < -5% on n>=8 OR Cannae bewezen verlies op groot volume)
     market_types: []
     max_legs_per_event: 0
     min_price: 0.4
@@ -134,8 +131,28 @@ sport_sizing:
   fif_ml_pct: 0.0        # FIFA WCQ: disabled
   fif_draw_pct: 0.0      # FIFA draw: disabled
   min_bet_usdc: 2.5
+  # Min Cannae game total: skip dust games. Threshold $4000.
   min_cannae_game_usdc:
-    nba: 500.0
+    bun: 4000.0
+    elc: 4000.0
+    arg: 4000.0
+    efa: 4000.0
+    bra: 4000.0
+    mex: 4000.0
+    fr2: 4000.0
+    aus: 4000.0
+    sea: 4000.0
+    itc: 4000.0
+    efl: 4000.0
+    acn: 4000.0
+    cde: 4000.0
+    uel: 4000.0
+    fl1: 4000.0
+    rou1: 4000.0
+    por: 4000.0
+    ere: 4000.0
+    tur: 4000.0
+    nba: 4000.0
 schedule:
   enabled: true
   t_minus_minutes: 240

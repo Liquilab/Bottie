@@ -1444,6 +1444,117 @@ def page_wrap(active_page, body_html, token="", account="cannae"):
 </html>"""
 
 
+def _load_recent_game_modes(service="bottie", since="24 hours ago"):
+    """Parse 'GAME MODE' / 'GAME SKIP' lines from journal. Returns counts + recent list."""
+    import subprocess, re
+    counts = {}
+    recent = []  # list of (ts, mode, slug)
+    try:
+        result = subprocess.run(
+            ["journalctl", "-u", service, "--since", since, "--no-pager", "-o", "short-iso"],
+            capture_output=True, text=True, timeout=15
+        )
+        # Pattern: 2026-04-07T01:23:46+0000 vultr bottie-bin[14323]: ... GAME MODE: <slug> → <mode>
+        # Or: ... GAME SKIP: <slug> — Cannae game total $X < min $Y
+        for line in result.stdout.splitlines():
+            if "GAME MODE:" in line:
+                m = re.search(r"GAME MODE:\s+(\S+)\s*[→—-]\s*(.+?)(?:\s+\(|\s*$)", line)
+                if m:
+                    slug, mode = m.group(1), m.group(2).strip()
+                    # Categorize mode
+                    if "3-LEG" in mode:
+                        cat = "3-LEG"
+                    elif "OPP_NO" in mode:
+                        cat = "OPP_NO"
+                    elif "WIN_NO+DRAW_YES" in mode:
+                        cat = "WIN_NO+DRAW_YES (legacy)"
+                    elif "WIN_YES+DRAW_NO" in mode:
+                        cat = "WIN_YES+DRAW_NO (legacy)"
+                    elif "DRAW_YES_ONLY" in mode:
+                        cat = "DRAW_YES_ONLY"
+                    elif "WIN_NO" in mode:
+                        cat = "WIN_NO solo"
+                    elif "WIN_YES" in mode:
+                        cat = "WIN_YES (banned-fallback)"
+                    else:
+                        cat = "OTHER"
+                    counts[cat] = counts.get(cat, 0) + 1
+                    ts = line.split()[0][:16].replace("T", " ")
+                    recent.append((ts, cat, slug, mode))
+            elif "GAME SKIP:" in line and "Cannae game total" in line:
+                counts["SKIP (dust)"] = counts.get("SKIP (dust)", 0) + 1
+    except Exception:
+        pass
+    return counts, recent[-20:]  # last 20 events
+
+
+def render_game_mode_panel(service="bottie"):
+    counts, recent = _load_recent_game_modes(service)
+    total = sum(counts.values())
+
+    counts_html = ""
+    if counts:
+        for cat in sorted(counts, key=lambda k: -counts[k]):
+            n = counts[cat]
+            color = "#3fb950" if "3-LEG" in cat else "#388bfd" if "WIN_NO solo" in cat else "#d29922" if "SKIP" in cat else "#8b949e"
+            counts_html += f'<div class="stat-row"><span style="color:{color}">{cat}</span><span><b>{n}</b></span></div>'
+    else:
+        counts_html = '<div class="muted">Geen game modes in laatste 24h</div>'
+
+    recent_html = ""
+    if recent:
+        rows = ""
+        for ts, cat, slug, full_mode in reversed(recent):
+            color = "#3fb950" if "3-LEG" in cat else "#388bfd" if "WIN_NO solo" in cat else "#8b949e"
+            rows += f'<tr><td class="muted" style="font-size:0.75rem">{ts}</td><td style="color:{color};font-weight:600">{cat}</td><td style="font-family:monospace;font-size:0.75rem">{slug}</td></tr>'
+        recent_html = f'<table class="data-table" style="margin-top:8px"><thead><tr><th>Tijd</th><th>Mode</th><th>Game</th></tr></thead><tbody>{rows}</tbody></table>'
+    else:
+        recent_html = '<div class="muted">Nog geen events sinds restart</div>'
+
+    return f"""
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:12px">
+      <div style="font-weight:700;margin-bottom:8px">Recente GAME MODES (24h, totaal: {total})</div>
+      {counts_html}
+      <div style="margin-top:12px;font-weight:600;font-size:0.85rem">Laatste 20 events:</div>
+      {recent_html}
+    </div>"""
+
+
+def render_football_rules_panel(config):
+    """Show the football decision tree."""
+    ss = config.get("sport_sizing", {})
+    min_stakes = ss.get("min_cannae_game_usdc", {}) or {}
+    if min_stakes:
+        min_str = f"${list(min_stakes.values())[0]:.0f}" if len(set(min_stakes.values())) == 1 else "varies"
+        leagues = ", ".join(sorted(min_stakes.keys()))
+    else:
+        min_str = "geen"
+        leagues = "—"
+
+    rules_html = """
+    <table class="data-table" style="margin-top:8px;font-size:0.82rem">
+      <thead><tr><th>Cannae heeft</th><th>Bottie koopt</th><th>Trigger</th></tr></thead>
+      <tbody>
+        <tr><td>WIN_NO_A + DRAW_YES</td><td><b style="color:#3fb950">3-LEG</b>: WIN_NO_A 5% + DRAW_YES 2.5% + WIN_NO_B 2.5%</td><td>draw_yes/win_no ≥ 5%</td></tr>
+        <tr><td>WIN_YES_A + DRAW_NO</td><td><b style="color:#3fb950">3-LEG</b>: WIN_YES_A 5% (exempt) + DRAW_NO 2.5% + WIN_NO_B 2.5%</td><td>draw_no/win_yes ≥ 5%</td></tr>
+        <tr><td>WIN_NO_A solo (geen draw of dust)</td><td>WIN_NO_A confidence sized</td><td>—</td></tr>
+        <tr><td>WIN_YES_A + DRAW_YES (price ≥0.55)</td><td>OPP_NO substitute (1 leg)</td><td>legacy</td></tr>
+        <tr><td>WIN_YES_A + DRAW_YES (price &lt;0.55)</td><td>DRAW_YES alleen</td><td>legacy</td></tr>
+        <tr><td>WIN_YES_A + DRAW_NO (price &lt;0.50)</td><td>OPP_NO substitute</td><td>legacy</td></tr>
+        <tr><td>WIN_YES_A solo</td><td>OPP_NO substitute (banned WIN_YES)</td><td>legacy</td></tr>
+      </tbody>
+    </table>"""
+
+    return f"""
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:12px">
+      <div style="font-weight:700;margin-bottom:8px">Football decision tree</div>
+      <div class="stat-row"><span>Min Cannae game stake</span><span><b>{min_str}</b></span></div>
+      <div class="muted" style="font-size:0.75rem">Toegepast op: {leagues}</div>
+      {rules_html}
+      <div class="muted" style="font-size:0.75rem;margin-top:8px">Cap: 10% per game (5+2.5+2.5 = 10%) | win_yes_ban: actief (3-LEG case 1 exempt)</div>
+    </div>"""
+
+
 def render_strategy_summary(wallet_map):
     """Show current strategy info: wallets, filters, sizing."""
     cards = ""
@@ -1490,9 +1601,24 @@ def render_strategy_summary(wallet_map):
       <div class="muted" style="font-size:0.8rem;margin-top:4px">Max {max_open} open bets | {max_deploy}% deployment cap | Taker mode</div>
     </div>"""
 
+    # Football decision tree + min stake panel
+    try:
+        config = _load_config()
+        football_panel = render_football_rules_panel(config)
+    except Exception:
+        football_panel = ""
+
+    # Recent game modes panel (live from journal)
+    try:
+        game_modes_panel = render_game_mode_panel("bottie")
+    except Exception:
+        game_modes_panel = ""
+
     return f"""
     <div class="source-row">{cards}</div>
-    {sizing_info}"""
+    {sizing_info}
+    {football_panel}
+    {game_modes_panel}"""
 
 
 def _load_cannae_slugs(service="bottie"):
