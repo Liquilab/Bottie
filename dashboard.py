@@ -1656,6 +1656,19 @@ def render_live_board(trades, service="bottie"):
     # Load game slugs from bot logs for this service
     cannae_slugs = _load_cannae_slugs(service)
 
+    # Whitelisted leagues for this service's source wallet (first watchlist entry)
+    cfg_file = GIYN_CONFIG_FILE if service == "bottie-test" else CONFIG_FILE
+    whitelisted_leagues = set()
+    try:
+        import yaml
+        with open(cfg_file) as f:
+            _cfg = yaml.safe_load(f) or {}
+        _wl = _cfg.get("copy_trading", {}).get("watchlist", [])
+        if _wl:
+            whitelisted_leagues = set(_wl[0].get("leagues", []) or [])
+    except Exception:
+        pass
+
     games = []
     if schedule_file.exists():
         games = json.load(open(schedule_file))
@@ -1671,6 +1684,7 @@ def render_live_board(trades, service="bottie"):
 
     # Only show games that Cannae has positions in
     upcoming = []
+    skipped_non_whitelist = 0
     for slug, info in cannae_slugs.items():
         sched = schedule_by_slug.get(slug)
         if sched:
@@ -1682,13 +1696,34 @@ def render_live_board(trades, service="bottie"):
             start = now + timedelta(hours=12)  # not in schedule
 
         diff_min = (start - now).total_seconds() / 60
-        if diff_min < 24*60:  # within 24h
-            upcoming.append((slug, sched, start, diff_min, info))
+        if diff_min >= 24*60:
+            continue
+        league = slug.split("-")[0] if slug else ""
+        in_whitelist = (not whitelisted_leagues) or (league in whitelisted_leagues)
+        if not in_whitelist:
+            skipped_non_whitelist += 1
+            continue
+        upcoming.append((slug, sched, start, diff_min, info, in_whitelist))
 
     upcoming.sort(key=lambda x: x[2])
 
+    # Whitelist header
+    if whitelisted_leagues:
+        wl_sorted = sorted(whitelisted_leagues)
+        wl_badges = " ".join(
+            f'<span class="badge sport" style="margin:2px">{lg}</span>'
+            for lg in wl_sorted
+        )
+        wl_header = f"""
+        <div style="margin-bottom:8px;font-size:12px">
+          <span class="muted">Whitelisted leagues ({len(wl_sorted)}):</span> {wl_badges}
+          {f'<span class="muted" style="margin-left:8px">— {skipped_non_whitelist} non-whitelist games hidden</span>' if skipped_non_whitelist else ''}
+        </div>"""
+    else:
+        wl_header = ""
+
     if not upcoming:
-        return '<div class="empty">Geen Cannae games gevonden.</div>'
+        return wl_header + '<div class="empty">Geen whitelisted Cannae games binnen 24h.</div>'
 
     # Check which event_slugs already have fills
     filled_slugs = set()
@@ -1697,7 +1732,7 @@ def render_live_board(trades, service="bottie"):
             filled_slugs.add(t["event_slug"])
 
     rows = ""
-    for slug, sched, start, diff_min, info in upcoming[:25]:
+    for slug, sched, start, diff_min, info, _in_wl in upcoming[:25]:
         title = sched.get("title", slug) if sched else slug
         league = slug.split("-")[0] if slug else ""
         cannae_amt = info["amount"]
@@ -1750,6 +1785,7 @@ def render_live_board(trades, service="bottie"):
         </tr>"""
 
     return f"""
+    {wl_header}
     <div class="table-wrap">
     <table>
       <thead><tr>
