@@ -57,7 +57,7 @@ copy_trading:
     - tur
     market_types: []
     max_legs_per_event: 0
-    min_price: 0.3
+    min_price: 0.4
     max_price: 0.95
   consensus:
     min_traders: 1
