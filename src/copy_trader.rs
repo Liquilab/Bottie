@@ -558,6 +558,36 @@ impl CopyTrader {
         }
     }
 
+    /// Strict moneyline (ML/win-line) detection — only returns true for titles
+    /// that match a recognized ML pattern, NOT for the catch-all default of
+    /// `detect_market_type`. Use this when correctness matters (e.g. gating
+    /// on Cannae's actual ML position presence).
+    ///
+    /// Recognized patterns:
+    ///   - "Will <team> win on <date>?"  (football/NHL/MLB win-line markets)
+    ///   - "<team> vs. <team>"           (NBA/NFL moneyline format) — must NOT
+    ///                                    contain any other market markers
+    ///                                    (O/U, Spread, BTTS, draw, ":")
+    pub fn is_moneyline(title: &str) -> bool {
+        let t = title.to_lowercase();
+        // Reject anything matching another market type first
+        if t.contains("o/u") || t.contains("over/under")
+            || t.contains("spread")
+            || t.contains("both teams to score") || t.contains("btts")
+            || t.contains("draw") {
+            return false;
+        }
+        // Pattern A: "Will X win ..."
+        if t.starts_with("will ") && t.contains(" win") {
+            return true;
+        }
+        // Pattern B: "X vs. Y" without any sub-market suffix (no ": ")
+        if (t.contains(" vs. ") || t.contains(" vs ")) && !t.contains(": ") {
+            return true;
+        }
+        false
+    }
+
     fn detect_sport(title: &str, event_slug: &str) -> String {
         // Primary: slug prefix IS the league identifier (e.g. "bun-fre-bay-2026-04-04" → "bun")
         // No hardcoded list needed — all sports use consistent slug prefixes on Polymarket.

@@ -358,10 +358,14 @@ pub fn discover_continuous_from_positions(
 ///
 /// `window_minutes` is the explicit upper bound (in minutes-to-kickoff). No hidden cushion.
 /// Caller is responsible for picking the correct window per phase (e.g. 12 for T-5/T-10, 1 for T-1).
-pub fn confirm_and_execute_t5(
+///
+/// `phase` is a short tag ("T5" or "T1") used in log lines so operators can
+/// distinguish T-5 from T-1 confirmation events in production.
+pub fn confirm_and_execute(
     watched_games: &[WatchedGame],
     watchlist: &[WatchlistEntry],
     window_minutes: u32,
+    phase: &str,
     already_executed: &HashSet<String>,
     raw_positions: &[(String, String, Vec<WalletPosition>)],
 ) -> Vec<T5Match> {
@@ -434,7 +438,8 @@ pub fn confirm_and_execute_t5(
 
             let mins_to_start = game.start_time.signed_duration_since(now).num_minutes();
             info!(
-                "T5 CONFIRMED: {} has {} positions in {} (starts in {}min)",
+                "{} CONFIRMED: {} has {} positions in {} (starts in {}min)",
+                phase,
                 wallet_cfg.name,
                 current_game_positions.len(),
                 game.event_slug,
