@@ -235,9 +235,9 @@ impl Executor {
                             }
                             // Don't enter markets ending within 30 minutes — edge is gone,
                             // risk of last-minute reversal is highest.
-                            // Skip this check in taker mode (T-5 scheduler): end_date is the
-                            // game *day*, not the actual end time. T-5 already ensures we're
-                            // 5 minutes before kickoff — the game hasn't even started yet.
+                            // Skip this check in taker mode (T-10 scheduler): end_date is the
+                            // game *day*, not the actual end time. T-10 already ensures we're
+                            // 10 minutes before kickoff — the game hasn't even started yet.
                             if !taker_mode && until_end.num_minutes() < 30 {
                                 let mins = until_end.num_minutes();
                                 if mins < 0 {

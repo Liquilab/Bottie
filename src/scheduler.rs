@@ -125,7 +125,7 @@ impl GameSchedule {
     }
 }
 
-/// A game we're watching -- discovered at T-30, waiting for T-5 confirm
+/// A game we're watching -- discovered at T-30, waiting for T-10 confirm
 #[derive(Debug, Clone)]
 pub struct WatchedGame {
     pub event_slug: String,
@@ -137,12 +137,12 @@ pub struct WatchedGame {
     pub discovered_at: DateTime<Utc>,
 }
 
-/// Confirmed match at T-5, ready for execution
-pub struct T5Match {
+/// Confirmed match at T-10, ready for execution
+pub struct T10Match {
     pub wallet_name: String,
     pub wallet_address: String,
     pub game_event_slug: String,
-    pub positions: Vec<WalletPosition>,  // current positions (T-5 fetch)
+    pub positions: Vec<WalletPosition>,  // current positions (T-10 fetch)
     pub t30_position_count: usize,       // how many positions at T-30 (for logging)
 }
 
@@ -242,7 +242,7 @@ pub fn sport_tags_from_watchlist(watchlist: &[WatchlistEntry]) -> Vec<String> {
 
 /// Continuous discovery: check ALL upcoming games (next 24h) for Cannae positions.
 /// Runs every poll cycle. Only returns games not already in watched_games.
-/// Hauptbet is NOT determined here — only at T-5.
+/// Hauptbet is NOT determined here — only at T-10.
 ///
 /// Uses pre-fetched positions from the poll loop (no extra API calls).
 pub fn discover_continuous_from_positions(
@@ -357,10 +357,10 @@ pub fn discover_continuous_from_positions(
 /// Uses pre-fetched positions from the poll loop (no extra API calls).
 ///
 /// `window_minutes` is the explicit upper bound (in minutes-to-kickoff). No hidden cushion.
-/// Caller is responsible for picking the correct window per phase (e.g. 12 for T-5/T-10, 1 for T-1).
+/// Caller is responsible for picking the correct window per phase (e.g. 10 for T-10, 1 for T-1).
 ///
-/// `phase` is a short tag ("T5" or "T1") used in log lines so operators can
-/// distinguish T-5 from T-1 confirmation events in production.
+/// `phase` is a short tag ("T10" or "T1") used in log lines so operators can
+/// distinguish T-10 from T-1 confirmation events in production.
 pub fn confirm_and_execute(
     watched_games: &[WatchedGame],
     watchlist: &[WatchlistEntry],
@@ -368,7 +368,7 @@ pub fn confirm_and_execute(
     phase: &str,
     already_executed: &HashSet<String>,
     raw_positions: &[(String, String, Vec<WalletPosition>)],
-) -> Vec<T5Match> {
+) -> Vec<T10Match> {
     let now = Utc::now();
     let mut matches = Vec::new();
 
@@ -446,7 +446,7 @@ pub fn confirm_and_execute(
                 mins_to_start,
             );
 
-            matches.push(T5Match {
+            matches.push(T10Match {
                 wallet_name: wallet_cfg.name.clone(),
                 wallet_address: wallet_addr.clone(),
                 game_event_slug: game.event_slug.clone(),
