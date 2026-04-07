@@ -27,6 +27,7 @@ copy_trading:
     - acn
     - cde
     - uel
+    - nba  # re-enabled 2026-04-07: ROI +29.6% (n=17, Wilson LB 31%) when gated to Cannae stake >= $4K
     # monitor (n<8 in Bottie data, retain pending more samples)
     - fl1
     - rou1
@@ -34,7 +35,7 @@ copy_trading:
     - ere
     - tur
     - nfl
-    # blacklisted 2026-04-07: epl, lal, nba, mlb, es2, bl2, spl (Bottie ROI < -5% on n>=8 OR Cannae bewezen verlies op groot volume)
+    # blacklisted 2026-04-07: epl, lal, mlb, es2, bl2, spl (Bottie ROI < -5% on n>=8 OR Cannae bewezen verlies op groot volume)
     market_types: []
     max_legs_per_event: 0
     min_price: 0.4
