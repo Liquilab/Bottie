@@ -95,7 +95,7 @@ sizing:
   kelly_fraction: 0.25
   max_bet_pct: 2.0
   copy_base_size_pct: 20.0
-  min_price: 0.3
+  min_price: 0.4
   max_price: 0.95
   portfolio_reference_usdc: 800
 take_profit:
