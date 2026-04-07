@@ -616,12 +616,21 @@ async fn execute_stable_game(
         return false;
     }
 
-    // Min Cannae game total filter (e.g. NHL only when Cannae invests >= $1000)
+    // Min Cannae stake filter — sum only positions on COPYABLE lines (allowed_lines).
+    // For NBA: only Cannae's ML/win positions count (spread/OU excluded).
+    // For football: only Cannae's win + draw positions count (BTTS/OU excluded).
+    // Renamed semantic: was per-game-total, now per-copyable-leg-sum.
     if let Some(&min_usdc) = sport_sizing.min_cannae_game_usdc.get(league) {
-        let game_total: f64 = game.positions.iter().map(|p| p.current_value_f64()).sum();
-        if game_total < min_usdc {
-            info!("GAME SKIP: {} — Cannae game total ${:.0} < min ${:.0} for {}",
-                game.event_slug, game_total, min_usdc, league);
+        let copyable_total: f64 = game.positions.iter()
+            .filter(|p| {
+                let mt = CopyTrader::detect_market_type(p.title.as_deref().unwrap_or(""));
+                allowed_lines.iter().any(|al| *al == mt.as_str())
+            })
+            .map(|p| p.current_value_f64())
+            .sum();
+        if copyable_total < min_usdc {
+            info!("GAME SKIP: {} — Cannae copyable stake ${:.0} < min ${:.0} for {} (lines: {:?})",
+                game.event_slug, copyable_total, min_usdc, league, allowed_lines);
             return false;
         }
     }
