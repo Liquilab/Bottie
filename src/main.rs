@@ -441,10 +441,11 @@ async fn copy_trading_loop(
 
                     // 3. T-5 Confirm+Buy: use pre-fetched positions (no extra API calls).
                     //    Window = 0..t5_minutes (explicit, no hidden cushion).
-                    let t5_matches = scheduler::confirm_and_execute_t5(
+                    let t5_matches = scheduler::confirm_and_execute(
                         &watched_games,
                         &watchlist,
                         schedule_cfg.t5_minutes,
+                        "T5",
                         &t5_executed,
                         &raw_positions,
                     );
@@ -511,10 +512,11 @@ async fn copy_trading_loop(
                     //    double-buying legs already filled at T-5.
                     //    Window = 0..t1_minutes (explicit, no hidden cushion — fires at
                     //    actual T-1, not T-3 like the old +2 cushion would have caused).
-                    let t1_matches = scheduler::confirm_and_execute_t5(
+                    let t1_matches = scheduler::confirm_and_execute(
                         &watched_games,
                         &watchlist,
                         schedule_cfg.t1_minutes,
+                        "T1",
                         &t1_executed,
                         &raw_positions,
                     );
@@ -630,10 +632,12 @@ async fn execute_stable_game(
         let total_cv: f64 = game.positions.iter()
             .map(|p| p.current_value_f64())
             .sum();
+        // Strict ML detection — detect_market_type defaults to "win" for any
+        // unrecognized title, so use is_moneyline() instead which only returns
+        // true for explicit ML patterns ("Will X win" or "X vs. Y" without
+        // sub-market markers).
         let ml_cv: f64 = game.positions.iter()
-            .filter(|p| {
-                CopyTrader::detect_market_type(p.title.as_deref().unwrap_or("")) == "win"
-            })
+            .filter(|p| CopyTrader::is_moneyline(p.title.as_deref().unwrap_or("")))
             .map(|p| p.current_value_f64())
             .sum();
         if total_cv < min_usdc {
@@ -1001,17 +1005,25 @@ async fn execute_stable_game(
 
     // SSOT Pilaar 1, Regel 3 — Prijsband per leg-type (rules.yaml: price_band)
     // DRAW YES bypasses per Regel 4 (min/max null in rules.yaml).
+    // Exempt WIN_YES (3-leg case 1) bypasses the price band entirely — the
+    // structural opt-in via exempt_win_yes_ban means the user accepts the
+    // leg regardless of price; routing it through win_no would apply the
+    // wrong rule set (NO-side cap) to a YES-side bet.
     {
         let band = &rules::global().price_band;
         bets.retain(|b| {
             let price = b.pos.avg_price_f64();
             let outcome = b.pos.outcome.as_deref().unwrap_or("");
             let is_yes = outcome.eq_ignore_ascii_case("Yes");
+            // Exempt WIN_YES legs skip the price-band check by design.
+            if b.game_line == "win" && is_yes && b.exempt_win_yes_ban {
+                return true;
+            }
             let leg_band = match (b.game_line.as_str(), is_yes) {
                 ("draw", true) => &band.draw_yes,
                 ("draw", false) => &band.draw_no,
                 ("win", false) => &band.win_no,
-                _ => &band.win_no, // win+yes shouldn't reach here (banned in Regel 1)
+                _ => &band.win_no, // unreachable: win+yes is either exempt (above) or banned in Regel 1
             };
             if let Some(min) = leg_band.min {
                 if price < min {

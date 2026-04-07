@@ -1481,7 +1481,7 @@ def _load_recent_game_modes(service="bottie", since="24 hours ago"):
                     counts[cat] = counts.get(cat, 0) + 1
                     ts = line.split()[0][:16].replace("T", " ")
                     recent.append((ts, cat, slug, mode))
-            elif "GAME SKIP:" in line and "Cannae game total" in line:
+            elif "GAME SKIP:" in line and "Cannae total game CV" in line:
                 counts["SKIP (dust)"] = counts.get("SKIP (dust)", 0) + 1
     except Exception:
         pass
