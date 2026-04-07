@@ -38,7 +38,7 @@ copy_trading:
     # blacklisted 2026-04-07: epl, lal, mlb, es2, bl2, spl (Bottie ROI < -5% on n>=8 OR Cannae bewezen verlies op groot volume)
     market_types: []
     max_legs_per_event: 0
-    min_price: 0.4
+    min_price: 0.3
     max_price: 0.95
   - address: '0x07921379f7b31ef93da634b688b2fe36897db778'
     name: ewelmealt
@@ -57,7 +57,7 @@ copy_trading:
     - tur
     market_types: []
     max_legs_per_event: 0
-    min_price: 0.4
+    min_price: 0.3
     max_price: 0.95
   consensus:
     min_traders: 1
@@ -95,7 +95,7 @@ sizing:
   kelly_fraction: 0.25
   max_bet_pct: 2.0
   copy_base_size_pct: 20.0
-  min_price: 0.4
+  min_price: 0.3
   max_price: 0.95
   portfolio_reference_usdc: 800
 take_profit:

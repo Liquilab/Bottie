@@ -278,8 +278,12 @@ impl CopyTrader {
                     }
                 }
 
-                // Per-wallet price filter
-                if price < *wallet_min_price || price > *wallet_max_price {
+                // Per-wallet price filter — NEVER applies to draw legs (user rule 2026-04-07).
+                // Draw markets have their own (unfiltered) band in SSOT rules.yaml.
+                let leg_type_for_price = Self::detect_market_type(&title);
+                if leg_type_for_price != "draw"
+                    && (price < *wallet_min_price || price > *wallet_max_price)
+                {
                     continue;
                 }
 
