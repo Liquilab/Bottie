@@ -28,7 +28,7 @@ copy_trading:
     - cde
     - ucl  # added 2026-04-07: 503 bets, 71% WR, +52% ROI, $1.22M Cannae PnL
     - uel
-    - nba  # re-enabled 2026-04-07: ROI +29.6% (n=17, Wilson LB 31%) when gated to Cannae stake >= $4K
+    # nba removed 2026-04-08: +29.6% claim from commit 42398b5 niet reproduceerbaar (actual: -5.9% n=28, $4K-subset -13.4%). Audit pending in RUS-311.
     # monitor (n<8 in Bottie data, retain pending more samples)
     - fl1
     - rou1
