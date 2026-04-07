@@ -401,10 +401,6 @@ pub struct SportSizingConfig {
     /// Minimum bet size in USDC. Below this → skip game.
     #[serde(default = "default_min_bet_usdc")]
     pub min_bet_usdc: f64,
-    /// Minimum Cannae game total (USDC) per league to copy. Below → skip.
-    /// e.g. {"nhl": 1000} = only copy NHL when Cannae invests >= $1000.
-    #[serde(default)]
-    pub min_cannae_game_usdc: std::collections::HashMap<String, f64>,
 }
 
 impl Default for SportSizingConfig {
@@ -421,7 +417,6 @@ impl Default for SportSizingConfig {
             nfl_ml_pct: 0.0,
             fallback_pct: 2.0,
             min_bet_usdc: 2.50,
-            min_cannae_game_usdc: std::collections::HashMap::new(),
         }
     }
 }

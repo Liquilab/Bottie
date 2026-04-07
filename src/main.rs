@@ -618,42 +618,39 @@ async fn execute_stable_game(
         return false;
     }
 
-    // Min Cannae stake filter — measures TOTAL game conviction across ALL legs
-    // (win/draw/spread/ou/btts/player_prop), not just copyable ones.
+    // Cannae conviction filter — hauptbet share = largest leg CV / total game CV.
     //
-    // Reden (2026-04-07, na strategy-shift onderzoek): sinds W11 (2026-03-09) is in
-    // 54% van NBA-games Cannae's hauptbet géén ML maar spread/ou. Een per-leg ML gate
-    // filtert juist die high-conviction games eruit. Total game CV reflecteert
-    // Cannae's overall conviction in het spel ongeacht welke leg het zit.
+    // Reden (2026-04-07, validatie op n=213 resolved Bottie trades sinds 2026-04-01):
+    // Trades waar Cannae's grootste leg ≥60% van zijn game-totaal is leveren +22.9% ROI
+    // (n=72), trades onder 60% leveren -6.1% ROI (n=141). De drempel selecteert Cannae's
+    // duidelijke conviction-games en filtert hedged/scattered posities eruit.
     //
-    // Aanvullende eis: ml_cv > 0 — we kopiëren alleen ML, dus geen punt om een game
-    // te onboarden waar Cannae geen ML-positie heeft.
-    if let Some(&min_usdc) = sport_sizing.min_cannae_game_usdc.get(league) {
+    // Vervangt de oude `min_cannae_game_usdc` dollar-floor (was per league $4K), die
+    // size meet ipv conviction. Een dollar-floor schiet zowel kleine high-conviction
+    // games als grote scattered hedge-games op de verkeerde manier (zie analyse:
+    // research/win_no_pricing/hauptbet_share_vs_roi.py).
+    {
         let total_cv: f64 = game.positions.iter()
             .map(|p| p.current_value_f64())
             .sum();
-        // Strict ML detection — detect_market_type defaults to "win" for any
-        // unrecognized title, so use is_moneyline() instead which only returns
-        // true for explicit ML patterns ("Will X win" or "X vs. Y" without
-        // sub-market markers).
-        let ml_cv: f64 = game.positions.iter()
-            .filter(|p| CopyTrader::is_moneyline(p.title.as_deref().unwrap_or("")))
+        let max_cv: f64 = game.positions.iter()
             .map(|p| p.current_value_f64())
-            .sum();
-        if total_cv < min_usdc {
-            info!("GAME SKIP: {} — Cannae total game CV ${:.0} < min ${:.0} for {}",
-                game.event_slug, total_cv, min_usdc, league);
-            return false;
-        }
-        if ml_cv <= 0.0 {
-            info!("GAME SKIP: {} — Cannae has no ML position (total CV ${:.0} on non-ML legs only)",
-                game.event_slug, total_cv);
+            .fold(0.0_f64, f64::max);
+        let hauptbet_share = if total_cv > 0.0 { max_cv / total_cv } else { 0.0 };
+        const MIN_SHARE: f64 = 0.60;
+        if hauptbet_share < MIN_SHARE {
+            info!("GAME SKIP: {} — Cannae hauptbet share {:.0}% < {:.0}% (total ${:.0}, max leg ${:.0})",
+                game.event_slug, hauptbet_share * 100.0, MIN_SHARE * 100.0, total_cv, max_cv);
             return false;
         }
     }
 
     // Log ALL positions for this game (T5 debug)
-    info!("T5 POSITIONS: {} — {} positions:", game.event_slug, game.positions.len());
+    let _total_cv_log: f64 = game.positions.iter().map(|p| p.current_value_f64()).sum();
+    let _max_cv_log: f64 = game.positions.iter().map(|p| p.current_value_f64()).fold(0.0_f64, f64::max);
+    let _share_log = if _total_cv_log > 0.0 { _max_cv_log / _total_cv_log * 100.0 } else { 0.0 };
+    info!("T5 POSITIONS: {} — {} positions (hauptbet share {:.0}%, total ${:.0}):",
+        game.event_slug, game.positions.len(), _share_log, _total_cv_log);
     for pos in &game.positions {
         let title = pos.title.as_deref().unwrap_or("?");
         let outcome = pos.outcome.as_deref().unwrap_or("?");
