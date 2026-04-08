@@ -3,24 +3,28 @@
 cannae_leg_lookup.py — Live SSOT lookup van Cannae's actuele leg-mix per game.
 
 Doel: voor een gegeven event slug, geef terug:
-  - alle legs (market_title × outcome) waar Cannae op heeft ingezet
-  - totale stake $ per leg
+  - alle legs (market_title × outcome) waar Cannae nu in zit
+  - totale stake $ per leg (uit /positions, current holdings)
   - leg share (% van totale game stake)
   - hauptbet (leg met hoogste stake)
-  - timestamp van eerste/laatste trade
+  - cluster-count (hoeveel logische orders, niet ruwe fills)
 
 Achtergrond: zonder deze lookup heb je geen betrouwbare grond om te zeggen
 "Cannae heeft hoge conviction op leg X". RUS-311 reconciliatie liet zien
 dat manual labels op basis van losse snapshots in 6 van de 8 gevallen fout
 waren — soms zelfs de tegenovergestelde kant.
 
-Data source: Polymarket data-api /activity endpoint. Geen lokale cache,
-geen join met snapshots — altijd live truth.
+KRITISCHE LES (2026-04-08): /activity?limit=500 capt fills, niet trades.
+Cannae gebruikt GTC ask-1 ladders die in honderden 1-share fills uiteenvallen.
+Voor high-volume events miste de oude script-versie >50% van de stake omdat
+oudere fills buiten het 500-record window vielen. Fix:
+  - PRIMARY source = /positions (current holdings, accurate stake $)
+  - /activity is alleen voor cluster-display + first/last timing
+  - Fills clusteren per (conditionId × outcome × price-bucket) → "logische orders"
 
 Usage:
-  python3 scripts/cannae_leg_lookup.py nba-cha-bos-2026-04-07
-  python3 scripts/cannae_leg_lookup.py nba-uta-nop-2026-04-07 --json
-  python3 scripts/cannae_leg_lookup.py nba-mia-tor-2026-04-07 --before 2026-04-07T22:00
+  python3 scripts/cannae_leg_lookup.py ucl-fcb1-atm1-2026-04-08
+  python3 scripts/cannae_leg_lookup.py ucl-fcb1-atm1-2026-04-08 --json
 """
 import argparse
 import json
@@ -33,99 +37,178 @@ API = "https://data-api.polymarket.com"
 CANNAE = "0x7ea571c40408f340c1c8fc8eaacebab53c1bde7b"
 
 
-def fetch_activity(wallet: str, limit: int = 500):
-    url = f"{API}/activity?user={wallet}&limit={limit}&type=TRADE"
+def fetch(url: str):
     req = urllib.request.Request(url, headers={"User-Agent": "B/1", "Accept": "application/json"})
     return json.loads(urllib.request.urlopen(req, timeout=20).read())
 
 
-def lookup(slug: str, before_ts: int | None = None) -> dict:
+def fetch_positions(wallet: str, threshold: float = 0.01):
+    return fetch(f"{API}/positions?user={wallet}&limit=500&sizeThreshold={threshold}")
+
+
+def fetch_activity(wallet: str, limit: int = 500):
+    return fetch(f"{API}/activity?user={wallet}&limit={limit}&type=TRADE")
+
+
+def cluster_fills(fills: list, price_decimals: int = 2) -> list:
+    """
+    Cluster GTC ask-1 fills into logical orders.
+    Two fills are in the same cluster if:
+      - same conditionId + outcome
+      - same price (rounded to N decimals)
+    Returns list of clusters with {price, n_fills, total_stake, total_shares, first_ts, last_ts}.
+    """
+    buckets = defaultdict(lambda: {"n_fills": 0, "stake": 0.0, "shares": 0.0, "first_ts": None, "last_ts": None})
+    for f in fills:
+        cid = f.get("conditionId", "")
+        out = f.get("outcome", "")
+        price = round(float(f.get("price", 0) or 0), price_decimals)
+        key = (cid, out, price)
+        b = buckets[key]
+        b["n_fills"] += 1
+        b["stake"] += float(f.get("usdcSize", 0) or 0)
+        b["shares"] += float(f.get("size", 0) or 0)
+        ts = f.get("timestamp", 0)
+        b["first_ts"] = ts if b["first_ts"] is None else min(b["first_ts"], ts)
+        b["last_ts"] = ts if b["last_ts"] is None else max(b["last_ts"], ts)
+    out = []
+    for (cid, outcome, price), b in buckets.items():
+        out.append({"conditionId": cid, "outcome": outcome, "price": price, **b})
+    return out
+
+
+def lookup(slug: str) -> dict:
+    """
+    Build leg-mix from /positions (source of truth for current $ stake)
+    + cluster /activity for fill-pattern visibility.
+    """
+    slug_lc = slug.lower()
+
+    # PRIMARY: positions endpoint — accurate current stake
+    positions = fetch_positions(CANNAE, threshold=0.01)
+    pos_for_event = [p for p in positions if (p.get("eventSlug") or "").lower() == slug_lc]
+
+    # Activity for cluster info + leg discovery (in case position was sold but recently traded)
     acts = fetch_activity(CANNAE)
-    matches = [
-        a for a in acts
-        if (a.get("eventSlug") or "").lower() == slug.lower()
-        and (before_ts is None or a.get("timestamp", 0) <= before_ts)
-    ]
+    fills_for_event = [a for a in acts if (a.get("eventSlug") or "").lower() == slug_lc]
 
-    if not matches:
-        return {"slug": slug, "n_trades": 0, "legs": [], "total_stake": 0.0}
+    if not pos_for_event and not fills_for_event:
+        return {"slug": slug, "n_legs": 0, "total_stake": 0.0, "legs": [], "warning": "No positions or activity found"}
 
-    # Group by (market_title, outcome) — that's a "leg"
-    legs = defaultdict(lambda: {"stake": 0.0, "shares": 0.0, "n": 0, "first_ts": None, "last_ts": None, "prices": []})
-    for a in matches:
-        key = (a.get("title", ""), a.get("outcome", ""))
-        leg = legs[key]
-        leg["stake"] += float(a.get("usdcSize", 0) or 0)
-        leg["shares"] += float(a.get("size", 0) or 0)
-        leg["n"] += 1
-        leg["prices"].append(float(a.get("price", 0) or 0))
-        ts = a.get("timestamp", 0)
-        leg["first_ts"] = ts if leg["first_ts"] is None else min(leg["first_ts"], ts)
-        leg["last_ts"] = ts if leg["last_ts"] is None else max(leg["last_ts"], ts)
+    # Build legs from positions (truth)
+    legs = []
+    for p in pos_for_event:
+        avg = float(p.get("avgPrice", 0) or 0)
+        bought = float(p.get("totalBought", 0) or 0)
+        stake = bought * avg
+        size = float(p.get("size", 0) or 0)
+        cur = float(p.get("curPrice", 0) or 0)
+        cid = p.get("conditionId", "")
 
-    total_stake = sum(l["stake"] for l in legs.values())
-    out_legs = []
-    for (title, outcome), l in legs.items():
-        avg_price = sum(l["prices"]) / len(l["prices"]) if l["prices"] else 0.0
-        out_legs.append({
-            "market_title": title,
-            "outcome": outcome,
-            "stake_usdc": round(l["stake"], 2),
-            "shares": round(l["shares"], 2),
-            "avg_price": round(avg_price, 4),
-            "n_trades": l["n"],
-            "share_of_game": round(l["stake"] / total_stake, 4) if total_stake else 0.0,
-            "first_ts": l["first_ts"],
-            "last_ts": l["last_ts"],
+        # Find related fills for this conditionId+outcome to compute clusters
+        leg_fills = [f for f in fills_for_event
+                     if f.get("conditionId") == cid
+                     and (f.get("outcome") or "").lower() == (p.get("outcome") or "").lower()]
+        clusters = cluster_fills(leg_fills) if leg_fills else []
+
+        legs.append({
+            "market_title": p.get("title", ""),
+            "outcome": p.get("outcome", ""),
+            "conditionId": cid,
+            "stake_usdc": round(stake, 2),
+            "avg_price": round(avg, 4),
+            "cur_price": round(cur, 4),
+            "shares_held": round(size, 2),
+            "shares_bought": round(bought, 2),
+            "n_fills_visible": len(leg_fills),
+            "n_clusters": len(clusters),
+            "clusters": sorted(clusters, key=lambda c: -c["stake"]),
         })
-    out_legs.sort(key=lambda x: -x["stake_usdc"])
+
+    # Sometimes there are recent fills on legs not in current /positions (sold or below threshold)
+    # Add those as zero-position phantom legs for completeness
+    pos_keys = {(p.get("conditionId"), (p.get("outcome") or "").lower()) for p in pos_for_event}
+    extra_fills = [f for f in fills_for_event if (f.get("conditionId"), (f.get("outcome") or "").lower()) not in pos_keys]
+    if extra_fills:
+        by_leg = defaultdict(list)
+        for f in extra_fills:
+            by_leg[(f.get("conditionId"), f.get("title", ""), f.get("outcome", ""))].append(f)
+        for (cid, title, outcome), fls in by_leg.items():
+            clusters = cluster_fills(fls)
+            stake = sum(float(f.get("usdcSize", 0) or 0) for f in fls)
+            legs.append({
+                "market_title": title,
+                "outcome": outcome,
+                "conditionId": cid,
+                "stake_usdc": round(stake, 2),
+                "avg_price": None,
+                "cur_price": None,
+                "shares_held": 0.0,
+                "shares_bought": None,
+                "n_fills_visible": len(fls),
+                "n_clusters": len(clusters),
+                "clusters": sorted(clusters, key=lambda c: -c["stake"]),
+                "note": "no current position (sold or below threshold)",
+            })
+
+    legs.sort(key=lambda x: -x["stake_usdc"])
+    total_stake = sum(l["stake_usdc"] for l in legs)
+    for l in legs:
+        l["share_of_game"] = round(l["stake_usdc"] / total_stake, 4) if total_stake else 0.0
 
     return {
         "slug": slug,
-        "n_trades": len(matches),
-        "n_legs": len(out_legs),
+        "n_legs": len(legs),
         "total_stake": round(total_stake, 2),
-        "hauptbet": out_legs[0] if out_legs else None,
-        "legs": out_legs,
+        "hauptbet": legs[0] if legs else None,
+        "legs": legs,
+        "data_sources": {
+            "positions_count": len(pos_for_event),
+            "activity_fills_visible": len(fills_for_event),
+            "activity_capped": len(acts) >= 500,
+        },
     }
 
 
 def print_human(result: dict) -> None:
     print(f"Slug: {result['slug']}")
-    if result["n_trades"] == 0:
-        print("  Cannae heeft geen trades op deze game.")
+    ds = result.get("data_sources", {})
+    if ds.get("activity_capped"):
+        print(f"  ⚠️  /activity is capped at 500 records — older fills may be missing from cluster view")
+        print(f"     Stake $ comes from /positions (truth), clusters are from {ds.get('activity_fills_visible',0)} visible fills only")
+    if result["n_legs"] == 0:
+        print("  Cannae heeft geen open positie of recent activiteit op deze game.")
         return
-    print(f"  Trades: {result['n_trades']}  Legs: {result['n_legs']}  Total stake: ${result['total_stake']:,.2f}")
+    print(f"  Legs: {result['n_legs']}  Total stake: ${result['total_stake']:,.2f}")
     print()
-    print(f"  {'Market':<45} {'Outcome':<12} {'Stake':>10} {'Share':>7} {'Avg':>6} {'#':>4}")
-    print(f"  {'-'*45} {'-'*12} {'-'*10} {'-'*7} {'-'*6} {'-'*4}")
+    print(f"  {'Market':<45} {'Outcome':<14} {'Stake':>10} {'Share':>7} {'Avg':>6} {'Cur':>6} {'Clusters':>9}")
+    print(f"  {'-'*45} {'-'*14} {'-'*10} {'-'*7} {'-'*6} {'-'*6} {'-'*9}")
     for i, leg in enumerate(result["legs"]):
         marker = "★" if i == 0 else " "
-        print(f"  {marker}{leg['market_title'][:44]:<44} {leg['outcome'][:12]:<12} ${leg['stake_usdc']:>8,.0f} {leg['share_of_game']*100:>6.1f}% {leg['avg_price']:>6.3f} {leg['n_trades']:>4}")
+        avg = f"{leg['avg_price']:.3f}" if leg.get("avg_price") is not None else "  —  "
+        cur = f"{leg['cur_price']:.3f}" if leg.get("cur_price") is not None else "  —  "
+        cluster_info = f"{leg['n_clusters']}/{leg['n_fills_visible']}f"
+        print(f"  {marker}{leg['market_title'][:44]:<44} {leg['outcome'][:14]:<14} ${leg['stake_usdc']:>8,.0f} {leg['share_of_game']*100:>6.1f}% {avg:>6} {cur:>6} {cluster_info:>9}")
+        if leg.get("note"):
+            print(f"     ↳ {leg['note']}")
     print()
     h = result["hauptbet"]
     print(f"  Hauptbet: {h['market_title']} / {h['outcome']}  (${h['stake_usdc']:,.0f}, {h['share_of_game']*100:.0f}% van game)")
-    if h["first_ts"]:
-        print(f"  Eerste trade: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(h['first_ts']))}")
+    if h.get("clusters"):
+        print(f"  Hauptbet clusters (price → stake):")
+        for c in h["clusters"][:10]:
+            ts_first = time.strftime("%m-%d %H:%M", time.gmtime(c["first_ts"])) if c["first_ts"] else "?"
+            print(f"    @{c['price']:.3f}  ${c['stake']:>8,.0f}  ({c['n_fills']} fills, first {ts_first})")
 
 
 def main():
     p = argparse.ArgumentParser(description="Lookup Cannae's leg-mix voor een game slug")
-    p.add_argument("slug", help="Event slug, bv. nba-cha-bos-2026-04-07")
+    p.add_argument("slug", help="Event slug, bv. ucl-fcb1-atm1-2026-04-08")
     p.add_argument("--json", action="store_true", help="Output als JSON")
-    p.add_argument("--before", help="Alleen trades op of voor deze tijd (ISO of unix ts)")
     args = p.parse_args()
-
-    before_ts = None
-    if args.before:
-        try:
-            before_ts = int(args.before)
-        except ValueError:
-            before_ts = int(time.mktime(time.strptime(args.before[:19], "%Y-%m-%dT%H:%M:%S")))
-
-    result = lookup(args.slug, before_ts=before_ts)
+    result = lookup(args.slug)
     if args.json:
-        print(json.dumps(result, indent=2))
+        print(json.dumps(result, indent=2, default=str))
     else:
         print_human(result)
 
