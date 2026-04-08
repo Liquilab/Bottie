@@ -34,6 +34,7 @@ config_vps_backup.yaml
 
 # One-off analysis scripts (kept locally, not in repo)
 scripts/cannae_*.py
+!scripts/cannae_leg_lookup.py
 scripts/sizing_*.py
 scripts/sovereign_*.py
 scripts/perfect_strategy*.py
