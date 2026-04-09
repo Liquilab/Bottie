@@ -125,7 +125,7 @@ impl GameSchedule {
     }
 }
 
-/// A game we're watching -- discovered at T-30, waiting for T-10 confirm
+/// A game we're watching -- discovered at T-30, waiting for T-5 confirm
 #[derive(Debug, Clone)]
 pub struct WatchedGame {
     pub event_slug: String,
@@ -137,12 +137,12 @@ pub struct WatchedGame {
     pub discovered_at: DateTime<Utc>,
 }
 
-/// Confirmed match at T-10, ready for execution
-pub struct T10Match {
+/// Confirmed match at T-5, ready for execution
+pub struct T5Match {
     pub wallet_name: String,
     pub wallet_address: String,
     pub game_event_slug: String,
-    pub positions: Vec<WalletPosition>,  // current positions (T-10 fetch)
+    pub positions: Vec<WalletPosition>,  // current positions (T-5 fetch)
     pub t30_position_count: usize,       // how many positions at T-30 (for logging)
 }
 
@@ -201,9 +201,12 @@ fn parse_event(event: &GammaSportsEvent, sport_tag: &str) -> Option<UpcomingGame
         for market in markets {
             if let Some(cid) = &market.condition_id {
                 condition_ids.push(cid.clone());
+                let question = market.question.as_deref().unwrap_or("").to_lowercase();
+
+                // Try tokens first, fallback to clobTokenIds (Gamma API often has empty tokens)
+                let mut pairs: Vec<(String, String)> = Vec::new();
                 if let Some(tokens) = &market.tokens {
-                    let question = market.question.as_deref().unwrap_or("").to_lowercase();
-                    let pairs: Vec<(String, String)> = tokens.iter()
+                    pairs = tokens.iter()
                         .filter_map(|t| {
                             if let (Some(o), Some(tid)) = (&t.outcome, &t.token_id) {
                                 Some((o.clone(), tid.clone()))
@@ -212,6 +215,30 @@ fn parse_event(event: &GammaSportsEvent, sport_tag: &str) -> Option<UpcomingGame
                             }
                         })
                         .collect();
+                }
+                // Fallback: clobTokenIds = ["yes_id", "no_id"]
+                if pairs.is_empty() {
+                    if let Some(clob_ids) = &market.clob_token_ids {
+                        let parsed: Option<Vec<String>> = match clob_ids {
+                            serde_json::Value::Array(arr) => {
+                                Some(arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                            }
+                            serde_json::Value::String(s) => {
+                                serde_json::from_str(s).ok()
+                            }
+                            _ => None,
+                        };
+                        if let Some(ids) = parsed {
+                            if ids.len() >= 2 {
+                                pairs = vec![
+                                    ("Yes".to_string(), ids[0].clone()),
+                                    ("No".to_string(), ids[1].clone()),
+                                ];
+                            }
+                        }
+                    }
+                }
+                if !pairs.is_empty() {
                     market_tokens.push((cid.clone(), question, pairs));
                 }
             }
@@ -242,7 +269,7 @@ pub fn sport_tags_from_watchlist(watchlist: &[WatchlistEntry]) -> Vec<String> {
 
 /// Continuous discovery: check ALL upcoming games (next 24h) for Cannae positions.
 /// Runs every poll cycle. Only returns games not already in watched_games.
-/// Hauptbet is NOT determined here — only at T-10.
+/// Hauptbet is NOT determined here — only at T-5.
 ///
 /// Uses pre-fetched positions from the poll loop (no extra API calls).
 pub fn discover_continuous_from_positions(
@@ -352,34 +379,27 @@ pub fn discover_continuous_from_positions(
     watched_games.into_values().collect()
 }
 
-/// Confirm + Execute: For watched games starting within `window_minutes`,
+/// T-5 Confirm + Execute: For watched games starting in ~5 min,
 /// re-fetch wallet positions, compare with T-30 snapshot, return confirmed matches.
 /// Uses pre-fetched positions from the poll loop (no extra API calls).
-///
-/// `window_minutes` is the explicit upper bound (in minutes-to-kickoff). No hidden cushion.
-/// Caller is responsible for picking the correct window per phase (e.g. 10 for T-10, 1 for T-1).
-///
-/// `phase` is a short tag ("T10" or "T1") used in log lines so operators can
-/// distinguish T-10 from T-1 confirmation events in production.
-pub fn confirm_and_execute(
+pub fn confirm_and_execute_t5(
     watched_games: &[WatchedGame],
     watchlist: &[WatchlistEntry],
-    window_minutes: u32,
-    phase: &str,
-    already_executed: &HashSet<String>,
+    t5_minutes: u32,
+    t5_executed: &HashSet<String>,
     raw_positions: &[(String, String, Vec<WalletPosition>)],
-) -> Vec<T10Match> {
+) -> Vec<T5Match> {
     let now = Utc::now();
     let mut matches = Vec::new();
 
-    // Filter to games starting in 0..window_minutes
-    let window_max = chrono::Duration::minutes(window_minutes as i64);
+    // Filter to games starting in 0..t5_minutes+2 window (with margin)
+    let window_max = chrono::Duration::minutes((t5_minutes as i64) + 2);
     let due_games: Vec<&WatchedGame> = watched_games.iter()
         .filter(|g| {
             let until_start = g.start_time.signed_duration_since(now);
             until_start >= chrono::Duration::zero() && until_start <= window_max
         })
-        .filter(|g| !already_executed.contains(&g.event_slug))
+        .filter(|g| !t5_executed.contains(&g.event_slug))
         .collect();
 
     if due_games.is_empty() {
@@ -396,8 +416,7 @@ pub fn confirm_and_execute(
     let strip_more = |s: &str| s.trim_end_matches("-more-markets").to_string();
 
     for game in &due_games {
-        // SSOT Pilaar 1, Regel 2 — forbidden slug suffixes (rules.yaml).
-        // Skip "-more-markets" events — same game, different condition_ids.
+        // SSOT Pilaar 1, Regel 2 — forbidden slug suffixes (rules.yaml: forbidden_slug_suffixes)
         // Positions are already matched via strip_more() on the base event.
         if crate::rules::is_forbidden_slug(&game.event_slug) {
             continue;
@@ -438,15 +457,14 @@ pub fn confirm_and_execute(
 
             let mins_to_start = game.start_time.signed_duration_since(now).num_minutes();
             info!(
-                "{} CONFIRMED: {} has {} positions in {} (starts in {}min)",
-                phase,
+                "T5 CONFIRMED: {} has {} positions in {} (starts in {}min)",
                 wallet_cfg.name,
                 current_game_positions.len(),
                 game.event_slug,
                 mins_to_start,
             );
 
-            matches.push(T10Match {
+            matches.push(T5Match {
                 wallet_name: wallet_cfg.name.clone(),
                 wallet_address: wallet_addr.clone(),
                 game_event_slug: game.event_slug.clone(),

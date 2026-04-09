@@ -318,8 +318,8 @@ async fn copy_trading_loop(
 
     // Two-phase schedule state
     let mut game_schedule = scheduler::GameSchedule::load_from_disk(std::path::Path::new("data/schedule_cache.json"));
-    let mut watched_games: Vec<scheduler::WatchedGame> = Vec::new(); // continuously discovered, waiting for T-10
-    let mut t10_executed: HashSet<String> = HashSet::new(); // event_slugs already bought at T-10
+    let mut watched_games: Vec<scheduler::WatchedGame> = Vec::new(); // continuously discovered, waiting for T-5
+    let mut t5_executed: HashSet<String> = HashSet::new(); // event_slugs already bought at T-5
     let mut t1_executed: HashSet<String> = HashSet::new(); // event_slugs re-checked at T-1
 
     // Cannae position summary: log every ~30 min (120 polls × 15s = 30 min)
@@ -401,7 +401,7 @@ async fn copy_trading_loop(
             }
         }
 
-        // --- Continuous discovery + T-10 confirm+buy ---
+        // --- Continuous discovery + T-5 confirm+buy ---
         {
             let (schedule_cfg, watchlist) = {
                 let c = config.read().await;
@@ -421,7 +421,7 @@ async fn copy_trading_loop(
                     // 2. Continuous discovery: find ALL upcoming games where Cannae has positions
                     let already_watched: HashSet<String> = watched_games.iter()
                         .map(|g| g.event_slug.clone())
-                        .chain(t10_executed.iter().cloned())
+                        .chain(t5_executed.iter().cloned())
                         .collect();
 
                     let new_watched = scheduler::discover_continuous_from_positions(
@@ -439,31 +439,30 @@ async fn copy_trading_loop(
                         watched_games.extend(new_watched);
                     }
 
-                    // 3. T-10 Confirm+Buy: use pre-fetched positions (no extra API calls).
-                    //    Window = 0..t10_minutes (explicit, no hidden cushion).
-                    let t10_matches = scheduler::confirm_and_execute(
+                    // 3. T-5 Confirm+Buy: use pre-fetched positions (no extra API calls).
+                    //    Window = 0..t5_minutes (explicit, no hidden cushion).
+                    let t5_matches = scheduler::confirm_and_execute_t5(
                         &watched_games,
                         &watchlist,
-                        schedule_cfg.t10_minutes,
-                        "T10",
-                        &t10_executed,
+                        schedule_cfg.t5_minutes,
+                        &t5_executed,
                         &raw_positions,
                     );
 
                     // Always use latest config for sizing (hot-reload may have changed %)
                     wave_budget.update_config(config.read().await.sport_sizing.clone());
 
-                    // Per-poll dedup: T-10 and T-1 windows overlap (e.g. 0..12 vs 0..3),
+                    // Per-poll dedup: T-5 and T-1 windows overlap (e.g. 0..12 vs 0..3),
                     // so a game in the 0..3 zone could trigger both passes in the same
-                    // poll cycle. Track every game T-10 *evaluated* this iteration so the
+                    // poll cycle. Track every game T-5 *evaluated* this iteration so the
                     // T-1 pass skips it within the same poll. Reset every loop iteration —
-                    // on the next poll, T-10 will skip via t10_executed and T-1 will get
+                    // on the next poll, T-5 will skip via t5_executed and T-1 will get
                     // its own fresh shot at any newly-arrived Cannae positions.
                     let mut tried_this_poll: HashSet<String> = HashSet::new();
 
-                    // Sort T10 matches by Cannae game total DESC (biggest games first)
-                    let mut t10_sorted = t10_matches;
-                    t10_sorted.sort_by(|a, b| {
+                    // Sort T5 matches by Cannae game total DESC (biggest games first)
+                    let mut t5_sorted = t5_matches;
+                    t5_sorted.sort_by(|a, b| {
                         let a_total = wave_budget.cannae_games
                             .get(&a.game_event_slug)
                             .map(|g| g.total_usdc)
@@ -475,23 +474,23 @@ async fn copy_trading_loop(
                         b_total.partial_cmp(&a_total).unwrap_or(std::cmp::Ordering::Equal)
                     });
 
-                    for t10_match in &t10_sorted {
+                    for t5_match in &t5_sorted {
                         // Skip if this game was already successfully executed by another wallet
-                        if t10_executed.contains(&t10_match.game_event_slug) {
+                        if t5_executed.contains(&t5_match.game_event_slug) {
                             continue;
                         }
                         // Mark as tried this poll cycle so the T-1 pass below skips it.
-                        tried_this_poll.insert(t10_match.game_event_slug.clone());
+                        tried_this_poll.insert(t5_match.game_event_slug.clone());
                         let game = stability::StableGame {
-                            event_slug: t10_match.game_event_slug.clone(),
-                            positions: t10_match.positions.clone(),
-                            source_wallet: t10_match.wallet_address.clone(),
-                            source_name: t10_match.wallet_name.clone(),
+                            event_slug: t5_match.game_event_slug.clone(),
+                            positions: t5_match.positions.clone(),
+                            source_wallet: t5_match.wallet_address.clone(),
+                            source_name: t5_match.wallet_name.clone(),
                         };
                         info!(
-                            "T10 EXECUTE: {} from {} ({} positions, discovery had {})",
+                            "T5 EXECUTE: {} from {} ({} positions, discovery had {})",
                             game.event_slug, game.source_name,
-                            t10_match.positions.len(), t10_match.t30_position_count,
+                            t5_match.positions.len(), t5_match.t30_position_count,
                         );
                         let executed = execute_stable_game(
                             &game, &mut executor, &risk, &logger, &config, true,
@@ -499,7 +498,7 @@ async fn copy_trading_loop(
                         ).await;
                         if executed {
                             // Mark as executed — don't retry with other wallets
-                            t10_executed.insert(t10_match.game_event_slug.clone());
+                            t5_executed.insert(t5_match.game_event_slug.clone());
                             // Brief pause between orders to avoid CLOB 425 rate limit
                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         }
@@ -507,21 +506,20 @@ async fn copy_trading_loop(
                     }
 
                     // 4. T-1 second pass: re-check games close to kickoff to catch late
-                    //    Cannae trades that arrived after T-10 already fired. Uses fresh
+                    //    Cannae trades that arrived after T-5 already fired. Uses fresh
                     //    raw_positions; condition-level dedup (attempted set) prevents
-                    //    double-buying legs already filled at T-10.
+                    //    double-buying legs already filled at T-5.
                     //    Window = 0..t1_minutes (explicit, no hidden cushion — fires at
                     //    actual T-1, not T-3 like the old +2 cushion would have caused).
-                    let t1_matches = scheduler::confirm_and_execute(
+                    let t1_matches = scheduler::confirm_and_execute_t5(
                         &watched_games,
                         &watchlist,
                         schedule_cfg.t1_minutes,
-                        "T1",
                         &t1_executed,
                         &raw_positions,
                     );
 
-                    // Same sort as T-10: biggest Cannae games first so they get priority
+                    // Same sort as T-5: biggest Cannae games first so they get priority
                     // when capital allocation is tight.
                     let mut t1_sorted = t1_matches;
                     t1_sorted.sort_by(|a, b| {
@@ -537,7 +535,7 @@ async fn copy_trading_loop(
                     });
 
                     for t1_match in &t1_sorted {
-                        // Same-poll dedup: skip if T-10 already evaluated this game in
+                        // Same-poll dedup: skip if T-5 already evaluated this game in
                         // this iteration. Next poll cycle resets tried_this_poll.
                         if tried_this_poll.contains(&t1_match.game_event_slug) {
                             continue;
@@ -552,10 +550,10 @@ async fn copy_trading_loop(
                             source_name: t1_match.wallet_name.clone(),
                         };
                         info!(
-                            "T1 EXECUTE: {} from {} ({} positions, t10_bought={})",
+                            "T1 EXECUTE: {} from {} ({} positions, t5_bought={})",
                             game.event_slug, game.source_name,
                             t1_match.positions.len(),
-                            t10_executed.contains(&t1_match.game_event_slug),
+                            t5_executed.contains(&t1_match.game_event_slug),
                         );
                         let executed = execute_stable_game(
                             &game, &mut executor, &risk, &logger, &config, true,
@@ -618,39 +616,40 @@ async fn execute_stable_game(
         return false;
     }
 
-    // Cannae conviction filter — hauptbet share = largest leg CV / total game CV.
+    // Min Cannae stake filter — measures TOTAL game conviction across ALL legs
+    // (win/draw/spread/ou/btts/player_prop), not just copyable ones.
     //
-    // Reden (2026-04-07, validatie op n=213 resolved Bottie trades sinds 2026-04-01):
-    // Trades waar Cannae's grootste leg ≥60% van zijn game-totaal is leveren +22.9% ROI
-    // (n=72), trades onder 60% leveren -6.1% ROI (n=141). De drempel selecteert Cannae's
-    // duidelijke conviction-games en filtert hedged/scattered posities eruit.
+    // Reden (2026-04-07, na strategy-shift onderzoek): sinds W11 (2026-03-09) is in
+    // 54% van NBA-games Cannae's hauptbet géén ML maar spread/ou. Een per-leg ML gate
+    // filtert juist die high-conviction games eruit. Total game CV reflecteert
+    // Cannae's overall conviction in het spel ongeacht welke leg het zit.
     //
-    // Vervangt de oude `min_cannae_game_usdc` dollar-floor (was per league $4K), die
-    // size meet ipv conviction. Een dollar-floor schiet zowel kleine high-conviction
-    // games als grote scattered hedge-games op de verkeerde manier (zie analyse:
-    // research/win_no_pricing/hauptbet_share_vs_roi.py).
-    {
+    // Aanvullende eis: ml_cv > 0 — we kopiëren alleen ML, dus geen punt om een game
+    // te onboarden waar Cannae geen ML-positie heeft.
+    if let Some(&min_usdc) = sport_sizing.min_cannae_game_usdc.get(league) {
         let total_cv: f64 = game.positions.iter()
             .map(|p| p.current_value_f64())
             .sum();
-        let max_cv: f64 = game.positions.iter()
+        let ml_cv: f64 = game.positions.iter()
+            .filter(|p| {
+                CopyTrader::detect_market_type(p.title.as_deref().unwrap_or("")) == "win"
+            })
             .map(|p| p.current_value_f64())
-            .fold(0.0_f64, f64::max);
-        let hauptbet_share = if total_cv > 0.0 { max_cv / total_cv } else { 0.0 };
-        const MIN_SHARE: f64 = 0.60;
-        if hauptbet_share < MIN_SHARE {
-            info!("GAME SKIP: {} — Cannae hauptbet share {:.0}% < {:.0}% (total ${:.0}, max leg ${:.0})",
-                game.event_slug, hauptbet_share * 100.0, MIN_SHARE * 100.0, total_cv, max_cv);
+            .sum();
+        if total_cv < min_usdc {
+            info!("GAME SKIP: {} — Cannae total game CV ${:.0} < min ${:.0} for {}",
+                game.event_slug, total_cv, min_usdc, league);
+            return false;
+        }
+        if ml_cv <= 0.0 {
+            info!("GAME SKIP: {} — Cannae has no ML position (total CV ${:.0} on non-ML legs only)",
+                game.event_slug, total_cv);
             return false;
         }
     }
 
-    // Log ALL positions for this game (T10 debug)
-    let _total_cv_log: f64 = game.positions.iter().map(|p| p.current_value_f64()).sum();
-    let _max_cv_log: f64 = game.positions.iter().map(|p| p.current_value_f64()).fold(0.0_f64, f64::max);
-    let _share_log = if _total_cv_log > 0.0 { _max_cv_log / _total_cv_log * 100.0 } else { 0.0 };
-    info!("T10 POSITIONS: {} — {} positions (hauptbet share {:.0}%, total ${:.0}):",
-        game.event_slug, game.positions.len(), _share_log, _total_cv_log);
+    // Log ALL positions for this game (T5 debug)
+    info!("T5 POSITIONS: {} — {} positions:", game.event_slug, game.positions.len());
     for pos in &game.positions {
         let title = pos.title.as_deref().unwrap_or("?");
         let outcome = pos.outcome.as_deref().unwrap_or("?");
@@ -997,30 +996,26 @@ async fn execute_stable_game(
         if b.fixed_size { continue; }
         let price = b.pos.avg_price_f64();
         let conf = (price * 1.10).min(0.95);
-        b.size_pct = crate::sizing::confidence_pct(conf);
+        let base = crate::sizing::confidence_pct(conf);
+        // NBA PILOT 2026-04-09: half-size for 14d eval window.
+        // Kill criteria: ROI<0 disable, 0-5 hold, 5-15 scale to full, >15 hold (no chase).
+        // Revert by removing the  branch after eval.
+        b.size_pct = if league == "nba" { base * 0.5 } else { base };
     }
 
     // SSOT Pilaar 1, Regel 3 — Prijsband per leg-type (rules.yaml: price_band)
     // DRAW YES bypasses per Regel 4 (min/max null in rules.yaml).
-    // Exempt WIN_YES (3-leg case 1) bypasses the price band entirely — the
-    // structural opt-in via exempt_win_yes_ban means the user accepts the
-    // leg regardless of price; routing it through win_no would apply the
-    // wrong rule set (NO-side cap) to a YES-side bet.
     {
         let band = &rules::global().price_band;
         bets.retain(|b| {
             let price = b.pos.avg_price_f64();
             let outcome = b.pos.outcome.as_deref().unwrap_or("");
             let is_yes = outcome.eq_ignore_ascii_case("Yes");
-            // Exempt WIN_YES legs skip the price-band check by design.
-            if b.game_line == "win" && is_yes && b.exempt_win_yes_ban {
-                return true;
-            }
             let leg_band = match (b.game_line.as_str(), is_yes) {
                 ("draw", true) => &band.draw_yes,
                 ("draw", false) => &band.draw_no,
                 ("win", false) => &band.win_no,
-                _ => &band.win_no, // unreachable: win+yes is either exempt (above) or banned in Regel 1
+                _ => &band.win_no, // win+yes shouldn't reach here (banned in Regel 1)
             };
             if let Some(min) = leg_band.min {
                 if price < min {
@@ -1057,7 +1052,7 @@ async fn execute_stable_game(
         return false;
     }
 
-    // Log T10 PLAN
+    // Log T5 PLAN
     info!(
         "GAME EXECUTE: {} ({}) — {} bets",
         game.event_slug, league, bets.len(),
@@ -1067,7 +1062,7 @@ async fn execute_stable_game(
         let outcome = bet.pos.outcome.as_deref().unwrap_or("");
         let usdc = bankroll * bet.size_pct / 100.0;
         info!(
-            "  T10 PLAN: {} {} | {} | ${:.0} ({:.0}%) | Cannae cv=${:.0} iv=${:.0}",
+            "  T5 PLAN: {} {} | {} | ${:.0} ({:.0}%) | Cannae cv=${:.0} iv=${:.0}",
             outcome, bet.game_line, &title[..title.len().min(50)],
             usdc, bet.size_pct, bet.pos.current_value_f64(), bet.pos.initial_value_f64(),
         );
@@ -1139,7 +1134,7 @@ async fn execute_stable_game(
 
         // Flat sizing: bankroll × pct / price
         let mut risk_guard = risk.write().await;
-        let label = if taker_mode { "T10" } else { "GAME" };
+        let label = if taker_mode { "T5" } else { "GAME" };
         let result = executor.execute_flat(
             &agg_signal, &mut risk_guard, &logger,
             taker_mode, bet.size_pct,
