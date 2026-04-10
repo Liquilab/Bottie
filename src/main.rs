@@ -29,6 +29,7 @@ use clap::Parser;
 use tokio::sync::RwLock;
 use std::collections::HashSet;
 use tracing::{error, info, warn};
+use crate::logger::TradeLog;
 
 use crate::clob::client::ClobClient;
 use crate::config::{AppConfig, BotConfig, SharedConfig};
@@ -492,13 +493,21 @@ async fn copy_trading_loop(
                             game.event_slug, game.source_name,
                             t5_match.positions.len(), t5_match.t30_position_count,
                         );
-                        let executed = execute_stable_game(
+                        let bought = execute_stable_game(
                             &game, &mut executor, &risk, &logger, &config, true,
                             &client, &game_schedule,
                         ).await;
-                        if executed {
+                        if !bought.is_empty() {
                             // Mark as executed — don't retry with other wallets
                             t5_executed.insert(t5_match.game_event_slug.clone());
+                            // Spawn T+5 verification task
+                            spawn_t5_verify(
+                                bought,
+                                t5_match.game_event_slug.clone(),
+                                t5_match.wallet_address.clone(),
+                                client.clone(),
+                                logger.clone(),
+                            );
                             // Brief pause between orders to avoid CLOB 425 rate limit
                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         }
@@ -555,12 +564,20 @@ async fn copy_trading_loop(
                             t1_match.positions.len(),
                             t5_executed.contains(&t1_match.game_event_slug),
                         );
-                        let executed = execute_stable_game(
+                        let bought = execute_stable_game(
                             &game, &mut executor, &risk, &logger, &config, true,
                             &client, &game_schedule,
                         ).await;
-                        if executed {
+                        if !bought.is_empty() {
                             t1_executed.insert(t1_match.game_event_slug.clone());
+                            // Spawn T+5 verification task
+                            spawn_t5_verify(
+                                bought,
+                                t1_match.game_event_slug.clone(),
+                                t1_match.wallet_address.clone(),
+                                client.clone(),
+                                logger.clone(),
+                            );
                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         }
                     }
@@ -576,12 +593,226 @@ async fn copy_trading_loop(
     }
 }
 
+/// A leg we successfully bought — used by T+5 verification to detect mismatches.
+#[derive(Clone, Debug)]
+struct BoughtLeg {
+    condition_id: String,
+    outcome: String,
+    token_id: String,
+    price: f64,
+    market_title: String,
+    game_line: String,
+    /// True for OPP_NO legs (synthetic, not a direct Cannae copy) — skip T+5 verify
+    synthetic: bool,
+}
+
+/// Spawn a background task that waits 5 minutes, then re-checks Cannae's positions
+/// for this game. If Cannae has dropped a leg we bought (CV → 0), sell our position.
+///
+/// This catches the scenario where Cannae flipped or exited a position between our
+/// T-5 snapshot and the actual game start. Selling a wrong leg early limits losses.
+///
+/// Fix #1: Uses our actual PM positions for share count (not estimated).
+/// Fix #2: Polls sell order for fill confirmation, cancels if unfilled.
+/// Fix #3: Skips synthetic OPP_NO legs (Cannae never held those condition_ids).
+fn spawn_t5_verify(
+    bought_legs: Vec<BoughtLeg>,
+    event_slug: String,
+    cannae_wallet: String,
+    client: Arc<ClobClient>,
+    logger: Arc<TradeLogger>,
+) {
+    tokio::spawn(async move {
+        // Wait 5 minutes after execution
+        tokio::time::sleep(Duration::from_secs(300)).await;
+
+        // Filter out synthetic legs (OPP_NO) — Cannae never held those condition_ids
+        let verifiable: Vec<&BoughtLeg> = bought_legs.iter()
+            .filter(|l| !l.synthetic)
+            .collect();
+
+        if verifiable.is_empty() {
+            info!("T+5 VERIFY: {} — all {} legs are synthetic, skipping", event_slug, bought_legs.len());
+            return;
+        }
+
+        info!("T+5 VERIFY: checking {} legs for {} ({} synthetic skipped)",
+            verifiable.len(), event_slug, bought_legs.len() - verifiable.len());
+
+        // Fetch Cannae's current positions AND our own positions in parallel
+        let funder = client.funder_address();
+        let (cannae_result, our_result) = tokio::join!(
+            client.get_wallet_positions(&cannae_wallet, 500),
+            client.get_wallet_positions(&funder, 500),
+        );
+
+        let cannae_positions = match cannae_result {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("T+5 VERIFY: failed to fetch Cannae positions: {e}");
+                return;
+            }
+        };
+        let our_positions = match our_result {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("T+5 VERIFY: failed to fetch our positions: {e}");
+                return;
+            }
+        };
+
+        // Build a set of Cannae's current condition_id:outcome pairs with significant CV
+        let cannae_active: std::collections::HashSet<String> = cannae_positions.iter()
+            .filter(|p| p.current_value_f64() > 10.0) // >$10 CV = still active
+            .map(|p| {
+                let cid = p.condition_id.as_deref().unwrap_or("");
+                let out = p.outcome.as_deref().unwrap_or("").to_lowercase();
+                format!("{}:{}", cid, out)
+            })
+            .collect();
+
+        // Build a lookup for our actual shares by condition_id:outcome
+        let our_shares: std::collections::HashMap<String, f64> = our_positions.iter()
+            .filter(|p| p.size_f64() > 0.01)
+            .map(|p| {
+                let cid = p.condition_id.as_deref().unwrap_or("");
+                let out = p.outcome.as_deref().unwrap_or("").to_lowercase();
+                (format!("{}:{}", cid, out), p.size_f64())
+            })
+            .collect();
+
+        for leg in &verifiable {
+            let key = format!("{}:{}", leg.condition_id, leg.outcome.to_lowercase());
+            if cannae_active.contains(&key) {
+                info!("T+5 OK: {} {} — Cannae still holds", leg.game_line, leg.market_title);
+                continue;
+            }
+
+            // Look up our actual shares from PM (not the estimate)
+            let actual_shares = match our_shares.get(&key) {
+                Some(&s) => s,
+                None => {
+                    warn!("T+5 MISMATCH: {} {} — Cannae dropped, but we have no PM position (already sold?)",
+                        leg.game_line, leg.market_title);
+                    continue;
+                }
+            };
+
+            // Cannae dropped this leg — sell our position
+            warn!(
+                "T+5 MISMATCH: {} {} {} — Cannae no longer holds! Selling {:.1} shares (actual from PM)",
+                leg.game_line, leg.outcome, leg.market_title, actual_shares
+            );
+
+            // Get best bid to sell at market
+            let sell_price = match client.get_best_bid(&leg.token_id).await {
+                Ok(bid) => bid,
+                Err(e) => {
+                    warn!("T+5 SELL FAILED: no bid for {} — {e}", leg.market_title);
+                    continue;
+                }
+            };
+
+            // Sell via GTC at best bid
+            let order_id = match client.create_and_post_order(
+                &leg.token_id,
+                sell_price,
+                actual_shares,
+                crate::clob::client::Side::Sell,
+                crate::clob::client::OrderType::GTC,
+                0,
+            ).await {
+                Ok(resp) => {
+                    let oid = resp.order_id.clone().unwrap_or_default();
+                    info!(
+                        "T+5 SELL PLACED: {} {} @ {:.0}ct ({:.1} shares) | order={}",
+                        leg.outcome, leg.market_title, sell_price * 100.0, actual_shares, oid
+                    );
+                    oid
+                }
+                Err(e) => {
+                    warn!("T+5 SELL FAILED: {} — {e}", leg.market_title);
+                    continue;
+                }
+            };
+
+            if order_id.is_empty() {
+                continue;
+            }
+
+            // Poll for fill (3 attempts × 2s = 6s max)
+            let mut filled = false;
+            for _ in 0..3 {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                match client.get_order_status(&order_id).await {
+                    Ok((status, _size_matched)) => {
+                        if status == "MATCHED" {
+                            filled = true;
+                            break;
+                        } else if status == "CANCELLED" {
+                            break;
+                        }
+                        // LIVE/OPEN → keep polling
+                    }
+                    Err(_) => {}
+                }
+            }
+
+            if !filled {
+                // Cancel unfilled sell order
+                warn!("T+5 SELL NOT FILLED: {} — cancelling order {}", leg.market_title, order_id);
+                let _ = client.cancel_order(&order_id).await;
+                continue;
+            }
+
+            info!("T+5 SELL FILLED: {} {} @ {:.0}ct ({:.1} shares)", leg.outcome, leg.market_title, sell_price * 100.0, actual_shares);
+
+            // Log the sell
+            let sell_pnl = (sell_price - leg.price) * actual_shares;
+            logger.log(TradeLog {
+                timestamp: chrono::Utc::now(),
+                token_id: leg.token_id.clone(),
+                condition_id: leg.condition_id.clone(),
+                market_title: leg.market_title.clone(),
+                sport: String::new(),
+                side: "SELL".to_string(),
+                outcome: leg.outcome.clone(),
+                event_slug: Some(event_slug.clone()),
+                price: sell_price,
+                size_usdc: sell_price * actual_shares,
+                size_shares: actual_shares,
+                signal_source: "t5_verify".to_string(),
+                copy_wallet: None,
+                consensus_count: None,
+                consensus_wallets: None,
+                edge_pct: 0.0,
+                confidence: 0.0,
+                signal_delay_ms: 0,
+                order_id: Some(order_id),
+                filled: true,
+                dry_run: false,
+                result: Some("sold".to_string()),
+                pnl: Some(sell_pnl),
+                resolved_at: Some(chrono::Utc::now()),
+                sell_price: Some(sell_price),
+                actual_pnl: Some(sell_pnl),
+                closing_price: None,
+                taker_ask: None,
+                exit_type: Some("t5_mismatch".to_string()),
+                strategy_version: None,
+            });
+        }
+    });
+}
+
 /// Per game: detect hauptbet per game line, flat size, execute.
 ///
 /// For each game line (moneyline/draw/spread) allowed by sport config:
 /// 1. Find the hauptbet (largest USDC position per conditionId of that type)
 /// 2. Size: flat % from wave budget (bankroll × pct / price)
 /// 3. Execute via FOK on ask
+///
+/// Returns the list of legs that were actually filled (empty = nothing bought).
 async fn execute_stable_game(
     game: &stability::StableGame,
     executor: &mut Executor,
@@ -591,7 +822,7 @@ async fn execute_stable_game(
     taker_mode: bool,
     client: &Arc<ClobClient>,
     game_schedule: &scheduler::GameSchedule,
-) -> bool {
+) -> Vec<BoughtLeg> {
     use crate::copy_trader::CopyTrader;
 
     let cfg = config.read().await;
@@ -606,14 +837,14 @@ async fn execute_stable_game(
     let league = game.event_slug.split('-').next().unwrap_or("");
     if !allowed_leagues.is_empty() && !allowed_leagues.iter().any(|l| l == league) {
         info!("GAME SKIP: {} — league '{}' not in {}'s allowed leagues", game.event_slug, league, game.source_name);
-        return false;
+        return vec![];
     }
 
     // Which game lines are allowed for this sport?
     let allowed_lines = sport_sizing.allowed_game_lines(league);
     if allowed_lines.is_empty() {
         info!("GAME SKIP: {} — no allowed game lines for league {}", game.event_slug, league);
-        return false;
+        return vec![];
     }
 
     // Min Cannae stake filter — measures TOTAL game conviction across ALL legs
@@ -665,7 +896,7 @@ async fn execute_stable_game(
     {
         None => {
             info!("GAME SKIP: {} — no positions", game.event_slug);
-            return false;
+            return vec![];
         }
         Some(true_haupt) => {
             let haupt_type = CopyTrader::detect_market_type(true_haupt.title.as_deref().unwrap_or(""));
@@ -680,7 +911,7 @@ async fn execute_stable_game(
                     true_haupt.title.as_deref().unwrap_or("?"),
                     allowed_lines
                 );
-                return false;
+                return vec![];
             }
             match crate::sizing::cannae_cv_multiplier(haupt_cv) {
                 None => {
@@ -692,7 +923,7 @@ async fn execute_stable_game(
                         true_haupt.outcome.as_deref().unwrap_or("?"),
                         true_haupt.title.as_deref().unwrap_or("?"),
                     );
-                    return false;
+                    return vec![];
                 }
                 Some(m) => {
                     info!(
@@ -718,6 +949,7 @@ async fn execute_stable_game(
         size_pct: f64,
         fixed_size: bool, // true = skip confidence_pct override
         exempt_win_yes_ban: bool, // true = bypass SSOT win_yes_ban (3-leg case 1)
+        synthetic: bool, // true = OPP_NO (constructed, not direct Cannae copy)
     }
 
     let bankroll = risk.read().await.bankroll();
@@ -745,7 +977,7 @@ async fn execute_stable_game(
             // Confidence-based sizing from bet price
             let confidence = (price * 1.10).min(0.95);
             let pct = crate::sizing::confidence_pct(confidence);
-            bets.push(GameLineBet { pos: pos.clone(), game_line: gl.to_string(), size_pct: pct, fixed_size: false, exempt_win_yes_ban: false });
+            bets.push(GameLineBet { pos: pos.clone(), game_line: gl.to_string(), size_pct: pct, fixed_size: false, exempt_win_yes_ban: false, synthetic: false });
         }
     }
 
@@ -786,7 +1018,7 @@ async fn execute_stable_game(
                             .filter(|p| p.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("Yes"))
                             .max_by(|a, b| a.current_value_f64().partial_cmp(&b.current_value_f64()).unwrap_or(std::cmp::Ordering::Equal));
                         if let Some(dy) = draw_yes {
-                            bets.push(GameLineBet { pos: (*dy).clone(), game_line: "draw".to_string(), size_pct: 2.5 * game_multiplier, fixed_size: true, exempt_win_yes_ban: false });
+                            bets.push(GameLineBet { pos: (*dy).clone(), game_line: "draw".to_string(), size_pct: 2.5 * game_multiplier, fixed_size: true, exempt_win_yes_ban: false, synthetic: false });
                         }
                     }
                     // Set sizes: base 2.5% × Cannae CV ladder (2026-04-10)
@@ -814,7 +1046,7 @@ async fn execute_stable_game(
                         opp_pos.outcome = Some("No".to_string());
                         opp_pos.avg_price = Some(serde_json::json!(no_price));
                         opp_pos.cur_price = Some(serde_json::json!(no_price));
-                        bets.push(GameLineBet { pos: opp_pos, game_line: "win".to_string(), size_pct: 2.5 * game_multiplier, fixed_size: true, exempt_win_yes_ban: false });
+                        bets.push(GameLineBet { pos: opp_pos, game_line: "win".to_string(), size_pct: 2.5 * game_multiplier, fixed_size: true, exempt_win_yes_ban: false, synthetic: true });
                         info!("GAME MODE: {} → 3-LEG WIN_NO+DRAW_YES+OPP_NO ({:.2}×3 legs, draw/win ratio {:.1}%)", game.event_slug, 2.5 * game_multiplier, draw_yes_ratio*100.0);
                     } else {
                         info!("GAME MODE: {} → WIN_NO+DRAW_YES (opp NO not found, 2 legs only, ratio {:.1}%)", game.event_slug, draw_yes_ratio*100.0);
@@ -850,7 +1082,7 @@ async fn execute_stable_game(
                             if let Some(dy) = draw_yes {
                                 let dy_price = (*dy).avg_price_f64();
                                 let dy_conf = (dy_price * 1.10).min(0.95);
-                                bets.push(GameLineBet { pos: (*dy).clone(), game_line: "draw".to_string(), size_pct: crate::sizing::confidence_pct(dy_conf), fixed_size: false, exempt_win_yes_ban: false });
+                                bets.push(GameLineBet { pos: (*dy).clone(), game_line: "draw".to_string(), size_pct: crate::sizing::confidence_pct(dy_conf), fixed_size: false, exempt_win_yes_ban: false, synthetic: false });
                             }
                         }
                         info!("GAME MODE: {} → DRAW_YES_ONLY (win_YES price {:.2} < 0.55, skip win)", game.event_slug, win_yes_price);
@@ -878,7 +1110,7 @@ async fn execute_stable_game(
                                 sub_pos.avg_price = Some(serde_json::json!(no_price));
                                 sub_pos.cur_price = Some(serde_json::json!(no_price));
                                 bets.retain(|b| b.game_line != "win");
-                                bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 0.0, fixed_size: false, exempt_win_yes_ban: false });
+                                bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 0.0, fixed_size: false, exempt_win_yes_ban: false, synthetic: true });
                                 info!("GAME MODE: {} → OPP_NO (win YES {:.2} + draw YES → opp NO, 1 bet)", game.event_slug, win_yes_price);
                             }
                             None => {
@@ -913,7 +1145,7 @@ async fn execute_stable_game(
                                 sub_pos.avg_price = Some(serde_json::json!(no_price));
                                 sub_pos.cur_price = Some(serde_json::json!(no_price));
                                 bets.retain(|b| b.game_line != "win");
-                                bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 0.0, fixed_size: false, exempt_win_yes_ban: false });
+                                bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 0.0, fixed_size: false, exempt_win_yes_ban: false, synthetic: true });
                                 info!("GAME MODE: {} → OPP_NO (win_YES {:.2} < 0.50 + draw_NO → opp NO, 1 bet)", game.event_slug, win_yes_price);
                             }
                             None => {
@@ -942,7 +1174,7 @@ async fn execute_stable_game(
                                 .filter(|p| p.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No"))
                                 .max_by(|a, b| a.current_value_f64().partial_cmp(&b.current_value_f64()).unwrap_or(std::cmp::Ordering::Equal));
                             if let Some(dn) = draw_no {
-                                bets.push(GameLineBet { pos: (*dn).clone(), game_line: "draw".to_string(), size_pct: 2.5 * game_multiplier, fixed_size: true, exempt_win_yes_ban: false });
+                                bets.push(GameLineBet { pos: (*dn).clone(), game_line: "draw".to_string(), size_pct: 2.5 * game_multiplier, fixed_size: true, exempt_win_yes_ban: false, synthetic: false });
                             }
                         }
                         if draw_no_ratio >= 0.05 {
@@ -971,7 +1203,7 @@ async fn execute_stable_game(
                                 opp_pos.outcome = Some("No".to_string());
                                 opp_pos.avg_price = Some(serde_json::json!(no_price));
                                 opp_pos.cur_price = Some(serde_json::json!(no_price));
-                                bets.push(GameLineBet { pos: opp_pos, game_line: "win".to_string(), size_pct: 2.5 * game_multiplier, fixed_size: true, exempt_win_yes_ban: false });
+                                bets.push(GameLineBet { pos: opp_pos, game_line: "win".to_string(), size_pct: 2.5 * game_multiplier, fixed_size: true, exempt_win_yes_ban: false, synthetic: true });
                                 info!("GAME MODE: {} → 3-LEG WIN_YES+DRAW_NO+OPP_NO ({:.2}%×3 legs, draw/win ratio {:.1}%, WIN_YES exempt)", game.event_slug, 2.5 * game_multiplier, draw_no_ratio*100.0);
                             } else {
                                 info!("GAME MODE: {} → WIN_YES+DRAW_NO (opp NO not found, 2 legs, ratio {:.1}%)", game.event_slug, draw_no_ratio*100.0);
@@ -1004,7 +1236,7 @@ async fn execute_stable_game(
                             sub_pos.avg_price = Some(serde_json::json!(no_price));
                             sub_pos.cur_price = Some(serde_json::json!(no_price));
                             bets.retain(|b| b.game_line != "win");
-                            bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 0.0, fixed_size: false, exempt_win_yes_ban: false });
+                            bets.push(GameLineBet { pos: sub_pos, game_line: "win".to_string(), size_pct: 0.0, fixed_size: false, exempt_win_yes_ban: false, synthetic: true });
                             info!("GAME MODE: {} → OPP_NO (win YES only → opp NO, 1 bet)", game.event_slug);
                         }
                         None => {
@@ -1029,7 +1261,7 @@ async fn execute_stable_game(
                 && !b.exempt_win_yes_ban));
             if bets.is_empty() {
                 info!("GAME SKIP: {} — WIN YES dropped, no other legs", game.event_slug);
-                return false;
+                return vec![];
             }
             info!("GAME MODE: {} — WIN YES dropped, keeping {} remaining legs", game.event_slug, bets.len());
         }
@@ -1113,7 +1345,7 @@ async fn execute_stable_game(
 
     if bets.is_empty() {
         info!("GAME SKIP: {} — no bets after conviction logic", game.event_slug);
-        return false;
+        return vec![];
     }
 
     // Log T5 PLAN
@@ -1133,7 +1365,7 @@ async fn execute_stable_game(
     }
 
     // Execute each game line bet
-    let mut any_filled = false;
+    let mut bought_legs: Vec<BoughtLeg> = Vec::new();
     for bet in &bets {
         let pos = &bet.pos;
         let title = pos.title.as_deref().unwrap_or("").to_string();
@@ -1155,14 +1387,14 @@ async fn execute_stable_game(
         let confidence = (price * 1.10).min(0.95);
 
         let agg_signal = signal::AggregatedSignal {
-            token_id,
-            condition_id,
+            token_id: token_id.clone(),
+            condition_id: condition_id.clone(),
             side: "BUY".to_string(),
             price,
             market_title: title.clone(),
             market_type,
             sport,
-            outcome,
+            outcome: outcome.clone(),
             event_slug,
             sources: vec![signal::SignalSource::Copy(signal::CopySignal {
                 source_wallet: game.source_wallet.clone(),
@@ -1172,7 +1404,7 @@ async fn execute_stable_game(
                 side: "BUY".to_string(),
                 price,
                 size: source_size_usdc,
-                market_title: title,
+                market_title: title.clone(),
                 sport: CopyTrader::detect_sport_static(
                     pos.title.as_deref().unwrap_or(""),
                     &pos.event_slug.as_deref().unwrap_or(""),
@@ -1208,7 +1440,15 @@ async fn execute_stable_game(
                 if filled {
                     info!("{} FILLED: {} {} {}", label, bet.game_line,
                         agg_signal.outcome, agg_signal.market_title);
-                    any_filled = true;
+                    bought_legs.push(BoughtLeg {
+                        condition_id,
+                        outcome,
+                        token_id,
+                        price,
+                        market_title: agg_signal.market_title.clone(),
+                        game_line: bet.game_line.clone(),
+                        synthetic: bet.synthetic,
+                    });
                 }
             }
             Err(e) => {
@@ -1216,7 +1456,7 @@ async fn execute_stable_game(
             }
         }
     }
-    any_filled
+    bought_legs
 }
 
 

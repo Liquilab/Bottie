@@ -233,7 +233,7 @@ impl WaveBudget {
                 .map(|g| (g.event_slug.as_str(), &g.start_time))
                 .collect();
 
-        for (slug, game) in sorted.iter().take(20) {
+        for (slug, game) in sorted.iter().take(100) {
             // Deduplicate leg types for display (show all unique types, not capped at 5)
             let mut seen_types: Vec<&str> = Vec::new();
             for l in &game.legs {
