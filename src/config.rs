@@ -118,8 +118,15 @@ pub struct ScheduleConfig {
     pub refresh_interval_minutes: u32,
     #[serde(default)]
     pub taker_mode: bool,
+    /// "taker" (default, buy at best ask) or "ask-1" (place limit at ask - 1ct)
+    #[serde(default = "default_order_mode")]
+    pub order_mode: String,
     #[serde(default)]
     pub sport_tags: Vec<String>,
+}
+
+fn default_order_mode() -> String {
+    "taker".to_string()
 }
 
 fn default_t_minus() -> u32 {
@@ -383,6 +390,9 @@ pub struct SportSizingConfig {
     /// NBA spread. Data: 54% WR, 7% ROI.
     #[serde(default = "default_nba_spread")]
     pub nba_spread_pct: f64,
+    /// NBA O/U. Enabled 2026-04-10 to collect live data on Cannae's O/U conviction.
+    #[serde(default = "default_nba_ou")]
+    pub nba_ou_pct: f64,
     /// FIF (FIFA WCQ/friendlies) moneyline. Data: 22% WR, -91% ROI on 9 bets. Experimental.
     #[serde(default = "default_fif_ml")]
     pub fif_ml_pct: f64,
@@ -409,8 +419,9 @@ impl Default for SportSizingConfig {
             voetbal_ml_pct: 8.0,
             voetbal_draw_pct: 5.0,
             nhl_ml_pct: 5.0,
-            nba_ml_pct: 3.0,
-            nba_spread_pct: 3.0,
+            nba_ml_pct: 2.5,
+            nba_spread_pct: 2.5,
+            nba_ou_pct: 2.5,
             fif_ml_pct: 0.0,
             fif_draw_pct: 0.0,
             mlb_ml_pct: 0.0,
@@ -424,8 +435,9 @@ impl Default for SportSizingConfig {
 fn default_voetbal_ml() -> f64 { 8.0 }
 fn default_voetbal_draw() -> f64 { 5.0 }
 fn default_nhl_ml() -> f64 { 5.0 }
-fn default_nba_ml() -> f64 { 3.0 }
-fn default_nba_spread() -> f64 { 3.0 }
+fn default_nba_ml() -> f64 { 2.5 }
+fn default_nba_spread() -> f64 { 2.5 }
+fn default_nba_ou() -> f64 { 2.5 }
 fn default_fif_ml() -> f64 { 0.0 }
 fn default_fif_draw() -> f64 { 0.0 }
 fn default_fallback_pct() -> f64 { 2.0 }
@@ -459,6 +471,7 @@ impl SportSizingConfig {
                 ("nhl", "win") => Some(self.nhl_ml_pct),
                 ("nba", "win") => Some(self.nba_ml_pct),
                 ("nba", "spread") => Some(self.nba_spread_pct),
+                ("nba", "ou") => Some(self.nba_ou_pct),
                 ("mlb", "win") => Some(self.mlb_ml_pct),
                 ("nfl", "win") => Some(self.nfl_ml_pct),
                 (_, "win") => Some(self.fallback_pct),
@@ -484,6 +497,9 @@ impl SportSizingConfig {
             let mut v = vec!["win"];
             if league == "nba" && self.nba_spread_pct > 0.0 {
                 v.push("spread");
+            }
+            if league == "nba" && self.nba_ou_pct > 0.0 {
+                v.push("ou");
             }
             v
         }

@@ -440,11 +440,11 @@ async fn copy_trading_loop(
                     }
 
                     // 3. T-5 Confirm+Buy: use pre-fetched positions (no extra API calls).
-                    //    Window = 0..t5_minutes (explicit, no hidden cushion).
+                    //    Window = 0..t10_minutes (explicit, no hidden cushion).
                     let t5_matches = scheduler::confirm_and_execute_t5(
                         &watched_games,
                         &watchlist,
-                        schedule_cfg.t5_minutes,
+                        schedule_cfg.t10_minutes,
                         &t5_executed,
                         &raw_positions,
                     );
@@ -626,27 +626,9 @@ async fn execute_stable_game(
     //
     // Aanvullende eis: ml_cv > 0 — we kopiëren alleen ML, dus geen punt om een game
     // te onboarden waar Cannae geen ML-positie heeft.
-    if let Some(&min_usdc) = sport_sizing.min_cannae_game_usdc.get(league) {
-        let total_cv: f64 = game.positions.iter()
-            .map(|p| p.current_value_f64())
-            .sum();
-        let ml_cv: f64 = game.positions.iter()
-            .filter(|p| {
-                CopyTrader::detect_market_type(p.title.as_deref().unwrap_or("")) == "win"
-            })
-            .map(|p| p.current_value_f64())
-            .sum();
-        if total_cv < min_usdc {
-            info!("GAME SKIP: {} — Cannae total game CV ${:.0} < min ${:.0} for {}",
-                game.event_slug, total_cv, min_usdc, league);
-            return false;
-        }
-        if ml_cv <= 0.0 {
-            info!("GAME SKIP: {} — Cannae has no ML position (total CV ${:.0} on non-ML legs only)",
-                game.event_slug, total_cv);
-            return false;
-        }
-    }
+    // NOTE: min_cannae_game_usdc dollar-floor gate was reverted 2026-04-08.
+    // True-hauptbet guard + CV ladder below replace it.
+    let _ = league;
 
     // Log ALL positions for this game (T5 debug)
     info!("T5 POSITIONS: {} — {} positions:", game.event_slug, game.positions.len());
@@ -665,6 +647,68 @@ async fn execute_stable_game(
             &cid[..cid.len().min(8)], &cid[cid.len().saturating_sub(4)..],
             &title[..title.len().min(50)]);
     }
+
+    // ─── True hauptbet guard + Cannae CV ladder ───
+    // Part 1 (2026-04-10 selector bugfix): the per-allowed-line selector below
+    // is blind to market types outside allowed_game_lines. For football that's
+    // BTTS/OU/Spread; for NBA it's OU. Cannae's actual max-CV leg frequently
+    // sits in those excluded types (e.g. SCF-CEL BTTS NO $3,179 vs our
+    // "hauptbet" Freiburg WIN NO $1,387). Rule: if the true hauptbet (max CV
+    // across ALL types) lives in a type we can't copy, skip the whole game.
+    //
+    // Part 2 (2026-04-10 ladder): the true hauptbet CV determines a fixed
+    // size multiplier applied uniformly to all legs on this game. Skip-floor
+    // at $500 CV. See sizing::cannae_cv_multiplier and memory
+    // feedback_hauptbet_strategy.md for the ladder.
+    let game_multiplier: f64 = match game.positions.iter()
+        .max_by(|a, b| a.current_value_f64().partial_cmp(&b.current_value_f64()).unwrap_or(std::cmp::Ordering::Equal))
+    {
+        None => {
+            info!("GAME SKIP: {} — no positions", game.event_slug);
+            return false;
+        }
+        Some(true_haupt) => {
+            let haupt_type = CopyTrader::detect_market_type(true_haupt.title.as_deref().unwrap_or(""));
+            let haupt_cv = true_haupt.current_value_f64();
+            if !allowed_lines.iter().any(|l| *l == haupt_type.as_str()) {
+                info!(
+                    "GAME SKIP: {} — true hauptbet is '{}' (${:.0} CV, {} / {}), not in allowed {:?}. Skipping rather than copying a minor leg.",
+                    game.event_slug,
+                    haupt_type,
+                    haupt_cv,
+                    true_haupt.outcome.as_deref().unwrap_or("?"),
+                    true_haupt.title.as_deref().unwrap_or("?"),
+                    allowed_lines
+                );
+                return false;
+            }
+            match crate::sizing::cannae_cv_multiplier(haupt_cv) {
+                None => {
+                    info!(
+                        "GAME SKIP: {} — true hauptbet CV ${:.0} below $500 skip-floor (type {}, {} / {})",
+                        game.event_slug,
+                        haupt_cv,
+                        haupt_type,
+                        true_haupt.outcome.as_deref().unwrap_or("?"),
+                        true_haupt.title.as_deref().unwrap_or("?"),
+                    );
+                    return false;
+                }
+                Some(m) => {
+                    info!(
+                        "LADDER: {} — hauptbet ${:.0} CV ({} {}) → multiplier {:.2}× (effective {:.2}%)",
+                        game.event_slug,
+                        haupt_cv,
+                        haupt_type,
+                        true_haupt.outcome.as_deref().unwrap_or("?"),
+                        m,
+                        2.5 * m,
+                    );
+                    m
+                }
+            }
+        }
+    };
 
     // Classify all positions by game line, using currentValue for hauptbet selection
     #[derive(Clone)]
@@ -742,19 +786,19 @@ async fn execute_stable_game(
                             .filter(|p| p.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("Yes"))
                             .max_by(|a, b| a.current_value_f64().partial_cmp(&b.current_value_f64()).unwrap_or(std::cmp::Ordering::Equal));
                         if let Some(dy) = draw_yes {
-                            bets.push(GameLineBet { pos: (*dy).clone(), game_line: "draw".to_string(), size_pct: 2.5, fixed_size: true, exempt_win_yes_ban: false });
+                            bets.push(GameLineBet { pos: (*dy).clone(), game_line: "draw".to_string(), size_pct: 2.5 * game_multiplier, fixed_size: true, exempt_win_yes_ban: false });
                         }
                     }
-                    // Set sizes: WIN_NO_A 5%, DRAW_YES 2.5%
+                    // Set sizes: base 2.5% × Cannae CV ladder (2026-04-10)
                     for b in bets.iter_mut() {
                         if b.game_line == "win" {
-                            b.size_pct = 5.0;
+                            b.size_pct = 2.5 * game_multiplier;
                         } else if b.game_line == "draw" {
-                            b.size_pct = 2.5;
+                            b.size_pct = 2.5 * game_multiplier;
                         }
                         b.fixed_size = true;
                     }
-                    // Add WIN_NO_B (opponent's NO) as 3rd leg @ 2.5%
+                    // Add WIN_NO_B (opponent's NO) as 3rd leg @ 2%
                     let win_cid = win_bet.pos.condition_id.as_deref().unwrap_or("").to_owned();
                     let draw_cids: Vec<&str> = draw_positions.iter()
                         .filter_map(|p| p.condition_id.as_deref())
@@ -770,8 +814,8 @@ async fn execute_stable_game(
                         opp_pos.outcome = Some("No".to_string());
                         opp_pos.avg_price = Some(serde_json::json!(no_price));
                         opp_pos.cur_price = Some(serde_json::json!(no_price));
-                        bets.push(GameLineBet { pos: opp_pos, game_line: "win".to_string(), size_pct: 2.5, fixed_size: true, exempt_win_yes_ban: false });
-                        info!("GAME MODE: {} → 3-LEG WIN_NO+DRAW_YES+OPP_NO (5%+2.5%+2.5%, draw/win ratio {:.1}%)", game.event_slug, draw_yes_ratio*100.0);
+                        bets.push(GameLineBet { pos: opp_pos, game_line: "win".to_string(), size_pct: 2.5 * game_multiplier, fixed_size: true, exempt_win_yes_ban: false });
+                        info!("GAME MODE: {} → 3-LEG WIN_NO+DRAW_YES+OPP_NO ({:.2}×3 legs, draw/win ratio {:.1}%)", game.event_slug, 2.5 * game_multiplier, draw_yes_ratio*100.0);
                     } else {
                         info!("GAME MODE: {} → WIN_NO+DRAW_YES (opp NO not found, 2 legs only, ratio {:.1}%)", game.event_slug, draw_yes_ratio*100.0);
                     }
@@ -898,17 +942,17 @@ async fn execute_stable_game(
                                 .filter(|p| p.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No"))
                                 .max_by(|a, b| a.current_value_f64().partial_cmp(&b.current_value_f64()).unwrap_or(std::cmp::Ordering::Equal));
                             if let Some(dn) = draw_no {
-                                bets.push(GameLineBet { pos: (*dn).clone(), game_line: "draw".to_string(), size_pct: 2.5, fixed_size: true, exempt_win_yes_ban: false });
+                                bets.push(GameLineBet { pos: (*dn).clone(), game_line: "draw".to_string(), size_pct: 2.5 * game_multiplier, fixed_size: true, exempt_win_yes_ban: false });
                             }
                         }
                         if draw_no_ratio >= 0.05 {
-                            // 3-LEG: WIN_YES_A 5% (EXEMPT from win_yes_ban) + DRAW_NO 2.5% + WIN_NO_B 2.5%
+                            // 3-LEG: WIN_YES_A + DRAW_NO + WIN_NO_B — base 2.5% × ladder (2026-04-10)
                             for b in bets.iter_mut() {
                                 if b.game_line == "win" {
-                                    b.size_pct = 5.0;
+                                    b.size_pct = 2.5 * game_multiplier;
                                     b.exempt_win_yes_ban = true;
                                 } else if b.game_line == "draw" {
-                                    b.size_pct = 2.5;
+                                    b.size_pct = 2.5 * game_multiplier;
                                 }
                                 b.fixed_size = true;
                             }
@@ -927,8 +971,8 @@ async fn execute_stable_game(
                                 opp_pos.outcome = Some("No".to_string());
                                 opp_pos.avg_price = Some(serde_json::json!(no_price));
                                 opp_pos.cur_price = Some(serde_json::json!(no_price));
-                                bets.push(GameLineBet { pos: opp_pos, game_line: "win".to_string(), size_pct: 2.5, fixed_size: true, exempt_win_yes_ban: false });
-                                info!("GAME MODE: {} → 3-LEG WIN_YES+DRAW_NO+OPP_NO (5%+2.5%+2.5%, draw/win ratio {:.1}%, WIN_YES exempt)", game.event_slug, draw_no_ratio*100.0);
+                                bets.push(GameLineBet { pos: opp_pos, game_line: "win".to_string(), size_pct: 2.5 * game_multiplier, fixed_size: true, exempt_win_yes_ban: false });
+                                info!("GAME MODE: {} → 3-LEG WIN_YES+DRAW_NO+OPP_NO ({:.2}%×3 legs, draw/win ratio {:.1}%, WIN_YES exempt)", game.event_slug, 2.5 * game_multiplier, draw_no_ratio*100.0);
                             } else {
                                 info!("GAME MODE: {} → WIN_YES+DRAW_NO (opp NO not found, 2 legs, ratio {:.1}%)", game.event_slug, draw_no_ratio*100.0);
                             }
@@ -991,16 +1035,36 @@ async fn execute_stable_game(
         }
     }
 
-    // Confidence-based dynamic sizing: override placeholder size_pct (skip fixed-size bets)
+    // Base sizing × Cannae CV ladder multiplier (2026-04-10).
+    // Same base 2.5% for football and NBA. game_multiplier was computed from
+    // the true hauptbet CV at game entry and applies uniformly to all non-fixed
+    // legs on this game (fixed_size legs already got the multiplier in the
+    // hedge-mode branches above).
     for b in bets.iter_mut() {
         if b.fixed_size { continue; }
         let price = b.pos.avg_price_f64();
         let conf = (price * 1.10).min(0.95);
         let base = crate::sizing::confidence_pct(conf);
-        // NBA PILOT 2026-04-09: half-size for 14d eval window.
-        // Kill criteria: ROI<0 disable, 0-5 hold, 5-15 scale to full, >15 hold (no chase).
-        // Revert by removing the  branch after eval.
-        b.size_pct = if league == "nba" { base * 0.5 } else { base };
+        b.size_pct = base * game_multiplier;
+    }
+
+    // ─── Per-game cap: 15% bankroll total (2026-04-10) ───
+    // At top tier (>$20k CV, 3× multiplier) a 3-leg hedge mode is 3 × 7.5% = 22.5%.
+    // Cap the SUM of size_pct across all legs on this game at 15%. If over,
+    // scale every leg proportionally down so the per-game exposure respects
+    // the bankroll cap. This is independent of the per-moment 90% deployment
+    // cap in risk.rs which protects the overall book, not single-game exposure.
+    const PER_GAME_CAP_PCT: f64 = 15.0;
+    let total_pct: f64 = bets.iter().map(|b| b.size_pct).sum();
+    if total_pct > PER_GAME_CAP_PCT {
+        let scale = PER_GAME_CAP_PCT / total_pct;
+        for b in bets.iter_mut() {
+            b.size_pct *= scale;
+        }
+        info!(
+            "PER-GAME CAP: {} — total {:.2}% > {:.1}% cap, scaling all {} legs by {:.3}× (new total {:.2}%)",
+            game.event_slug, total_pct, PER_GAME_CAP_PCT, bets.len(), scale, PER_GAME_CAP_PCT
+        );
     }
 
     // SSOT Pilaar 1, Regel 3 — Prijsband per leg-type (rules.yaml: price_band)

@@ -93,15 +93,17 @@ impl Executor {
     ) -> Result<bool> {
         // Read config values we need, then drop the lock immediately (N6: avoid holding
         // RwLock across HTTP await points which blocks config hot-reload)
-        let (sizing_config, is_dry_run, strategy_version, max_resolution_days) = {
+        let (sizing_config, is_dry_run, strategy_version, max_resolution_days, order_mode) = {
             let config = self.config.read().await;
             (
                 config.sizing.clone(),
                 self.client.is_dry_run(),
                 config.autoresearch_params.current_strategy_version.clone(),
                 config.copy_trading.max_resolution_days,
+                config.schedule.order_mode.clone(),
             )
         };
+        let is_ask1 = order_mode == "ask-1";
 
         // Determine side
         let side = if signal.side == "BUY" {
@@ -180,7 +182,7 @@ impl Executor {
         }
 
         // Fetch current ASK + depth from orderbook. NEVER use stale signal.price.
-        let exec_price = if !signal.token_id.is_empty() {
+        let (exec_price, taker_ask) = if !signal.token_id.is_empty() {
             match self.client.get_best_ask_with_depth(&signal.token_id).await {
                 Ok((ask, depth)) if ask > 0.0 && ask < 1.0 => {
                     // Round to tick size (0.01) — PM rejects prices like 0.5002
@@ -194,7 +196,12 @@ impl Executor {
                         );
                         return Ok(false);
                     }
-                    ask
+                    if is_ask1 {
+                        let maker_price = (ask - 0.01).max(0.01);
+                        (maker_price, ask)
+                    } else {
+                        (ask, ask)
+                    }
                 }
                 Ok((ask, _)) => {
                     warn!(
@@ -372,6 +379,7 @@ impl Executor {
                 sell_price: None,
                 actual_pnl: None,
                 closing_price: None,
+                taker_ask: if is_ask1 { Some(taker_ask) } else { None },
                 exit_type: None,
                 strategy_version: strategy_version.clone(),
             });
@@ -382,23 +390,29 @@ impl Executor {
         // Always GTC: fills immediately at ask if liquidity exists, otherwise sits in book.
         // No more FOK — sports delayed matching causes false "killed" errors.
         let order_type = OrderType::GTC;
-        let mode_label = if taker_mode { "TAKER" } else { "MAKER" };
-        info!(
-            "EXECUTE [{}]: {} {} {:.0} shares @ {:.3} = ${:.2} | edge={:.1}% | {}",
-            mode_label, side, signal.market_title, size, exec_price, size_usdc, signal.edge_pct, signal_source
-        );
+        let mode_label = if is_ask1 { "ASK-1" } else if taker_mode { "TAKER" } else { "MAKER" };
+        if is_ask1 {
+            info!(
+                "EXECUTE [{}]: {} {} {:.0} shares @ {:.0}ct (ask={:.0}ct) = ${:.2} | edge={:.1}% | {}",
+                mode_label, side, signal.market_title, size, exec_price * 100.0, taker_ask * 100.0, size_usdc, signal.edge_pct, signal_source
+            );
+        } else {
+            info!(
+                "EXECUTE [{}]: {} {} {:.0} shares @ {:.3} = ${:.2} | edge={:.1}% | {}",
+                mode_label, side, signal.market_title, size, exec_price, size_usdc, signal.edge_pct, signal_source
+            );
+        }
 
         let mut actual_fee = fee_bps;
-        let resp = match self
-            .client
-            .create_and_post_order(&signal.token_id, exec_price, size, side, order_type, fee_bps)
-            .await
-        {
+        let resp = match if is_ask1 {
+            self.client.create_and_post_order_post_only(&signal.token_id, exec_price, size, side, order_type, fee_bps).await
+        } else {
+            self.client.create_and_post_order(&signal.token_id, exec_price, size, side, order_type, fee_bps).await
+        } {
             Ok(r) => r,
             Err(e) => {
                 let err_str = e.to_string();
                 // Retry with correct fee if market rejects our fee rate
-                // Use short pattern to avoid ASCII vs Unicode apostrophe mismatch
                 if let Some(idx) = err_str.find("taker fee: ")
                     .or_else(|| err_str.find("maker fee: "))
                 {
@@ -408,9 +422,11 @@ impl Executor {
                             info!("retrying with fee={} (was {})", correct_fee, fee_bps);
                             actual_fee = correct_fee;
                             self.fee_cache.insert(signal.token_id.clone(), correct_fee);
-                            self.client
-                                .create_and_post_order(&signal.token_id, exec_price, size, side, order_type, correct_fee)
-                                .await?
+                            if is_ask1 {
+                                self.client.create_and_post_order_post_only(&signal.token_id, exec_price, size, side, order_type, correct_fee).await?
+                            } else {
+                                self.client.create_and_post_order(&signal.token_id, exec_price, size, side, order_type, correct_fee).await?
+                            }
                         } else {
                             return Err(e);
                         }
@@ -418,9 +434,11 @@ impl Executor {
                         info!("retrying with fee={} (was {})", correct_fee, fee_bps);
                         actual_fee = correct_fee;
                         self.fee_cache.insert(signal.token_id.clone(), correct_fee);
-                        self.client
-                            .create_and_post_order(&signal.token_id, exec_price, size, side, order_type, correct_fee)
-                            .await?
+                        if is_ask1 {
+                            self.client.create_and_post_order_post_only(&signal.token_id, exec_price, size, side, order_type, correct_fee).await?
+                        } else {
+                            self.client.create_and_post_order(&signal.token_id, exec_price, size, side, order_type, correct_fee).await?
+                        }
                     } else {
                         return Err(e);
                     }
@@ -433,17 +451,20 @@ impl Executor {
 
         let order_id = resp.effective_id().map(|s| s.to_string());
         let mut filled = resp.is_filled();
+        let mut matched_shares: f64 = 0.0;
 
         // GTC orders may not fill instantly (sports delayed matching).
-        // If we have an order_id but no immediate fill, poll the order status.
+        // ask-1: 5×3s=15s, taker: 3×2s=6s.
+        let (max_polls, poll_interval_secs) = if is_ask1 { (5u32, 3u64) } else { (3u32, 2u64) };
         if !filled && !resp.is_rejected() {
             if let Some(oid) = &order_id {
-                for attempt in 1..=3 {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                for attempt in 1..=max_polls {
+                    tokio::time::sleep(std::time::Duration::from_secs(poll_interval_secs)).await;
                     match self.client.get_order_status(oid).await {
                         Ok((status, size_matched)) => {
                             if size_matched > 0.0 {
                                 info!("GTC DELAYED FILL (attempt {}): {} matched {:.1} shares", attempt, signal.market_title, size_matched);
+                                matched_shares = size_matched;
                                 filled = true;
                                 break;
                             }
@@ -464,14 +485,17 @@ impl Executor {
                     if let Err(e) = self.client.cancel_order(oid).await {
                         warn!("cancel resting order failed: {}", e);
                     } else {
-                        info!("cancelled unfilled GTC order {} for {}", oid, signal.market_title);
+                        info!("cancelled unfilled {} order {} for {}", mode_label, oid, signal.market_title);
                     }
                 }
             }
         }
 
-        // Use actual filled size from exchange, not requested size
-        let actual_shares = if filled { size } else { 0.0 };
+        // Use actual filled size from exchange when available (delayed fill),
+        // otherwise use requested size (immediate fill).
+        let actual_shares = if filled {
+            if matched_shares > 0.0 { matched_shares } else { size }
+        } else { 0.0 };
         let actual_usdc = if filled { actual_shares * exec_price } else { 0.0 };
 
         if filled {
@@ -525,6 +549,7 @@ impl Executor {
                 sell_price: None,
                 actual_pnl: None,
                 closing_price: None,
+                taker_ask: if is_ask1 { Some(taker_ask) } else { None },
                 exit_type: None,
                 strategy_version,
             });

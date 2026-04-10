@@ -182,6 +182,31 @@ impl ClobClient {
         order_type: OrderType,
         fee_rate_bps: u32,
     ) -> Result<PostOrderResponse> {
+        self.create_and_post_order_inner(token_id, price, size, side, order_type, fee_rate_bps, false).await
+    }
+
+    pub async fn create_and_post_order_post_only(
+        &self,
+        token_id: &str,
+        price: f64,
+        size: f64,
+        side: Side,
+        order_type: OrderType,
+        fee_rate_bps: u32,
+    ) -> Result<PostOrderResponse> {
+        self.create_and_post_order_inner(token_id, price, size, side, order_type, fee_rate_bps, true).await
+    }
+
+    async fn create_and_post_order_inner(
+        &self,
+        token_id: &str,
+        price: f64,
+        size: f64,
+        side: Side,
+        order_type: OrderType,
+        fee_rate_bps: u32,
+        post_only: bool,
+    ) -> Result<PostOrderResponse> {
         let sig_type: u8 = 2; // Gnosis Safe
 
         // Round price to tick size (0.01 = 1 cent).
@@ -262,7 +287,7 @@ impl ClobClient {
                 order: clob_order,
                 owner: self.config.api_key.clone(),
                 order_type: order_type.to_string(),
-                post_only: false,
+                post_only,
             };
             serde_json::to_string(&req)
         };

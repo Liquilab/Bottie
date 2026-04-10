@@ -53,6 +53,10 @@ pub struct TradeLog {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closing_price: Option<f64>,
 
+    /// Best ask at time of order (for taker vs maker savings analysis)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taker_ask: Option<f64>,
+
     /// Strategy version tag from autoresearch deployment (Fix #7)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy_version: Option<String>,
