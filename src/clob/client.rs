@@ -467,7 +467,20 @@ impl ClobClient {
     // --- Market resolution status ---
 
     /// Check if a market has resolved and return the winning outcome name.
+    /// Uses CLOB API (authoritative for resolution) with Gamma API fallback.
     pub async fn get_market_info(&self, condition_id: &str) -> Result<Option<GammaMarketStatus>> {
+        // Primary: CLOB API — always has correct condition_id mapping
+        let clob_url = format!("{CLOB_API}/markets/{condition_id}");
+        match self.http.get(&clob_url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(clob) = resp.json::<ClobMarketStatusResponse>().await {
+                    return Ok(Some(clob.into_gamma_status()));
+                }
+            }
+            _ => {}
+        }
+
+        // Fallback: Gamma API (works for some older markets)
         let url = format!("{GAMMA_API}/markets?condition_ids={condition_id}");
         let resp: Vec<GammaMarketStatus> = self
             .http

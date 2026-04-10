@@ -351,6 +351,59 @@ pub struct ClobTokenResponse {
     pub token_id: Option<String>,
 }
 
+/// CLOB API market status response for resolution checking
+/// Endpoint: GET /markets/{condition_id}
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClobMarketStatusResponse {
+    pub closed: Option<bool>,
+    pub condition_id: Option<String>,
+    pub end_date_iso: Option<String>,
+    pub tokens: Option<Vec<ClobMarketToken>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClobMarketToken {
+    pub outcome: Option<String>,
+    pub price: Option<f64>,
+    pub winner: Option<bool>,
+}
+
+impl ClobMarketStatusResponse {
+    /// Convert to GammaMarketStatus so the resolver can use the same code path.
+    pub fn into_gamma_status(self) -> GammaMarketStatus {
+        let (outcomes, prices) = if let Some(tokens) = &self.tokens {
+            let o: Vec<String> = tokens.iter()
+                .filter_map(|t| t.outcome.clone())
+                .collect();
+            let p: Vec<String> = tokens.iter()
+                .map(|t| {
+                    // Use winner field for resolved markets (price 1.0/0.0),
+                    // fall back to price field for unresolved
+                    if let Some(true) = t.winner {
+                        "1".to_string()
+                    } else if let Some(false) = t.winner {
+                        "0".to_string()
+                    } else {
+                        t.price.map(|v| v.to_string()).unwrap_or_else(|| "0".to_string())
+                    }
+                })
+                .collect();
+            (Some(serde_json::Value::Array(o.into_iter().map(|s| serde_json::Value::String(s)).collect())),
+             Some(serde_json::Value::Array(p.into_iter().map(|s| serde_json::Value::String(s)).collect())))
+        } else {
+            (None, None)
+        };
+
+        GammaMarketStatus {
+            condition_id: self.condition_id,
+            closed: self.closed,
+            outcomes,
+            outcome_prices: prices,
+            end_date: self.end_date_iso,
+        }
+    }
+}
+
 /// Position from data-api/positions?user={address}
 /// Used for snapshot-diff based copy trading (replaces unreliable /activity endpoint)
 #[derive(Debug, Clone, Deserialize)]
