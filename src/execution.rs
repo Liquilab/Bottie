@@ -450,7 +450,10 @@ impl Executor {
         let _ = actual_fee; // used for cache update above
 
         let order_id = resp.effective_id().map(|s| s.to_string());
-        let mut filled = resp.is_filled();
+        // ask-1 post_only: CLOB returns size_matched=None + order_id → is_filled()
+        // wrongly returns true. The order is "live" in the book, not filled.
+        // Always poll for ask-1 orders regardless of is_filled().
+        let mut filled = if is_ask1 { resp.filled_size() > 0.0 } else { resp.is_filled() };
         let mut matched_shares: f64 = 0.0;
 
         // GTC orders may not fill instantly (sports delayed matching).
