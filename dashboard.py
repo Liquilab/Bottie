@@ -1381,7 +1381,248 @@ tr.group-cont .market-title { padding-left: 12px; font-size: 0.85em; }
 .hyp-changes { background: var(--bg); border-radius: 6px; padding: 8px; margin-top: 8px; }
 .hyp-changes code { font-size: 0.75rem; color: var(--muted); white-space: pre; }
 .empty { color: var(--muted); padding: 24px; text-align: center; background: var(--surface); border-radius: 8px; border: 1px dashed var(--border); }
+
+/* Game cards */
+.game-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 16px; overflow: hidden; }
+.game-card-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.game-card-header .game-title { font-weight: 700; font-size: 0.95rem; }
+.game-card-header .game-meta { font-size: 0.75rem; color: var(--muted); }
+.game-card-header .game-pnl { font-size: 1.1rem; font-weight: 700; font-family: 'Courier New', monospace; }
+.game-leg { display: grid; grid-template-columns: 1fr auto auto auto auto; gap: 12px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); }
+.game-leg:last-child { border-bottom: none; }
+.game-leg .leg-name { font-size: 0.85rem; }
+.game-leg .leg-name .leg-outcome { font-weight: 600; }
+.game-leg .leg-prices { font-family: 'Courier New', monospace; font-size: 0.85rem; text-align: right; }
+.game-leg .leg-pnl { font-family: 'Courier New', monospace; font-size: 0.9rem; font-weight: 600; text-align: right; min-width: 70px; }
+.game-leg .leg-size { font-size: 0.8rem; color: var(--muted); text-align: right; min-width: 60px; }
+.sell-btn { background: var(--red); color: #fff; border: none; border-radius: 6px; padding: 6px 14px; font-size: 0.75rem; font-weight: 700; cursor: pointer; white-space: nowrap; }
+.sell-btn:hover { opacity: 0.8; }
+.sell-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+@media(max-width:600px) {
+  .game-leg { grid-template-columns: 1fr auto auto; gap: 8px; padding: 8px 12px; }
+  .game-leg .leg-prices { font-size: 0.75rem; }
+  .game-leg .leg-size { display: none; }
+  .game-card-header { padding: 10px 12px; }
+}
 """
+
+
+def build_games_data(trades, funder=None):
+    """Build per-game data with live prices for open positions."""
+    if funder is None:
+        funder = PM_FUNDER
+    open_trades = [t for t in trades if t.get("filled") and t.get("result") is None and not t.get("dry_run")]
+
+    pm = fetch_pm_data(funder)
+    pm_positions = pm.get("positions", [])
+
+    # Build PM position lookup: conditionId:outcome → position data (with curPrice, size)
+    pm_lookup = {}
+    for p in pm_positions:
+        if sf(p.get("size", 0)) > 0.01:
+            key = (p.get("conditionId", "") + ":" + (p.get("outcome") or "")).lower()
+            pm_lookup[key] = p
+
+    # Match our trades with PM positions, group by event_slug
+    from collections import OrderedDict
+    games = OrderedDict()
+
+    for t in open_trades:
+        key = (t.get("condition_id", "") + ":" + (t.get("outcome") or "")).lower()
+        pm_pos = pm_lookup.get(key)
+        if not pm_pos:
+            continue  # position no longer exists on PM
+
+        slug = t.get("event_slug") or t.get("market_title", "unknown")[:30]
+        entry_price = sf(t.get("price", 0))
+        cur_price = sf(pm_pos.get("curPrice", 0))
+        shares = sf(pm_pos.get("size", 0))
+        cost = sf(pm_pos.get("initialValue", 0)) or (entry_price * shares)
+        cur_value = sf(pm_pos.get("currentValue", 0)) or (cur_price * shares)
+        token_id = pm_pos.get("asset", t.get("token_id", ""))
+
+        leg = {
+            "title": t.get("market_title", "?"),
+            "outcome": t.get("outcome", "?"),
+            "sport": t.get("sport", "?"),
+            "entry_price": entry_price,
+            "cur_price": cur_price,
+            "shares": shares,
+            "cost": cost,
+            "cur_value": cur_value,
+            "pnl": cur_value - cost,
+            "pnl_pct": ((cur_price / entry_price) - 1) * 100 if entry_price > 0 else 0,
+            "token_id": token_id,
+            "condition_id": t.get("condition_id", ""),
+            "age": fmt_age(t.get("timestamp")),
+        }
+
+        if slug not in games:
+            # Extract game name from slug: league-team1-team2-YYYY-MM-DD
+            game_name = slug.replace("-more-markets", "")
+            parts = game_name.split("-")
+            league = parts[0] if parts else "?"
+            # Find date part (YYYY-MM-DD at end)
+            date_idx = -1
+            for i, p in enumerate(parts):
+                if len(p) == 4 and p.isdigit():
+                    date_idx = i
+                    break
+            if date_idx > 0:
+                teams = " ".join(p.upper() for p in parts[1:date_idx])
+                date_part = "-".join(parts[date_idx:])
+            else:
+                teams = "-".join(parts[1:])
+                date_part = ""
+            games[slug] = {
+                "slug": slug,
+                "league": league,
+                "teams": teams,
+                "date": date_part,
+                "legs": [],
+                "total_cost": 0,
+                "total_value": 0,
+                "total_pnl": 0,
+            }
+
+        games[slug]["legs"].append(leg)
+        games[slug]["total_cost"] += leg["cost"]
+        games[slug]["total_value"] += leg["cur_value"]
+        games[slug]["total_pnl"] += leg["pnl"]
+
+    return list(games.values())
+
+
+def render_game_cards(trades, wallet_map, token="", funder=None):
+    """Render open positions grouped by game as cards with live P&L and sell buttons."""
+    games = build_games_data(trades, funder)
+
+    if not games:
+        return '<div class="empty">Geen open posities.</div>'
+
+    # Sort: live games first (largest absolute PnL), then by cost
+    games.sort(key=lambda g: -abs(g["total_pnl"]))
+
+    total_cost = sum(g["total_cost"] for g in games)
+    total_value = sum(g["total_value"] for g in games)
+    total_pnl = total_value - total_cost
+    pnl_color = "var(--green)" if total_pnl >= 0 else "var(--red)"
+
+    summary = f"""
+    <div class="kpi-row" style="margin-bottom:20px">
+      <div class="kpi-tile">
+        <div class="kpi-label">Open Games</div>
+        <div class="kpi-value">{len(games)}</div>
+      </div>
+      <div class="kpi-tile">
+        <div class="kpi-label">Deployed</div>
+        <div class="kpi-value">${total_cost:.2f}</div>
+      </div>
+      <div class="kpi-tile">
+        <div class="kpi-label">Huidige Waarde</div>
+        <div class="kpi-value">${total_value:.2f}</div>
+      </div>
+      <div class="kpi-tile">
+        <div class="kpi-label">Unrealized P&L</div>
+        <div class="kpi-value" style="color:{pnl_color}">${total_pnl:+.2f}</div>
+      </div>
+    </div>"""
+
+    prefix = f"/t/{token}" if token else ""
+    cards = ""
+    for g in games:
+        gpnl_color = "var(--green)" if g["total_pnl"] >= 0 else "var(--red)"
+        league_badge = f'<span class="badge sport">{g["league"]}</span>'
+
+        legs_html = ""
+        for leg in g["legs"]:
+            lpnl_color = "var(--green)" if leg["pnl"] >= 0 else "var(--red)"
+            arrow = "+" if leg["pnl_pct"] >= 0 else ""
+            price_change_color = "var(--green)" if leg["cur_price"] >= leg["entry_price"] else "var(--red)"
+
+            # Sell button — disable if price near 1.00 (awaiting resolution) or near 0 (worthless)
+            near_resolution = leg["cur_price"] > 0.95 or leg["cur_price"] < 0.05
+            if near_resolution:
+                sell_btn = f'<button class="sell-btn" disabled title="Wacht op resolutie">WAIT</button>'
+            else:
+                sell_btn = (
+                    f'<button class="sell-btn" onclick="sellLeg(this, \'{leg["token_id"]}\', {leg["shares"]:.1f}, '
+                    f'{leg["cur_price"]:.3f}, \'{leg["outcome"]} {leg["title"][:30]}\')">'
+                    f'SELL</button>'
+                )
+
+            legs_html += f"""
+            <div class="game-leg">
+              <div class="leg-name">
+                <span class="leg-outcome">{leg["outcome"]}</span>
+                <span class="muted" style="font-size:0.8rem"> {leg["title"][:45]}</span>
+              </div>
+              <div class="leg-prices">
+                <span class="muted">{leg["entry_price"]:.0%}</span>
+                <span style="color:{price_change_color}"> &rarr; {leg["cur_price"]:.0%}</span>
+              </div>
+              <div class="leg-pnl" style="color:{lpnl_color}">${leg["pnl"]:+.2f}<br><span style="font-size:0.7rem">{arrow}{leg["pnl_pct"]:.1f}%</span></div>
+              <div class="leg-size">{leg["shares"]:.0f}sh<br><span class="muted">${leg["cur_value"]:.2f}</span></div>
+              {sell_btn}
+            </div>"""
+
+        cards += f"""
+        <div class="game-card">
+          <div class="game-card-header">
+            <div>
+              {league_badge}
+              <span class="game-title">{g["teams"]}</span>
+              <span class="game-meta" style="margin-left:8px">{g["date"]}</span>
+            </div>
+            <div class="game-pnl" style="color:{gpnl_color}">${g["total_pnl"]:+.2f}</div>
+          </div>
+          {legs_html}
+        </div>"""
+
+    sell_js = """
+<script>
+async function sellLeg(btn, tokenId, shares, curPrice, label) {
+  if (!confirm('Verkoop ' + shares.toFixed(0) + ' shares ' + label + ' @ ' + (curPrice*100).toFixed(0) + 'ct?')) return;
+  btn.disabled = true;
+  btn.textContent = '...';
+  try {
+    const resp = await fetch(window.location.pathname.replace(/\\/games.*/, '/sell'), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({token_id: tokenId, shares: shares, min_price: curPrice * 0.95})
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      btn.textContent = 'SOLD $' + data.usdc.toFixed(2);
+      btn.style.background = 'var(--green)';
+      setTimeout(() => location.reload(), 2000);
+    } else {
+      alert('Sell failed: ' + data.error);
+      btn.disabled = false;
+      btn.textContent = 'SELL';
+    }
+  } catch(e) {
+    alert('Error: ' + e);
+    btn.disabled = false;
+    btn.textContent = 'SELL';
+  }
+}
+</script>"""
+
+    return summary + cards + sell_js
+
+
+def render_games_page(trades, wallet_map, token="", account="cannae"):
+    funder = GIYN_FUNDER if account == "giyn" else PM_FUNDER
+    if account == "giyn":
+        trades = load_trades_giyn()
+        wallet_map = parse_config_wallets_giyn()
+    body = f"""
+    <div class="section">
+      <div class="section-title">Live Games</div>
+      {render_game_cards(trades, wallet_map, token=token, funder=funder)}
+    </div>"""
+    return page_wrap("/games", body, token, account=account)
 
 
 def page_wrap(active_page, body_html, token="", account="cannae"):
@@ -1392,6 +1633,7 @@ def page_wrap(active_page, body_html, token="", account="cannae"):
     prefix = f"/t/{token}" if token else ""
     pages = [
         ("Overview", "/"),
+        ("Games", "/games"),
         ("Trades", "/trades"),
         ("Wallets", "/wallets"),
         ("Edge", "/edge"),
@@ -1421,7 +1663,7 @@ def page_wrap(active_page, body_html, token="", account="cannae"):
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  {"" if active_page == "/settings" else '<meta http-equiv="refresh" content="30">'}
+  {"" if active_page in ("/settings", "/games") else '<meta http-equiv="refresh" content="30">'}
   <title>Bottie — {active_page}</title>
   <style>{CSS}</style>
 </head>
@@ -3252,6 +3494,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 import traceback
                 self._send_html(f"<pre>Error: {e}\n{traceback.format_exc()}</pre>", 500)
+        elif page == "/games":
+            try:
+                trades     = load_trades()
+                wallet_map = parse_config_wallets()
+                html = render_games_page(trades, wallet_map, token=token, account=account)
+                if token and f"/t/{token}" not in html:
+                    html = html.replace('href="/', f'href="/t/{token}/')
+                    html = html.replace("fetch('/", f"fetch('/t/{token}/")
+                self._send_html(html)
+            except Exception as e:
+                import traceback
+                self._send_html(f"<pre>Error: {e}\n{traceback.format_exc()}</pre>", 500)
+        elif page == "/api/games":
+            try:
+                trades = load_trades()
+                funder = GIYN_FUNDER if account == "giyn" else PM_FUNDER
+                games = build_games_data(trades, funder)
+                body = json.dumps(games).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", len(body))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
         elif page in ("/", "/index.html", "/trades", "/wallets", "/edge", "/ops", "/strategy", "/intel"):
             try:
                 trades     = load_trades()
@@ -3329,6 +3597,49 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 body = f"Stop failed: {e}".encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", len(body))
+            self.end_headers()
+            self.wfile.write(body)
+        elif page == "/sell":
+            import subprocess
+            try:
+                content_len = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(content_len) if content_len else b"{}"
+                data = json.loads(raw)
+                token_id = data.get("token_id", "")
+                shares = float(data.get("shares", 0))
+                min_price = float(data.get("min_price", 0.01))
+
+                if not token_id or shares <= 0:
+                    raise ValueError("token_id and shares required")
+
+                script = str(CODE_DIR / "scripts" / "sell_position.py")
+                result = subprocess.run(
+                    ["python3", script, token_id, str(shares), str(min_price)],
+                    capture_output=True, text=True, timeout=30,
+                    cwd=str(BASE_DIR),
+                )
+                resp = json.loads(result.stdout) if result.stdout.strip() else {"ok": False, "error": result.stderr or "No output"}
+
+                # Telegram notification on success
+                if resp.get("ok"):
+                    tg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+                    tg_chat = os.environ.get("TELEGRAM_CHAT_ID", "")
+                    if tg_token and tg_chat:
+                        msg = f"MANUAL SELL: {shares:.0f}sh @ {resp.get('price', 0):.0%} = ${resp.get('usdc', 0):.2f}"
+                        try:
+                            urllib.request.urlopen(urllib.request.Request(
+                                f"https://api.telegram.org/bot{tg_token}/sendMessage",
+                                data=f"chat_id={tg_chat}&text={msg}".encode(),
+                                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                            ), timeout=5)
+                        except: pass
+
+                body = json.dumps(resp).encode()
+            except Exception as e:
+                body = json.dumps({"ok": False, "error": str(e)}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", len(body))
             self.end_headers()
             self.wfile.write(body)
