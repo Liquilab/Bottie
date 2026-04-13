@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Council — Smart Profit-Taking</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0A0A0A; color: #E0E0E0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.6; padding: 24px; max-width: 900px; margin: 0 auto; }
+h1 { font-size: 1.8rem; font-weight: 800; margin-bottom: 4px; color: #fff; }
+.subtitle { color: #666; font-size: 0.85rem; margin-bottom: 32px; }
+.question { background: #141414; border-left: 4px solid #3B82F6; padding: 16px 20px; border-radius: 0 8px 8px 0; margin-bottom: 32px; font-size: 1.05rem; color: #ccc; }
+
+/* Verdict */
+.verdict { background: linear-gradient(135deg, #1a1a2e, #16213e); border: 1px solid #2563EB; border-radius: 12px; padding: 24px; margin-bottom: 32px; }
+.verdict h2 { color: #3B82F6; font-size: 1.3rem; margin-bottom: 12px; }
+.verdict .tagline { font-size: 1.5rem; font-weight: 800; color: #fff; margin-bottom: 16px; }
+.verdict ol { padding-left: 20px; }
+.verdict li { margin-bottom: 10px; color: #ccc; }
+.verdict li strong { color: #fff; }
+.first-step { background: #0f2a1a; border: 1px solid #22c55e; border-radius: 8px; padding: 14px 18px; margin-top: 16px; color: #86efac; font-weight: 600; }
+
+/* Cards */
+.cards { display: grid; grid-template-columns: 1fr; gap: 16px; margin-bottom: 32px; }
+.card { background: #141414; border: 1px solid #222; border-radius: 10px; overflow: hidden; }
+.card-header { display: flex; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid #222; cursor: pointer; }
+.card-header:hover { background: #1a1a1a; }
+.card-icon { font-size: 1.4rem; }
+.card-name { font-weight: 700; font-size: 0.9rem; color: #999; }
+.card-summary { font-size: 0.95rem; color: #ddd; flex: 1; }
+.card-body { padding: 16px 18px; font-size: 0.88rem; color: #aaa; display: none; border-top: 1px solid #1a1a1a; }
+.card.open .card-body { display: block; }
+.card-toggle { color: #555; font-size: 0.8rem; }
+
+/* Peer reviews */
+.reviews { background: #111; border-radius: 10px; padding: 20px; margin-bottom: 32px; }
+.reviews h3 { color: #888; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 14px; }
+.review-item { border-bottom: 1px solid #1a1a1a; padding: 10px 0; font-size: 0.85rem; color: #999; }
+.review-item:last-child { border-bottom: none; }
+.review-item strong { color: #ccc; }
+.missed { color: #F59E0B; font-weight: 600; }
+
+/* Section titles */
+.section-title { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 2px; color: #555; margin-bottom: 14px; margin-top: 32px; }
+
+@media(max-width:600px) {
+  body { padding: 14px; }
+  .verdict .tagline { font-size: 1.2rem; }
+  h1 { font-size: 1.4rem; }
+}
+</style>
+</head>
+<body>
+
+<h1>LLM Council</h1>
+<p class="subtitle">2026-04-11 &mdash; 5 adviseurs, 5 peer reviewers</p>
+
+<div class="question">
+  Ontwerp drie intelligente profit-taking systemen voor Bottie die unrealized winst beschermen bij sportswedstrijden, zonder te vroeg te verkopen en de volle $1 resolutie mis te lopen.<br>
+  <span style="color:#666">Aanleiding: portfolio $1,901 &rarr; $1,700 in 1 uur</span>
+</div>
+
+<div class="verdict">
+  <h2>VERDICT</h2>
+  <div class="tagline">Bouw geen profit-taking. Bouw verliesbegrenzing.</div>
+  <p style="color:#999;margin-bottom:14px">4/5 adviseurs: verkoop geen winnende posities mid-game. De $200 daling was geen verdampte winst &mdash; het waren verliezende posities. Het echte probleem is correlatie-exposure.</p>
+  <ol>
+    <li><strong>Correlatie-cap</strong> &mdash; Max 40% bankroll in wedstrijden die binnen hetzelfde 3-uursvenster resolven. Voorkomt dat 8 voetbalwedstrijden tegelijk naar $0 gaan.</li>
+    <li><strong>Dagelijkse drawdown-rem</strong> &mdash; Daily PnL &gt; -8% &rarr; stop nieuwe orders die dag. Open posities lopen door naar resolutie.</li>
+    <li><strong>Cannae exit-tracking</strong> &mdash; Als Cannae een positie afbouwt (&gt;50% size daling), verkoop mee. De enige intelligente mid-game exit: gebaseerd op source-signaal, niet prijs.</li>
+  </ol>
+  <div class="first-step">Eerste stap: check hoeveel bankroll tegelijk open stond bij de $200 daling. Die data bepaalt de correlatie-cap drempel.</div>
+</div>
+
+<div class="section-title">5 Adviseurs</div>
+<div class="cards">
+
+  <div class="card" onclick="this.classList.toggle('open')">
+    <div class="card-header">
+      <span class="card-icon">&#9888;</span>
+      <span class="card-name">Contrariaan</span>
+      <span class="card-summary">Alle drie systemen zijn giftig. Hold to resolution.</span>
+      <span class="card-toggle">&#9660;</span>
+    </div>
+    <div class="card-body">
+      Trailing stops verkopen winnaars te vroeg: prijs zakt van 0.94 naar 0.91 door &eacute;&eacute;n cornerkick, je stop triggert, wedstrijd eindigt 0-0 en je had $1 gekregen. Time-based exits hebben geen edge boven marktprijs. Threshold exits bestaan al (0.98). Het probleem is sizing, niet exits. Met 55% WR en $998 PnL draait het systeem op resolutie.
+    </div>
+  </div>
+
+  <div class="card" onclick="this.classList.toggle('open')">
+    <div class="card-header">
+      <span class="card-icon">&#9881;</span>
+      <span class="card-name">Eerste Principes</span>
+      <span class="card-summary">Het probleem is verliescontrole, niet profit-taking.</span>
+      <span class="card-toggle">&#9660;</span>
+    </div>
+    <div class="card-body">
+      $1901&rarr;$1700 zijn verliezende wedstrijden die naar $0 resolven. Profit-taking had daar niets aan gedaan. Bouw: 1) Correlatie-cap (max 40% bankroll per 3-uursvenster). 2) Dynamische sizing bij dalende price. 3) Portfolio drawdown floor (&gt;8% &rarr; stop nieuwe orders). Verkoop geen winnaars.
+    </div>
+  </div>
+
+  <div class="card" onclick="this.classList.toggle('open')">
+    <div class="card-header">
+      <span class="card-icon">&#128640;</span>
+      <span class="card-name">Expansionist</span>
+      <span class="card-summary">Volatility-spike exit + Cannae trailing stop + heat limiter.</span>
+      <span class="card-toggle">&#9660;</span>
+    </div>
+    <div class="card-body">
+      1) Volatility-spike exit: verkoop bij &gt;3ct prijsstijging in 15s (momentum na goal). 2) Time-decay floor: verhoog auto-sell van 0.98 naar 0.93 na 75e minuut. 3) Cannae trailing stop: als Cannae afbouwt, volg met 50% sell. Plus: portfolio heat limiter &mdash; max X% in wedstrijden die tegelijk resolven.
+    </div>
+  </div>
+
+  <div class="card" onclick="this.classList.toggle('open')">
+    <div class="card-header">
+      <span class="card-icon">&#128065;</span>
+      <span class="card-name">Buitenstaander</span>
+      <span class="card-summary">Profit-taking en $1 resolutie pakken is tegenstrijdig.</span>
+      <span class="card-toggle">&#9660;</span>
+    </div>
+    <div class="card-body">
+      Is de $200 daling wel relevant als je tot resolutie houdt? Je kunt niet tegelijk vroeg verkopen &eacute;n de volle $1 pakken. Volg je Cannae's exits? Bouw niet op emotie &mdash; meet eerst: hoeveel posities eindigden op $1 vs. $0, en bij welke prijs had je verkocht?
+    </div>
+  </div>
+
+  <div class="card" onclick="this.classList.toggle('open')">
+    <div class="card-header">
+      <span class="card-icon">&#9889;</span>
+      <span class="card-name">Uitvoerder</span>
+      <span class="card-summary">Portfolio-level profit target, Python cron, maandag af.</span>
+      <span class="card-toggle">&#9660;</span>
+    </div>
+    <div class="card-body">
+      Bouw portfolio-level profit target: als portfolio 10% boven bankroll, verkoop meest winstgevende liquide positie. 3 stappen: 1) Config threshold (30 min). 2) Dashboard endpoint met cron check (2-3u). 3) Backtest met trades.jsonl (1u). Trailing stops zijn een week werk, time-based exits werken niet bij sports.
+    </div>
+  </div>
+
+</div>
+
+<div class="section-title">Peer Review Highlights</div>
+<div class="reviews">
+  <h3>Wat viel op</h3>
+  <div class="review-item"><strong>3/5 reviewers:</strong> Contrariaan is te dogmatisch &mdash; negeert liquiditeitsrisico op exitmoment</div>
+  <div class="review-item"><strong>3/5 reviewers:</strong> Expansionist heeft de beste mechanismen, maar volatility-spike exit triggert bij noise</div>
+  <div class="review-item"><strong>2/5 reviewers:</strong> Uitvoerder's Python cron omzeilt bestaande risico-checks</div>
+
+  <h3 style="margin-top:16px">Wat IEDEREEN miste</h3>
+  <div class="review-item"><span class="missed">Liquiditeitsvensters:</span> het orderbook droogt op na kickoff. Exit-timing is niet een prijsvraag maar een liquiditeitsvraag.</div>
+  <div class="review-item"><span class="missed">Event-driven triggers:</span> sportmarkten bewegen bij goals/blessures, niet lineair. Systemen op prijsdrift missen het echte moment.</div>
+  <div class="review-item"><span class="missed">Cannae exit-tracking:</span> we kopi&euml;ren entries maar niet exits. De voor de hand liggende oplossing die niemand uitwerkte.</div>
+</div>
+
+</body>
+</html>

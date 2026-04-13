@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Council — League Beslissing — 2026-04-05</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0A0A0A; color: #E0E0E0; font-family: 'SF Mono', 'Fira Code', monospace; padding: 2rem; max-width: 1200px; margin: 0 auto; }
+h1 { color: #FF6B35; font-size: 1.6rem; margin-bottom: 0.5rem; }
+.question { background: #1A1A2E; border-left: 4px solid #FF6B35; padding: 1.2rem; margin: 1.5rem 0; border-radius: 0 8px 8px 0; font-size: 0.95rem; line-height: 1.6; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 1rem; margin: 1.5rem 0; }
+.card { background: #16213E; border-radius: 12px; padding: 1.2rem; border: 1px solid #0F3460; transition: all 0.2s; }
+.card:hover { border-color: #FF6B35; transform: translateY(-2px); }
+.card-header { display: flex; align-items: center; gap: 0.7rem; margin-bottom: 0.8rem; }
+.icon { font-size: 1.5rem; }
+.card-name { color: #E94560; font-weight: bold; font-size: 1rem; }
+.card-verdict { color: #53D8FB; font-size: 0.85rem; margin-bottom: 0.8rem; font-weight: bold; }
+.card-detail { font-size: 0.82rem; color: #B0B0B0; line-height: 1.5; }
+details { cursor: pointer; }
+details summary { color: #53D8FB; font-size: 0.8rem; margin-top: 0.5rem; }
+details summary:hover { color: #FF6B35; }
+.section-title { color: #E94560; font-size: 1.2rem; margin: 2rem 0 1rem; border-bottom: 1px solid #1A1A2E; padding-bottom: 0.5rem; }
+.peer-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0.8rem; margin: 1rem 0; }
+.peer { background: #1A1A2E; border-radius: 8px; padding: 1rem; font-size: 0.82rem; line-height: 1.5; }
+.peer strong { color: #53D8FB; }
+.verdict-box { background: linear-gradient(135deg, #16213E, #0F3460); border: 2px solid #FF6B35; border-radius: 16px; padding: 2rem; margin: 2rem 0; }
+.verdict-title { color: #FF6B35; font-size: 1.4rem; margin-bottom: 1rem; }
+.verdict-text { font-size: 1.05rem; line-height: 1.7; color: #E0E0E0; }
+.verdict-text strong { color: #53D8FB; }
+.first-step { background: #0D7C66; border-radius: 8px; padding: 1rem 1.2rem; margin-top: 1.2rem; font-size: 0.95rem; }
+.first-step strong { color: #fff; }
+.blind { background: #2D1B3D; border-radius: 8px; padding: 1rem; margin: 0.5rem 0; font-size: 0.85rem; line-height: 1.5; }
+.tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: bold; margin-left: 0.5rem; }
+.tag-b { background: #0F3460; color: #53D8FB; }
+.tag-c { background: #3D1B1B; color: #E94560; }
+.votes { color: #888; font-size: 0.8rem; margin-top: 0.3rem; }
+.meta { color: #555; font-size: 0.75rem; margin-top: 2rem; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>LLM Council</h1>
+<p style="color:#888; font-size:0.85rem;">League Beslissing — 5 april 2026</p>
+
+<div class="question">
+<strong>Vraag:</strong> Cannae's WR daalde van 80% naar 68% (43% op 5 april). 6 leagues disabled op 96h data, maar Cannae historisch winstgevend in alle 6 (81-94% WR). Bankroll $2,690. Wat doen?
+</div>
+
+<h2 class="section-title">Adviseurs</h2>
+
+<div class="cards">
+
+<div class="card">
+<div class="card-header"><span class="icon">&#9888;</span><span class="card-name">De Contrariaan</span></div>
+<div class="card-verdict">Diagnose eerst. Niet aan leagues sleutelen.</div>
+<div class="card-detail">Als Cannae's dip structureel is, maakt league selectie niet uit. Van $2,690 naar $1,800 in &eacute;&eacute;n week is re&euml;el.</div>
+<details><summary>Volledig advies</summary><div class="card-detail" style="margin-top:0.5rem">Risico's: survivorship bias, market efficiency (meer bots kopi&euml;ren Cannae), geen buffer. De fatale fout is aannemen dat historische WR terugkeert.</div></details>
+</div>
+
+<div class="card">
+<div class="card-header"><span class="icon">&#9881;</span><span class="card-name">Eerste Principes</span></div>
+<div class="card-verdict">Alle 6 terug + sizing naar 1.5-2% max</div>
+<div class="card-detail">Je optimaliseert de verkeerde variabele. Leagues zijn niet het probleem — Cannae's form wel. Monitor CV/IV ratio als leading indicator.</div>
+<details><summary>Volledig advies</summary><div class="card-detail" style="margin-top:0.5rem">Verlaag totale sizing voor 2 weken. Pas na bewijs van herstel terug naar normale sizing. League selectie is een symptoombestrijding.</div></details>
+</div>
+
+<div class="card">
+<div class="card-header"><span class="icon">&#128640;</span><span class="card-name">De Expansionist</span></div>
+<div class="card-verdict">Conviction-weighted sizing bouwen</div>
+<div class="card-detail">Cannae's positiegrootte relatief aan portfolio is het echte signaal. 3% inzet vs 0.5% = kwaliteitsindicator. Stop met league whitelisting.</div>
+<details><summary>Volledig advies</summary><div class="card-detail" style="margin-top:0.5rem">De aangrenzende kans: je hebt data over HOE Cannae bet, niet alleen WAT. Gebruik die sizing variatie als multiplier.</div></details>
+</div>
+
+<div class="card">
+<div class="card-header"><span class="icon">&#128065;</span><span class="card-name">De Buitenstaander</span></div>
+<div class="card-verdict">Pauzeer alles tot bewijs van herstel</div>
+<div class="card-detail">Jij ziet "tijdelijke dip". Een buitenstaander ziet een systeem dat geld verliest met echt geld en geen bewezen herstel-signaal heeft.</div>
+<details><summary>Volledig advies</summary><div class="card-detail" style="margin-top:0.5rem">Wacht tot Cannae WR >70% voor 2 weken. Met $2,690 is er geen buffer. Wacht tot het bewijs er is, niet tot het gevoel er is.</div></details>
+</div>
+
+<div class="card">
+<div class="card-header"><span class="icon">&#9999;</span><span class="card-name">De Uitvoerder</span></div>
+<div class="card-verdict">Fase 3 van 6 leagues in, halve sizing</div>
+<div class="card-detail">ere+spl+fl1 eerst (hoogste ROI). Evalueer na 2 dagen. Dan resterende 3. Concreet 3-stappen plan.</div>
+<details><summary>Volledig advies</summary><div class="card-detail" style="margin-top:0.5rem">1) Vandaag: enable ere+spl+fl1 op 50% sizing. 2) Maandag: evalueer. 3) Woensdag: enable mls+lal+tur als positief.</div></details>
+</div>
+
+</div>
+
+<h2 class="section-title">Peer Review Highlights</h2>
+
+<div class="peer-grid">
+<div class="peer"><strong>Sterkst:</strong> B (Eerste Principes) &mdash; 2 stemmen | C (Contrariaan) &mdash; 3 stemmen</div>
+<div class="peer"><strong>Zwakst:</strong> D (Expansionist) &mdash; unaniem. Bouwt complexiteit op kapotte input.</div>
+</div>
+
+<h3 style="color:#E94560; font-size:1rem; margin:1.5rem 0 0.5rem;">Blinde vlekken gevonden door reviewers</h3>
+
+<div class="blind">
+<strong>1. 96h sample is statistisch waardeloos</strong><br>
+Waarschijnlijk 2-5 trades per league. Dat is ruis, geen signaal. De null-hypothese (Cannae winstgevend) is niet verworpen.
+</div>
+<div class="blind">
+<strong>2. Positiecorrelatie</strong><br>
+Cannae's bets op &eacute;&eacute;n dag zijn gecorreleerd. League-diversificatie beschermt niet tegen Cannae-specifiek risico.
+</div>
+<div class="blind">
+<strong>3. Asymmetrisch leerrisico</strong><br>
+Met $2,690 en 2% sizing: ~50-65 trades buffer. Mogelijk niet genoeg om structurele dip vast te stellen v&oacute;&oacute;rdat je significant down bent.
+</div>
+
+<div class="verdict-box">
+<div class="verdict-title">Verdict</div>
+<div class="verdict-text">
+<strong>Zet alle 6 leagues terug aan. Verlaag sizing naar 2% flat.</strong><br><br>
+96h data verwerpt 19K+ historische trades niet. De leagues waren niet het probleem — Cannae's dip was het probleem. Meer leagues = meer datapunten om herstel te meten.<br><br>
+<strong>Kill switch:</strong> Als Cannae 7 dagen op rij onder 60% WR blijft &rarr; pauzeer alles.
+</div>
+<div class="first-step">
+<strong>Eerste stap (vandaag):</strong> Enable mls, fl1, ere, lal, spl, tur in config.yaml + zet max_bet_pct: 2%. E&eacute;n config change, hot-reloadable, direct reversible.
+</div>
+</div>
+
+<p class="meta">5 adviseurs + 5 peer reviewers | Claude Opus 4.6 + Sonnet | 2026-04-05</p>
+
+</body>
+</html>

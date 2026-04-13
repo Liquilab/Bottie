@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<title>Council — Hauptbet Strategie Settings</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #0A0A0A;
+  color: #E5E5E5;
+  font-family: -apple-system, "SF Mono", Menlo, monospace;
+  line-height: 1.5;
+  padding: 40px 24px;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+h1 { font-size: 22px; color: #fff; margin-bottom: 4px; letter-spacing: -0.5px; }
+.meta { color: #666; font-size: 12px; margin-bottom: 32px; }
+.question {
+  background: #141414;
+  border-left: 3px solid #FFB800;
+  padding: 20px 24px;
+  margin-bottom: 36px;
+  font-size: 14px;
+  color: #ddd;
+}
+h2 { font-size: 14px; color: #FFB800; margin: 36px 0 14px 0; text-transform: uppercase; letter-spacing: 1px; font-weight: 600; }
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
+  gap: 14px;
+  margin-bottom: 28px;
+}
+.card {
+  background: #141414;
+  border: 1px solid #1f1f1f;
+  border-radius: 6px;
+  padding: 18px 20px;
+}
+.card h3 { font-size: 13px; color: #fff; margin-bottom: 6px; }
+.card .role { color: #888; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
+.card .punch { color: #E5E5E5; font-size: 13px; margin-bottom: 12px; line-height: 1.55; }
+.card details { margin-top: 10px; }
+.card details summary { cursor: pointer; color: #555; font-size: 11px; padding: 4px 0; }
+.card details summary:hover { color: #888; }
+.card details[open] summary { color: #888; }
+.card details .body { color: #aaa; font-size: 12px; line-height: 1.6; padding: 10px 0 0; white-space: pre-line; }
+
+table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 12px 0; }
+th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #1f1f1f; }
+th { color: #888; font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+.win { color: #4ade80; }
+.loss { color: #f87171; }
+
+.reviews {
+  background: #0f0f0f;
+  border-left: 2px solid #444;
+  padding: 16px 20px;
+  margin: 8px 0;
+  font-size: 12px;
+  color: #999;
+  line-height: 1.6;
+}
+.reviews strong { color: #ddd; }
+
+.verdict {
+  background: linear-gradient(135deg, #1a1206 0%, #0f0a02 100%);
+  border: 1px solid #FFB800;
+  border-radius: 8px;
+  padding: 28px 32px;
+  margin-top: 32px;
+}
+.verdict h2 { color: #FFB800; font-size: 16px; margin-top: 0; }
+.verdict .top {
+  font-size: 16px;
+  color: #fff;
+  line-height: 1.55;
+  margin-bottom: 18px;
+}
+.verdict ol { padding-left: 20px; color: #ddd; font-size: 13px; line-height: 1.7; }
+.verdict ol li { margin-bottom: 10px; }
+.verdict .first-step {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid #3a2a08;
+  color: #FFB800;
+  font-size: 14px;
+}
+.verdict .first-step strong { color: #fff; }
+code { background: #1f1f1f; padding: 1px 6px; border-radius: 3px; color: #FFD27A; font-size: 11px; }
+</style>
+</head>
+<body>
+
+<h1>Council — Hauptbet Strategie Settings</h1>
+<div class="meta">2026-04-07 · 5 adviseurs · 5 anonieme reviewers</div>
+
+<div class="question">
+<strong>Vraag:</strong> Welke concrete settings (threshold, leg-types, league filter, sizing, draw-handling) moet Bottie's nieuwe high-conviction "hauptbet" copy-trading strategie krijgen op basis van Cannae's ≥$5k bets analyse over 42 dagen?
+</div>
+
+<h2>Dataset (gemeten)</h2>
+<table>
+<tr><th>Bucket</th><th>Games</th><th>WR</th><th>Stake</th><th>PnL</th><th>ROI</th></tr>
+<tr><td>WIN_YES alleen</td><td>66</td><td>53.0%</td><td>$1.14M</td><td class="loss">-$175k</td><td class="loss">-15.4%</td></tr>
+<tr><td>WIN_YES + DRAW≥$2k</td><td>21</td><td>57.1%</td><td>$0.71M</td><td class="win">+$149k</td><td class="win">+21.0%</td></tr>
+<tr><td><strong>WIN_NO alleen</strong></td><td>114</td><td>64.0%</td><td>$1.53M</td><td class="win">+$274k</td><td class="win"><strong>+17.9%</strong></td></tr>
+<tr><td>WIN_NO + DRAW≥$2k</td><td>36</td><td>55.6%</td><td>$1.15M</td><td class="win">+$83k</td><td class="win">+7.2%</td></tr>
+</table>
+<p style="color:#888;font-size:12px;">Per league (≥$5k): bra +36% / arg +35% / efa +26% / fl1 +12% / nba +5% / <span class="loss">epl -1.5% ($1.98M)</span> / <span class="loss">lal -4.4% ($1.42M)</span> / <span class="loss">mlb -50%</span></p>
+
+<h2>5 Adviseurs</h2>
+<div class="grid">
+
+<div class="card">
+<div class="role">⚔️ Contrariaan</div>
+<h3>42d/368 games is geen edge, het is ruis</h3>
+<div class="punch">WIN_NO 64% WR n=114 → CI 55-73%. EPL/LAL exclusion = backward-looking cherry-pick. NO-bias = executie-trap door slippage in thin books. Eerst 14d paper.</div>
+<details><summary>volledig advies</summary><div class="body">FATALE FOUT #1: Survivorship over 42d / 368 games. Binomiale 95% CI op WIN_NO 64% met n=114 loopt 55-73%. Edge past in noise. $10k+ bucket ging van +11.3% naar -9.3% in datzelfde window — regime change.
+
+FATALE FOUT #2: EPL+LAL excluden = cherry-pick op recent verlies. Cannae zet er groot geld op, jij beslist op 42d dat hij fout zit in z'n grootste markten.
+
+FATALE FOUT #3: NO-bias is executie-trap. NO-legs in small leagues hebben thin books. Met latency krijg jij slechtere fills dan Cannae's 0.534-0.579. +17.9% wordt +8% na slippage.
+
+FATALE FOUT #4: Hauptbet=highest-CV negeert dat Cannae 22% YES+NO hedged. Jij kopieert ongehedged versie van gehedged book.
+
+Eerst 14d paper op $0.</div></details>
+</div>
+
+<div class="card">
+<div class="role">🧱 Eerste Principes</div>
+<h3>Cannae is signaal, niet strategie. Fix is subtractief.</h3>
+<div class="punch">Het echte probleem: waarom kopieer je überhaupt WIN_YES en EPL/MLB/LAL? Geen nieuwe strategie — een stop op verliessegmenten. Whitelist bra/arg/efa/fl1/bun/nba.</div>
+<details><summary>volledig advies</summary><div class="body">Strip aannames: "Cannae kopiëren" is niet de strategie, het is signaalbron. "Hauptbet=hoogste-CV" is heuristiek, geen edge.
+
+Echte vraag: niet "tune copying" maar "waarom kopieer je überhaupt WIN_YES en MLB/EPL/LAL?". Cannae's edge bij ≥$5k is asymmetrisch en geconcentreerd in NO-kant van football WIN, niet-EPL/LAL/MLB leagues, en YES alleen als DRAW-hedge aanwezig.
+
+Concreet:
+1. Whitelist: bra/arg/efa/fl1/bun/nba
+2. Alleen WIN_NO ≥$5k, of WIN_YES mits DRAW≥$2k
+3. Drop solo WIN_YES volledig
+4. 3% flat houden — geen data voor variabel
+5. Draw-handling: bestaande regel (cv >5% hauptbet)
+6. Threshold $5k
+
+Geen nieuwe strategie. Stop op verliessegmenten.</div></details>
+</div>
+
+<div class="card">
+<div class="role">🚀 Expansionist</div>
+<h3>Vraag is te klein. Bouw vloot van drie.</h3>
+<div class="punch">Drie aparte alpha-bronnen: (1) WIN_NO Fade Bot 6-8% sizing, (2) LatAm vertical $3k threshold, (3) EPL+LAL contra-bot mirror. Universe te klein.</div>
+<details><summary>volledig advies</summary><div class="body">Vraag is te klein. Drie aparte alpha-bronnen:
+
+1. WIN_NO is geen leg, het is een product. +17.9% n=114 standalone. Aparte bot Cannae Football Favorite Fade. 3% flat is te voorzichtig — 6-8% per trade.
+
+2. ZA + Europa-tier-2 = aparte instance. BRA/ARG/EFA/FL1. Hogere sizing (5-7%), lagere threshold ($3k), copy alles. Cannae's edge uit info-asymmetrie waar US-sharps absent.
+
+3. EPL+LAL actief shorten. $3.4M stake met -ROI = fade-signaal. Mirror trades: Cannae ≥$5k EPL WIN_YES → jij WIN_NO.
+
+4. Universe te klein. Breid uit naar elke league met ≥10 ≥$5k bets/42d.
+
+Bouw vloot van drie i.p.v. één Ferrari.</div></details>
+</div>
+
+<div class="card">
+<div class="role">👁️ Buitenstaander</div>
+<h3>Geen settings. Eerst antwoorden.</h3>
+<div class="punch">42d genoeg? n=114 significant? Outliers? Mechanisme uitlegbaar? Slippage gemeten? Cannae=één wallet kill-switch? -1.5%/-4.4% is ruis. Geen stop-loss = dood.</div>
+<details><summary>volledig advies</summary><div class="body">Naïeve vragen:
+1. 42 dagen = zes weken. Getest op ander venster?
+2. "Per game" ROI verbergt outliers. Mediaan? Percentielen?
+3. WIN_NO +17.9% n=114 — standaardfout? Significant?
+4. Mechanisme uitlegbaar aan moeder? Zonder verhaal = ruis.
+5. Cannae = één wallet. Kill-switch op dag 1 als hij stopt?
+6. Kopiëren = te laat. Slippage gemeten of aangenomen?
+7. EPL/LAL eruit op -1.5%/-4.4% over 42d = ruis.
+8. Geen stop-loss = je bent dood.
+
+Geen settings. Eerst antwoorden.</div></details>
+</div>
+
+<div class="card">
+<div class="role">🔧 Uitvoerder</div>
+<h3>65 minuten tot live. Geen "hangt ervan af".</h3>
+<div class="punch">Direct config.yaml: stake≥$5k, copy WIN_NO altijd, copy WIN_YES alleen met DRAW≥$2k, blacklist epl/lal/mlb, 3% flat, kill-switch -$1000, 3 stappen.</div>
+<details><summary>volledig advies</summary><div class="body">cannae_min_stake: 5000
+copy_win_no: true
+copy_win_yes: false
+copy_win_yes_if_draw: true
+draw_min_stake: 2000
+blacklist: [epl, lal, mlb]
+sizing: 0.03
+daily_loss_limit: -1000
+max_daily_trades: 15
+pause_on_consecutive_losses: 5
+
+3 stappen:
+1. Config edit + build (30min)
+2. Dry-run verificatie (20min): grep RISK REJECTED + PLAN rows
+3. Deploy + monitor (15min)
+
+Totaal 65 min tot live.
+
+Waarschuwing: WIN_NO + DRAW combo (+7.2%) scoort slechter dan WIN_NO alleen (+17.9%). Dag-2 tuning.</div></details>
+</div>
+
+</div>
+
+<h2>Peer Reviews — Wat de adviseurs misten</h2>
+<div class="reviews">
+<strong>Drie van de vijf reviewers</strong> vingen onafhankelijk dezelfde miss op: <strong>niemand heeft CLV (closing price) gemeten op Cannae's eigen legs</strong>. Bottie heeft die tracking al sinds commit <code>145e8c0</code>. Zonder CLV is +5.2% ROI mogelijk mid-price drift, geen edge.<br><br>
+Andere blinde vlekken: <strong>look-ahead bias</strong> (config opgebouwd uit dezelfde 42d → zero out-of-sample informatiewaarde) · <strong>effectieve n is 368, niet 561</strong> (1.5 legs/game = niet onafhankelijk) · <strong>geen Cannae source-monitoring</strong> (regime-shift detection ontbreekt) · <strong>slippage op NO-favorieten</strong> kan 1-2% per tick kosten · mogelijke <strong>overlap met al-live blind_fade</strong>.
+<br><br>
+<strong>Sterkste antwoorden:</strong> 3 reviewers kozen <strong>D (Eerste Principes — subtractief)</strong>, 1 koos <strong>B (Contrariaan)</strong>, 1 koos <strong>C (Buitenstaander)</strong>. Twee reviewers wezen <strong>A (Uitvoerder)</strong> aan als grootste blinde vlek (te snel live zonder validatie). Eén wees <strong>E (Expansionist)</strong> aan (vloot van drie schaalt noise).
+</div>
+
+<div class="verdict">
+<h2>Verdict</h2>
+<div class="top">
+Doe de <strong>subtractieve fix (D)</strong> met de <strong>concrete config van A</strong>, MAAR voeg twee guardrails toe vóór deploy.
+</div>
+<ol>
+<li><strong>Strict subtractief, niet expansief.</strong> Blacklist <code>epl, lal, mlb</code>. Skip WIN_YES solo (alleen kopiëren met DRAW≥$2k). Houd 3% flat sizing. <strong>Geen sizing bumps</strong> — geen "WIN_NO is +17.9% dus 6%". Expansionist wordt afgewezen: vloot van drie bots op 42d data is variantie schalen, niet edge.</li>
+<li><strong>CLV-validatie als pre-deploy gate.</strong> Draai retro op bestaande <code>closing_price</code> data in <code>data/trades.jsonl</code> voor de subset (whitelist minus EPL/LAL/MLB, WIN_NO + WIN_YES-met-draw). Als Cannae's CLV op die subset positief is op n>50 → deploy. Anders: het +17.9% getal is achterafperspectief.</li>
+<li><strong>Source-monitoring kill-switch.</strong> <code>daily_loss_limit: -500</code> (strenger dan A's -1000), <code>max_daily_trades: 10</code>, <code>pause_on_consecutive_losses: 4</code>. Strenger omdat statistische ondergrond zwakker is dan A erkent.</li>
+</ol>
+<div class="first-step">
+<strong>Eerste stap (vandaag):</strong> Run CLV-validatie op de subset (<code>data/trades.jsonl</code>, filter whitelist minus epl/lal/mlb, splits WIN_NO solo / WIN_YES+DRAW / rest, bereken Σ(closing − entry) × shares per groep). Als WIN_NO solo CLV-positief op n>50 → groen licht voor deploy met bovenstaande config morgenochtend.
+</div>
+</div>
+
+</body>
+</html>

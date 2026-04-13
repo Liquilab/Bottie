@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<title>Council — Bottie SSOT Design — 2026-04-06</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0A0A0A;
+    color: #E8E8E8;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+    line-height: 1.55;
+    padding: 40px 24px 80px;
+    max-width: 980px;
+    margin: 0 auto;
+  }
+  header { margin-bottom: 48px; border-bottom: 1px solid #222; padding-bottom: 24px; }
+  .eyebrow { font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: #888; margin-bottom: 12px; }
+  h1 { font-size: 28px; font-weight: 600; color: #fff; letter-spacing: -0.5px; margin-bottom: 12px; }
+  .question { font-size: 15px; color: #BBB; max-width: 800px; }
+  .context { font-size: 13px; color: #666; margin-top: 16px; font-style: italic; }
+
+  h2 { font-size: 18px; color: #fff; margin: 48px 0 20px; padding-bottom: 10px; border-bottom: 1px solid #222; }
+
+  .adviseurs { display: grid; grid-template-columns: 1fr; gap: 16px; }
+  .card {
+    background: #121212;
+    border: 1px solid #222;
+    border-radius: 8px;
+    padding: 20px 24px;
+    transition: border-color 0.15s;
+  }
+  .card:hover { border-color: #3a3a3a; }
+  .card-header { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+  .icon { font-size: 20px; }
+  .role { font-size: 14px; font-weight: 600; color: #fff; }
+  .tag {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: #1a1a1a;
+    color: #888;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    margin-left: auto;
+  }
+  .tag.winner { background: #1a3d1a; color: #6eff82; }
+  .tag.blindspot { background: #3d1a1a; color: #ff8a8a; }
+  .kernpunt {
+    font-size: 14px;
+    color: #DDD;
+    margin-bottom: 10px;
+    font-weight: 500;
+  }
+  details { margin-top: 10px; }
+  summary {
+    cursor: pointer;
+    font-size: 12px;
+    color: #666;
+    user-select: none;
+    padding: 4px 0;
+  }
+  summary:hover { color: #999; }
+  .full { margin-top: 12px; font-size: 13px; color: #AAA; white-space: pre-wrap; border-left: 2px solid #2a2a2a; padding-left: 14px; }
+
+  .review-section {
+    background: #0F0F0F;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+    padding: 24px;
+    margin-top: 16px;
+  }
+  .review-section h3 { font-size: 13px; color: #888; text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 12px; }
+  .review-section ul { list-style: none; padding-left: 0; }
+  .review-section li { padding: 8px 0; border-bottom: 1px solid #1a1a1a; font-size: 13px; color: #CCC; }
+  .review-section li:last-child { border-bottom: none; }
+  .review-section strong { color: #fff; }
+
+  .verdict {
+    background: linear-gradient(135deg, #0F2419 0%, #0A1F1A 100%);
+    border: 1px solid #1a4a2a;
+    border-radius: 10px;
+    padding: 32px 28px;
+    margin-top: 48px;
+  }
+  .verdict .eyebrow { color: #6eff82; }
+  .verdict h2 { border: none; padding: 0; margin: 0 0 16px; font-size: 22px; color: #fff; }
+  .verdict p { font-size: 15px; color: #DDD; margin-bottom: 14px; }
+  .verdict .step {
+    background: #0a0a0a;
+    border-left: 3px solid #6eff82;
+    padding: 14px 18px;
+    margin-top: 20px;
+    border-radius: 0 6px 6px 0;
+  }
+  .verdict .step-label { font-size: 11px; text-transform: uppercase; color: #6eff82; letter-spacing: 1.5px; margin-bottom: 6px; }
+  .verdict .step-body { font-size: 14px; color: #EEE; }
+
+  .route { list-style: none; padding: 0; margin-top: 20px; }
+  .route li {
+    background: #0a0a0a;
+    padding: 12px 16px;
+    border-left: 2px solid #333;
+    margin-bottom: 8px;
+    font-size: 13px;
+    color: #CCC;
+    border-radius: 0 4px 4px 0;
+  }
+  .route li strong { color: #fff; }
+  .route li.today { border-left-color: #6eff82; }
+  .route li.week { border-left-color: #d4a843; }
+  .route li.later { border-left-color: #555; color: #888; }
+
+  footer { margin-top: 60px; padding-top: 20px; border-top: 1px solid #222; font-size: 11px; color: #555; text-align: center; letter-spacing: 1px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="eyebrow">LLM Council — Bottie</div>
+  <h1>SSOT Design: welke velden horen erin?</h1>
+  <div class="question">Ontwerp de uitputtende lijst van velden/state die in Bottie's éne SSOT moeten voor live risk- en session-state.</div>
+  <div class="context">Aanleiding: Cannae verloor op 2026-04-05 $1,126 terwijl de daily_loss cap nominaal $430 was. Root cause: RiskManager state in-memory, bot 7× herstart = cap reset.</div>
+</header>
+
+<h2>De 5 Adviseurs</h2>
+<div class="adviseurs">
+
+  <div class="card">
+    <div class="card-header">
+      <span class="icon">⚔</span>
+      <span class="role">De Contrariaan</span>
+      <span class="tag winner">Peer winnaar 5/5</span>
+    </div>
+    <div class="kernpunt">"Jullie bouwen een grafkist terwijl het lichaam nog bloedt. Fix daily_pnl-persistent vandaag, niet over 3 weken."</div>
+    <details>
+      <summary>Volledig advies</summary>
+      <div class="full">SSOT-refactor is 2-3 weken werk. Cannae verliest in die tijd $5-10k. De échte bug is één regel: daily_pnl overleeft geen restart. Fix vandaag met dom JSON + fsync.
+
+Tweede fatale fout: SSOT ≠ waarheid. Polymarket is de echte waarheid, jullie "SSOT" is een cache. Scenario: SSOT zegt cap hit HALT, maar 4 open limit orders vullen alsnog -$300. Disk full → bot start met daily_pnl=0 en blaast door cap. Mid-trade crash, half-geschreven JSON, atomic-rename redt niks. Pre-trade check MOET exchange als tiebreaker hebben.
+
+Derde val: features stapelen (loss-streak cooldown, sport-blacklist, time-of-day muting) = curve-fit op één slechte dag. Sloopt de edge.
+
+NU: (1) daily_pnl_realized+date fsync, (2) initial_bankroll_today frozen, (3) HALT-file bij boot, (4) restart-counter alert >2/dag. Stop bloeden, ontwerp later het ziekenhuis.</div>
+    </details>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <span class="icon">⚛</span>
+      <span class="role">De Eerste Principes Denker</span>
+    </div>
+    <div class="kernpunt">"De vraag is fout. Polymarket IS de SSOT. Bouw geen shadow-accounting — poll de exchange pre-trade."</div>
+    <details>
+      <summary>Volledig advies</summary>
+      <div class="full">Het echte probleem: we bouwen shadow accounting voor data die Polymarket autoritatief bezit. Bankroll, open posities, fills sinds UTC-midnight — alles staat daar. Wat Bottie in risk.rs tracked is een kopie die losraakt bij elke restart/missed fill/race. Persistence is pleister, niet genezing.
+
+Herbouw in 2 categorieën:
+AUTHORITATIVE (live polled, nooit gecacht): bankroll, positions, today's realized PnL via /trades?since=midnight.
+DERIVED/LOCAL (alleen wat exchange niet weet): initial_bankroll_utc_midnight, attempted_set, cooldowns.
+
+Geen daily_pnl veld. Geen open_counter. Afgeleid.
+
+Echte vragen: (1) waarom herstart de bot 7×/dag — dát is de bug. (2) Pre-trade MOET GET /balance + /trades?since=midnight, 200ms latency vs $696 overshoot. (3) Optimaliseer "cap sticky onder elke faalmodus" door exchange te vertrouwen, niet jezelf.
+
+Bouw ExchangeStateProvider + local_policy.json met 3 velden. Fix crash-loop apart.</div>
+    </details>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <span class="icon">🚀</span>
+      <span class="role">De Expansionist</span>
+      <span class="tag blindspot">Blinde vlek 4/5</span>
+    </div>
+    <div class="kernpunt">"Maak er een event-sourced multi-strategy platform van. 30+ velden, replay, tijdreizen, strategy marketplace."</div>
+    <details>
+      <summary>Volledig advies</summary>
+      <div class="full">Bug is symptoom. Grotere prijs: dit schema wordt fundament van multi-strategy platform. Event-sourced log, niet mutable JSON.
+
+Velden:
+Envelope: event_id (ULID), ts_utc, instance_id, schema_version, bot_build_md5, config_hash, strategy_version, git_sha
+Risk: daily_pnl_realized/unrealized, daily_loss_cap/used, hourly_pnl_window[24], drawdown_from_peak, sizing_decay_factor, loss_streak_count, consecutive_losses_pause_until, correlation_exposure per league/day/team, circuit_breaker_state (OPEN/HALF/CLOSED), tripped_reason
+Position: open_positions[] met entry_clv/current_clv/pnl_path[], pending_orders[], attempted_set met TTL, cooldowns{market_id: until_ts}
+Decision log: inputs_hash, cannae_cv/iv, hauptbet_chosen, decision (TAKE/SKIP/REJECT), reject_reason, sizing_inputs/output, guardrails_evaluated[]
+
+Cadeautjes: replay harness (backtest nieuwe strategie tegen historische state), tijdreizen debugging, strategy marketplace (3e/4e strategie zonder elk wiel opnieuw).
+
+Grootste missed guardrail: correlation cap per kickoff-window. 8 Premier League 15:00 = 1 gecorreleerde bet, niet 8.
+
+Format: NDJSON append-only events + periodieke snapshot voor snelle boot. Beide.</div>
+    </details>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <span class="icon">👁</span>
+      <span class="role">De Buitenstaander</span>
+    </div>
+    <div class="kernpunt">"16 dingen zijn onduidelijk. Config vs State wordt gemengd. Definieer eerst jargon, dan pas velden."</div>
+    <details>
+      <summary>Volledig advies</summary>
+      <div class="full">Onverklaarde jargon: (1) Cannae/GIYN — bots, strategieën, accounts? (2) hauptbet — hoogste-conviction leg? (3) attempted set — set van wat, scope? (4) blind fade — strategie tegen Cannae? (5) cap sticky — tegen wat?
+
+Conceptuele gaten: (6) daily_pnl = realized/MtM/met fees? (7) initial_bankroll = start-of-day of account-opening? Factor 100 verschil. (8) 20% daily cap is gigantisch — bewust? (9) Config vs State door elkaar: max_daily_loss_pct is config, daily_pnl is state. De lijst mengt deze. (10) 7 restarts is crash-loop, dat is de echte bug. (11) Open posities bij restart — poll of reconstructie? (12) Trade resolution polling-interval? (13) Twee instanties = twee SSOTs of één? Process locking? (14) UTC of CET? Reset-tijd? (15) Geen data-flow diagram = giswerk. (16) RUS-307 trade-history SSOT bestaat al — waarom niet uitbreiden?
+
+Kernvraag terug: definieer jargon + beslis Config-vs-State scheiding, dan pas velden lijsten.</div>
+    </details>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <span class="icon">🔨</span>
+      <span class="role">De Uitvoerder</span>
+    </div>
+    <div class="kernpunt">"3 stappen. Stap 1 = vandaag, 90 min. Atomic JSON, panic bij cap, deploy. MVP is 10 velden."</div>
+    <details>
+      <summary>Volledig advies</summary>
+      <div class="full">STAP 1 NOODSTOP VANDAAG (90 min):
+1. config.yaml: daily_loss_cap_usd: 300, max_restarts_per_day: 2
+2. src/risk.rs: bij startup lees state/daily_pnl.json (1 veld: date, realized_pnl). Als pnl &lt; -300: panic, weiger te starten
+3. Na elke fill: atomair overschrijven (.tmp + rename)
+4. Build, cp target/release/bottie bottie-bin, md5 verify, deploy
+
+STAP 2 MVP SSOT DEZE WEEK (1 dag):
+src/session_state.rs, fs2 exclusive file lock, aparte Cannae/GIYN paden.
+
+STAP 3 BACKFILL + ALERT (2 uur):
+rebuild_session_from_trades.py + cron staleness alert.
+
+MVP SSOT velden (10, niet meer):
+date, realized_pnl_usd, initial_bankroll_usd (frozen per dag), current_bankroll_usd, daily_loss_cap_usd, cap_tripped (sticky bool), attempted_trades[], last_write_ts, instance_id, schema_version.
+
+Volledige wishlist in v2. Begin NU met stap 1.</div>
+    </details>
+  </div>
+
+</div>
+
+<h2>Peer Review Highlights</h2>
+
+<div class="review-section">
+  <h3>Wat vielen de reviewers op?</h3>
+  <ul>
+    <li><strong>5/5 reviewers:</strong> Contrariaan is het sterkste advies. Combineert urgentie met de diepste diagnose (Polymarket = echte waarheid, lokaal = cache).</li>
+    <li><strong>4/5 reviewers:</strong> Expansionist heeft de grootste blinde vlek. "Bouw Jira terwijl het huis brandt."</li>
+    <li><strong>2/5 reviewers:</strong> Uitvoerder is de uitvoerbare versie van Contrariaan's diagnose.</li>
+    <li><strong>1/5 reviewers:</strong> Eerste Principes is architecturaal correct maar negeert tijdsdruk.</li>
+  </ul>
+</div>
+
+<div class="review-section">
+  <h3>Wat hebben ALLE vijf gemist?</h3>
+  <ul>
+    <li><strong>1. Waarom crashte de bot 7×?</strong> Iedereen behandelt restarts als gegeven en bouwt restart-bestendige state. Zonder root cause is persistence pleisterwerk over een crash-loop. 5/5 reviewers noemden dit.</li>
+    <li><strong>2. Cancel-all-on-HALT ontbreekt.</strong> Bestaande limit orders op Polymarket blijven leven na cap-hit en kunnen alsnog vullen. Waarschijnlijk een deel van de $696 overshoot op Apr 5. Atomic operatie nodig: cap_hit → cancel_all → set HALT.</li>
+    <li><strong>3. Gecorreleerde gelijktijdige fills.</strong> De Bundesliga 2 cluster van 17:29-17:40 (Paderborn, Hannover, Holstein, Karlsruher, -$617 in 11 min) past exact het patroon van "correlation cap per kickoff-window". Niemand noemt dat dit waarschijnlijk is wat gisteren gebeurde.</li>
+  </ul>
+</div>
+
+<div class="verdict">
+  <div class="eyebrow">Verdict</div>
+  <h2>De vraag zelf was fout gesteld.</h2>
+  <p>"Lijst uitputtend alle SSOT-velden" is de verkeerde vraag. De juiste bredere aanpak is niet "meer velden" — het is <strong>minder afhankelijkheid van onze eigen state</strong>. Polymarket is de waarheid; lokale state mag alleen bestaan voor dingen die de exchange niet weet (initial bankroll van vandaag, attempted dedup, cooldowns).</p>
+  <p>De Expansionist's event-sourced platform is niet fout — het is te vroeg. Parkeer tot v3. De Uitvoerder's 10-veld MVP is het juiste startpunt, maar expliciet als <em>cache</em> ontworpen, met Polymarket als tiebreaker bij elke pre-trade check.</p>
+
+  <ul class="route">
+    <li class="today"><strong>Vandaag 30 min:</strong> grep Apr 5 journalctl voor crash/OOM/deploy events rond elk van de 7 restarts. Classificeer. (Root-cause van de crash-loop.)</li>
+    <li class="today"><strong>Vandaag 90 min:</strong> Uitvoerder's stap 1 letterlijk — state/daily_pnl.json, startup-read-panic, atomic fsync per fill, deploy met md5 verify.</li>
+    <li class="week"><strong>Deze week:</strong> cancel-all-open-orders als onderdeel van HALT. Plus: bij boot GET /balance + /trades?since=midnight en reconciliëren met local file; trust exchange bij verschil.</li>
+    <li class="week"><strong>Volgende week:</strong> Uitvoerder's 10-veld MVP als expliciete cache-laag. Elke veld met "overridable by exchange" kolom.</li>
+    <li class="later"><strong>V3 (geparkeerd):</strong> event-sourcing, replay, decision log, correlation cap, circuit breaker state machine.</li>
+  </ul>
+
+  <div class="step">
+    <div class="step-label">Eerste stap vandaag — parallel</div>
+    <div class="step-body">
+      <strong>Spoor A (30 min):</strong> classificeer de 7 restarts van Apr 5. Deploys? Crashes? OOM? Manual?<br>
+      <strong>Spoor B (90 min):</strong> implementeer state/daily_pnl.json met atomic fsync + startup-panic, deploy met md5 verify.
+    </div>
+  </div>
+</div>
+
+<footer>
+  5 adviseurs · 5 peer reviews · anoniem gereviewed · 2026-04-06
+</footer>
+
+</body>
+</html>
