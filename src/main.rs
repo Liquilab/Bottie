@@ -1,6 +1,7 @@
 mod budget;
 mod clob;
 mod config;
+mod consensus;
 mod copy_trader;
 mod execution;
 mod logger;
@@ -15,6 +16,7 @@ mod signing;
 mod sizing;
 mod sports;
 mod stability;
+mod subgraph;
 mod sync;
 mod wallet_tracker;
 
@@ -319,18 +321,28 @@ async fn copy_trading_loop(
 
     // Two-phase schedule state
     let mut game_schedule = scheduler::GameSchedule::load_from_disk(std::path::Path::new("data/schedule_cache.json"));
-    let mut watched_games: Vec<scheduler::WatchedGame> = Vec::new(); // continuously discovered, waiting for T-5
-    let mut t5_executed: HashSet<String> = HashSet::new(); // event_slugs already bought at T-5
-    let mut t1_executed: HashSet<String> = HashSet::new(); // event_slugs re-checked at T-1
+    let mut watched_games: Vec<scheduler::WatchedGame> = Vec::new(); // T-30 discovered, waiting for T-1
+    let mut t1_bought: HashSet<String> = HashSet::new();   // event_slugs bought at T-1
+    let mut t1_rechecked: HashSet<String> = HashSet::new(); // event_slugs rechecked after T-1
 
     // Cannae position summary: log every ~30 min (120 polls × 15s = 30 min)
     let cannae_summary_every_n: u32 = 120;
     let mut polls_since_cannae_summary: u32 = cannae_summary_every_n; // Force immediate on first cycle
 
+    // Consensus: subgraph client + dedup set
+    let consensus_cfg = config.read().await.whale_consensus.clone();
+    let subgraph_client = subgraph::SubgraphClient::new(
+        Some(&consensus_cfg.subgraph_url),
+        consensus_cfg.query_delay_ms,
+    );
+    let mut consensus_bought: HashSet<String> = HashSet::new();
+
     loop {
         let poll_interval = {
             let c = config.read().await;
-            if !c.copy_trading.enabled {
+            let copy_enabled = c.copy_trading.enabled;
+            let consensus_enabled = c.whale_consensus.enabled;
+            if !copy_enabled && !consensus_enabled {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 continue;
             }
@@ -422,7 +434,7 @@ async fn copy_trading_loop(
                     // 2. Continuous discovery: find ALL upcoming games where Cannae has positions
                     let already_watched: HashSet<String> = watched_games.iter()
                         .map(|g| g.event_slug.clone())
-                        .chain(t5_executed.iter().cloned())
+                        .chain(t1_bought.iter().cloned())
                         .collect();
 
                     let new_watched = scheduler::discover_continuous_from_positions(
@@ -440,30 +452,26 @@ async fn copy_trading_loop(
                         watched_games.extend(new_watched);
                     }
 
-                    // 3. T-5 Confirm+Buy: use pre-fetched positions (no extra API calls).
-                    //    Window = 0..t10_minutes (explicit, no hidden cushion).
-                    let t5_matches = scheduler::confirm_and_execute_t5(
+                    // 3. T-1 Buy: confirm Cannae positions and buy all legs.
+                    //    Window = 0..t10_minutes (set to 1 min = T-1).
+                    let t1_matches_primary = scheduler::confirm_and_execute_t5(
                         &watched_games,
                         &watchlist,
                         schedule_cfg.t10_minutes,
-                        &t5_executed,
+                        &t1_bought,
                         &raw_positions,
                     );
 
                     // Always use latest config for sizing (hot-reload may have changed %)
                     wave_budget.update_config(config.read().await.sport_sizing.clone());
 
-                    // Per-poll dedup: T-5 and T-1 windows overlap (e.g. 0..12 vs 0..3),
-                    // so a game in the 0..3 zone could trigger both passes in the same
-                    // poll cycle. Track every game T-5 *evaluated* this iteration so the
-                    // T-1 pass skips it within the same poll. Reset every loop iteration —
-                    // on the next poll, T-5 will skip via t5_executed and T-1 will get
-                    // its own fresh shot at any newly-arrived Cannae positions.
+                    // Per-poll dedup: primary and recheck passes use the same T-1 window,
+                    // so track evaluated games this iteration to avoid double processing.
                     let mut tried_this_poll: HashSet<String> = HashSet::new();
 
-                    // Sort T5 matches by Cannae game total DESC (biggest games first)
-                    let mut t5_sorted = t5_matches;
-                    t5_sorted.sort_by(|a, b| {
+                    // Sort T-1 matches by Cannae game total DESC (biggest games first)
+                    let mut t1_sorted_primary = t1_matches_primary;
+                    t1_sorted_primary.sort_by(|a, b| {
                         let a_total = wave_budget.cannae_games
                             .get(&a.game_event_slug)
                             .map(|g| g.total_usdc)
@@ -475,61 +483,50 @@ async fn copy_trading_loop(
                         b_total.partial_cmp(&a_total).unwrap_or(std::cmp::Ordering::Equal)
                     });
 
-                    for t5_match in &t5_sorted {
-                        // Skip if this game was already successfully executed by another wallet
-                        if t5_executed.contains(&t5_match.game_event_slug) {
+                    // T-1 buy pass: all legs (win, draw, opponent NO) in one shot.
+                    for t1_match in &t1_sorted_primary {
+                        if t1_bought.contains(&t1_match.game_event_slug) {
                             continue;
                         }
-                        // Mark as tried this poll cycle so the T-1 pass below skips it.
-                        tried_this_poll.insert(t5_match.game_event_slug.clone());
                         let game = stability::StableGame {
-                            event_slug: t5_match.game_event_slug.clone(),
-                            positions: t5_match.positions.clone(),
-                            source_wallet: t5_match.wallet_address.clone(),
-                            source_name: t5_match.wallet_name.clone(),
+                            event_slug: t1_match.game_event_slug.clone(),
+                            positions: t1_match.positions.clone(),
+                            source_wallet: t1_match.wallet_address.clone(),
+                            source_name: t1_match.wallet_name.clone(),
                         };
                         info!(
-                            "T5 EXECUTE: {} from {} ({} positions, discovery had {})",
+                            "T1 BUY: {} from {} ({} positions, discovery had {})",
                             game.event_slug, game.source_name,
-                            t5_match.positions.len(), t5_match.t30_position_count,
+                            t1_match.positions.len(), t1_match.t30_position_count,
                         );
                         let bought = execute_stable_game(
                             &game, &mut executor, &risk, &logger, &config, true,
                             &client, &game_schedule,
                         ).await;
                         if !bought.is_empty() {
-                            // Mark as executed — don't retry with other wallets
-                            t5_executed.insert(t5_match.game_event_slug.clone());
-                            // Spawn T+5 verification task
+                            t1_bought.insert(t1_match.game_event_slug.clone());
                             spawn_t5_verify(
                                 bought,
-                                t5_match.game_event_slug.clone(),
-                                t5_match.wallet_address.clone(),
+                                t1_match.game_event_slug.clone(),
+                                t1_match.wallet_address.clone(),
                                 client.clone(),
                                 logger.clone(),
                             );
-                            // Brief pause between orders to avoid CLOB 425 rate limit
                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         }
-                        // If not executed (league filter, no bets), let another wallet try
                     }
 
-                    // 4. T-1 second pass: re-check games close to kickoff to catch late
-                    //    Cannae trades that arrived after T-5 already fired. Uses fresh
-                    //    raw_positions; condition-level dedup (attempted set) prevents
-                    //    double-buying legs already filled at T-5.
-                    //    Window = 0..t1_minutes (explicit, no hidden cushion — fires at
-                    //    actual T-1, not T-3 like the old +2 cushion would have caused).
+                    // 4. T-1 recheck: catch games that arrived after primary T-1 pass.
+                    //    Same window. Condition-level dedup prevents double-buying.
                     let t1_matches = scheduler::confirm_and_execute_t5(
                         &watched_games,
                         &watchlist,
                         schedule_cfg.t1_minutes,
-                        &t1_executed,
+                        &t1_rechecked,
                         &raw_positions,
                     );
 
-                    // Same sort as T-5: biggest Cannae games first so they get priority
-                    // when capital allocation is tight.
+                    // Biggest Cannae games first for capital priority.
                     let mut t1_sorted = t1_matches;
                     t1_sorted.sort_by(|a, b| {
                         let a_total = wave_budget.cannae_games
@@ -544,12 +541,11 @@ async fn copy_trading_loop(
                     });
 
                     for t1_match in &t1_sorted {
-                        // Same-poll dedup: skip if T-5 already evaluated this game in
-                        // this iteration. Next poll cycle resets tried_this_poll.
+                        // Same-poll dedup: skip if primary T-1 already handled this game.
                         if tried_this_poll.contains(&t1_match.game_event_slug) {
                             continue;
                         }
-                        if t1_executed.contains(&t1_match.game_event_slug) {
+                        if t1_rechecked.contains(&t1_match.game_event_slug) {
                             continue;
                         }
                         let game = stability::StableGame {
@@ -559,17 +555,16 @@ async fn copy_trading_loop(
                             source_name: t1_match.wallet_name.clone(),
                         };
                         info!(
-                            "T1 EXECUTE: {} from {} ({} positions, t5_bought={})",
+                            "T1 RECHECK: {} from {} ({} positions)",
                             game.event_slug, game.source_name,
                             t1_match.positions.len(),
-                            t5_executed.contains(&t1_match.game_event_slug),
                         );
                         let bought = execute_stable_game(
                             &game, &mut executor, &risk, &logger, &config, true,
                             &client, &game_schedule,
                         ).await;
                         if !bought.is_empty() {
-                            t1_executed.insert(t1_match.game_event_slug.clone());
+                            t1_rechecked.insert(t1_match.game_event_slug.clone());
                             // Spawn T+5 verification task
                             spawn_t5_verify(
                                 bought,
@@ -585,6 +580,153 @@ async fn copy_trading_loop(
                     // Cleanup: remove watched games that have already started (past due)
                     let now = chrono::Utc::now();
                     watched_games.retain(|g| g.start_time > now);
+                }
+            }
+        }
+
+        // ══════════════════════════════════════════════════════════════
+        // CONSENSUS STRATEGY: whale consensus on football win markets
+        // ══════════════════════════════════════════════════════════════
+        {
+            let cons_cfg = config.read().await.whale_consensus.clone();
+            if cons_cfg.enabled {
+                let now = chrono::Utc::now();
+                let t1_window = chrono::Duration::minutes(
+                    config.read().await.schedule.t10_minutes as i64 + 2
+                );
+
+                // Find football games in T-1 window
+                let football_games: Vec<&scheduler::UpcomingGame> = game_schedule.games.iter()
+                    .filter(|g| {
+                        let until = g.start_time.signed_duration_since(now);
+                        until >= chrono::Duration::zero() && until <= t1_window
+                    })
+                    .filter(|g| {
+                        // Football only (not US sports)
+                        let sport = g.event_slug.split('-').next().unwrap_or("");
+                        !matches!(sport, "nba" | "nhl" | "mlb" | "nfl" | "cbb" | "ncaa")
+                    })
+                    .filter(|g| {
+                        // Need 2+ win markets (2 teams)
+                        let win_markets = g.market_tokens.iter()
+                            .filter(|(_, q, _)| {
+                                let ql = q.to_lowercase();
+                                ql.contains("win") && !ql.contains("draw") && !ql.contains("o/u")
+                                    && !ql.contains("both") && !ql.contains("spread")
+                            })
+                            .count();
+                        win_markets >= 2
+                    })
+                    .filter(|g| !consensus_bought.contains(&g.event_slug))
+                    .collect();
+
+                for game in &football_games {
+                    let slug = &game.event_slug;
+
+                    // Get win-market condition IDs
+                    let win_cids: Vec<String> = game.market_tokens.iter()
+                        .filter(|(_, q, _)| {
+                            let ql = q.to_lowercase();
+                            ql.contains("win") && !ql.contains("draw") && !ql.contains("o/u")
+                                && !ql.contains("both") && !ql.contains("spread")
+                        })
+                        .map(|(cid, _, _)| cid.clone())
+                        .collect();
+
+                    if win_cids.len() < 2 { continue; }
+
+                    // Query subgraph for top holders
+                    let holders = subgraph_client.top_holders_batch(
+                        &win_cids, cons_cfg.top_n_holders
+                    ).await;
+
+                    if holders.is_empty() { continue; }
+
+                    // Calculate consensus
+                    let result = match consensus::calculate_consensus(
+                        &holders,
+                        &game_schedule,
+                        slug,
+                        cons_cfg.min_consensus_pct,
+                        cons_cfg.min_traders,
+                    ) {
+                        Some(r) => r,
+                        None => continue,
+                    };
+
+                    // Build signal and execute
+                    let buy_price = match client.get_best_ask(&result.buy_token_id).await {
+                        Ok(p) if p > 0.0 && p < 0.95 => (p * 100.0).ceil() / 100.0,
+                        Ok(p) => {
+                            info!("CONSENSUS SKIP: {} — ask {:.2} out of range", slug, p);
+                            continue;
+                        }
+                        Err(e) => {
+                            info!("CONSENSUS SKIP: {} — orderbook error: {}", slug, e);
+                            continue;
+                        }
+                    };
+
+                    let sport = slug.split('-').next().unwrap_or("").to_string();
+                    let agg_signal = signal::AggregatedSignal {
+                        token_id: result.buy_token_id.clone(),
+                        condition_id: result.buy_cid.clone(),
+                        side: "BUY".to_string(),
+                        price: buy_price,
+                        market_title: result.buy_question.clone(),
+                        market_type: "win".to_string(),
+                        sport: sport.clone(),
+                        outcome: "No".to_string(),
+                        event_slug: slug.clone(),
+                        sources: vec![signal::SignalSource::Copy(signal::CopySignal {
+                            source_wallet: "consensus".to_string(),
+                            source_name: "WhaleConsensus".to_string(),
+                            token_id: result.buy_token_id.clone(),
+                            condition_id: result.buy_cid.clone(),
+                            side: "BUY".to_string(),
+                            price: buy_price,
+                            size: result.consensus_shares,
+                            market_title: result.buy_question.clone(),
+                            sport: sport.clone(),
+                            outcome: "No".to_string(),
+                            event_slug: slug.clone(),
+                            confidence: result.consensus_pct / 100.0,
+                            consensus_count: result.n_total_traders as u32,
+                            consensus_wallets: vec!["WhaleConsensus".to_string()],
+                            timestamp: chrono::Utc::now(),
+                            signal_delay_ms: 0,
+                        })],
+                        combined_confidence: (buy_price * 1.10).min(0.95),
+                        edge_pct: 0.0,
+                        source_size_usdc: result.consensus_shares,
+                        source_shares: result.consensus_shares,
+                    };
+
+                    info!(
+                        "T1 BUY CONSENSUS: {} — No @ {:.0}ct | {:.0}% consensus ({} traders, {:.0} shares)",
+                        slug, buy_price * 100.0, result.consensus_pct,
+                        result.n_total_traders, result.consensus_shares
+                    );
+
+                    let mut risk_guard = risk.write().await;
+                    let ok = executor.execute_flat(
+                        &agg_signal, &mut risk_guard, &logger, true, cons_cfg.sizing_pct
+                    ).await;
+                    drop(risk_guard);
+
+                    match ok {
+                        Ok(true) => {
+                            consensus_bought.insert(slug.clone());
+                        }
+                        Ok(false) => {
+                            info!("CONSENSUS SKIP: {} — executor returned false", slug);
+                        }
+                        Err(e) => {
+                            tracing::warn!("CONSENSUS ERROR: {} — {}", slug, e);
+                        }
+                    }
+
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
             }
         }
@@ -862,7 +1004,7 @@ async fn execute_stable_game(
     let _ = league;
 
     // Log ALL positions for this game (T5 debug)
-    info!("T5 POSITIONS: {} — {} positions:", game.event_slug, game.positions.len());
+    info!("T1 POSITIONS: {} — {} positions:", game.event_slug, game.positions.len());
     for pos in &game.positions {
         let title = pos.title.as_deref().unwrap_or("?");
         let outcome = pos.outcome.as_deref().unwrap_or("?");
@@ -1165,7 +1307,7 @@ async fn execute_stable_game(
                             } else if b.game_line == "draw" {
                                 b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No")
                             } else {
-                                false
+                                true // preserve ou and other non-win/draw legs
                             }
                         });
                         // Ensure draw NO is in bets
@@ -1358,7 +1500,7 @@ async fn execute_stable_game(
         let outcome = bet.pos.outcome.as_deref().unwrap_or("");
         let usdc = bankroll * bet.size_pct / 100.0;
         info!(
-            "  T5 PLAN: {} {} | {} | ${:.0} ({:.0}%) | Cannae cv=${:.0} iv=${:.0}",
+            "  T1 PLAN: {} {} | {} | ${:.0} ({:.0}%) | Cannae cv=${:.0} iv=${:.0}",
             outcome, bet.game_line, &title[..title.len().min(50)],
             usdc, bet.size_pct, bet.pos.current_value_f64(), bet.pos.initial_value_f64(),
         );

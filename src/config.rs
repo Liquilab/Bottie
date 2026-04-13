@@ -102,7 +102,50 @@ pub struct AppConfig {
     pub schedule: ScheduleConfig,
     #[serde(default)]
     pub sport_sizing: SportSizingConfig,
+    #[serde(default)]
+    pub whale_consensus: WhaleConsensusConfig,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WhaleConsensusConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_subgraph_url")]
+    pub subgraph_url: String,
+    #[serde(default = "default_min_consensus_pct")]
+    pub min_consensus_pct: f64,
+    #[serde(default = "default_top_n_holders")]
+    pub top_n_holders: u32,
+    #[serde(default = "default_wc_min_traders")]
+    pub min_traders: u32,
+    #[serde(default = "default_consensus_sizing_pct")]
+    pub sizing_pct: f64,
+    #[serde(default = "default_query_delay_ms")]
+    pub query_delay_ms: u64,
+}
+
+impl Default for WhaleConsensusConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            subgraph_url: default_subgraph_url(),
+            min_consensus_pct: default_min_consensus_pct(),
+            top_n_holders: default_top_n_holders(),
+            min_traders: default_wc_min_traders(),
+            sizing_pct: default_consensus_sizing_pct(),
+            query_delay_ms: default_query_delay_ms(),
+        }
+    }
+}
+
+fn default_subgraph_url() -> String {
+    "https://api.goldsky.com/api/public/project_cl6mb8i9h0003e201j6li0diw/subgraphs/positions-subgraph/0.0.7/gn".to_string()
+}
+fn default_min_consensus_pct() -> f64 { 55.0 }
+fn default_top_n_holders() -> u32 { 100 }
+fn default_wc_min_traders() -> u32 { 10 }
+fn default_consensus_sizing_pct() -> f64 { 2.5 }
+fn default_query_delay_ms() -> u64 { 100 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ScheduleConfig {
@@ -381,6 +424,9 @@ pub struct SportSizingConfig {
     /// Voetbal draw (NO draw). Data: 100% WR, 37% ROI.
     #[serde(default = "default_voetbal_draw")]
     pub voetbal_draw_pct: f64,
+    /// Voetbal O/U. Enabled 2026-04-11 so games with O/U hauptbet aren't skipped entirely.
+    #[serde(default)]
+    pub voetbal_ou_pct: f64,
     /// NHL moneyline. Data: 65% WR, 16% ROI.
     #[serde(default = "default_nhl_ml")]
     pub nhl_ml_pct: f64,
@@ -418,6 +464,7 @@ impl Default for SportSizingConfig {
         Self {
             voetbal_ml_pct: 8.0,
             voetbal_draw_pct: 5.0,
+            voetbal_ou_pct: 0.0,
             nhl_ml_pct: 5.0,
             nba_ml_pct: 2.5,
             nba_spread_pct: 2.5,
@@ -463,6 +510,7 @@ impl SportSizingConfig {
             match game_line {
                 "win" => Some(self.voetbal_ml_pct),
                 "draw" => Some(self.voetbal_draw_pct),
+                "ou" => Some(self.voetbal_ou_pct),
                 _ => None,
             }
         } else {
@@ -487,10 +535,11 @@ impl SportSizingConfig {
     pub fn allowed_game_lines(&self, league: &str) -> Vec<&'static str> {
         let is_football = !matches!(league, "nba" | "nhl" | "mlb" | "nfl" | "cbb" | "ncaa");
         if is_football {
-            // Football (incl fif): win + draw
+            // Football (incl fif): win + draw + ou
             let mut v = vec![];
             if self.cap_for(league, "win").is_some() { v.push("win"); }
             if self.cap_for(league, "draw").is_some() { v.push("draw"); }
+            if self.cap_for(league, "ou").is_some() { v.push("ou"); }
             v
         } else {
             // US sports / tennis / esports: win always, spread for NBA

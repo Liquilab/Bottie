@@ -457,7 +457,7 @@ pub fn confirm_and_execute_t5(
 
             let mins_to_start = game.start_time.signed_duration_since(now).num_minutes();
             info!(
-                "T5 CONFIRMED: {} has {} positions in {} (starts in {}min)",
+                "T1 CONFIRMED: {} has {} positions in {} (starts in {}min)",
                 wallet_cfg.name,
                 current_game_positions.len(),
                 game.event_slug,

@@ -17,12 +17,13 @@ pub fn confidence_pct(_confidence: f64) -> f64 {
 ///
 /// Applied uniformly to all legs (hauptbet + hedge companions) on the game.
 pub fn cannae_cv_multiplier(cv_usdc: f64) -> Option<f64> {
-    if cv_usdc < 500.0     { return None; }        // skip floor
-    if cv_usdc < 2_000.0   { return Some(0.5); }   // 1.25%
-    if cv_usdc < 5_000.0   { return Some(1.0); }   // 2.5%
-    if cv_usdc < 10_000.0  { return Some(1.5); }   // 3.75%
-    if cv_usdc < 20_000.0  { return Some(2.0); }   // 5.0%
-    Some(3.0)                                       // >$20k → 7.5%
+    // 2026-04-12: T-1 analysis (366 matched trades, 14 days)
+    // <$300:    137t, +13% ROI — best bucket, was skipped
+    // $300-1K:   92t, -27% ROI — toxic zone, now skipped
+    // $1K+:     137t, +6% ROI  — flat 2.5%
+    if cv_usdc < 300.0     { return Some(1.0); }   // 2.5% — was SKIP, now enabled
+    if cv_usdc < 1_000.0   { return None; }         // SKIP — toxic zone
+    Some(1.0)                                        // ≥$1K → flat 2.5%
 }
 
 /// Flat sizing: bankroll × pct / price = shares.
