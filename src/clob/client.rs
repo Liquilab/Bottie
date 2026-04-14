@@ -489,6 +489,12 @@ impl ClobClient {
         book.best_bid().ok_or_else(|| anyhow::anyhow!("no bids in orderbook for {token_id}"))
     }
 
+    /// Fetch full orderbook for a token.
+    pub async fn get_orderbook(&self, token_id: &str) -> Result<OrderBook> {
+        let url = format!("{CLOB_API}/book?token_id={token_id}");
+        Ok(self.http.get(&url).send().await?.error_for_status()?.json().await?)
+    }
+
     // --- Market resolution status ---
 
     /// Check if a market has resolved and return the winning outcome name.

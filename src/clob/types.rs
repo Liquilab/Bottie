@@ -263,6 +263,44 @@ impl OrderBook {
             .reduce(f64::max)?;
         Some(bid)
     }
+
+    /// Total bid-side depth in USDC (price × size summed over all bid levels).
+    pub fn bid_depth_usdc(&self) -> f64 {
+        self.bids.as_ref().map_or(0.0, |levels| {
+            levels.iter()
+                .filter(|l| l.price_f64() > 0.0 && l.price_f64() < 1.0)
+                .map(|l| l.price_f64() * l.size_f64())
+                .sum()
+        })
+    }
+
+    /// Total ask-side depth in USDC.
+    pub fn ask_depth_usdc(&self) -> f64 {
+        self.asks.as_ref().map_or(0.0, |levels| {
+            levels.iter()
+                .filter(|l| l.price_f64() > 0.0 && l.price_f64() < 1.0)
+                .map(|l| l.price_f64() * l.size_f64())
+                .sum()
+        })
+    }
+
+    /// Concentration: fraction of bid depth at the best bid price.
+    /// High (>0.7) = concentrated (likely informed). Low (<0.3) = spread out (likely MM).
+    pub fn bid_concentration(&self) -> f64 {
+        let total = self.bid_depth_usdc();
+        if total < 0.01 { return 0.0; }
+        let best = match self.best_bid() {
+            Some(p) => p,
+            None => return 0.0,
+        };
+        let at_best: f64 = self.bids.as_ref().map_or(0.0, |levels| {
+            levels.iter()
+                .filter(|l| (l.price_f64() - best).abs() < 0.001)
+                .map(|l| l.price_f64() * l.size_f64())
+                .sum()
+        });
+        at_best / total
+    }
 }
 
 /// Gamma API market status for resolution checking

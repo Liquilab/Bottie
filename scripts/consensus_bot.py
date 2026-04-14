@@ -29,8 +29,9 @@ QUERY_DELAY = 0.12       # seconds between subgraph queries
 PK = os.environ["PRIVATE_KEY"]
 FUNDER = os.environ["FUNDER_ADDRESS"]
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
-TRADES_FILE = DATA_DIR / "consensus_trades.jsonl"
-BOARD_FILE  = DATA_DIR / "consensus_board.json"
+TRADES_FILE    = DATA_DIR / "consensus_trades.jsonl"
+BOARD_FILE     = DATA_DIR / "consensus_board.json"
+SNAPSHOT_FILE  = DATA_DIR / "consensus_snapshots.jsonl"
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 
 US_SPORTS = {"nba", "nhl", "mlb", "nfl", "cbb", "ncaa", "mls"}
@@ -306,6 +307,7 @@ def calculate_consensus(game):
         "consensus_shares": best["shares"],
         "best_side": best_side,
         "best_question": best_market["question"],
+        "_raw_holders": all_holders,  # cid -> [{user, balance, oi}]
     }
 
 # ── Execution ───────────────────────────────────────────────────────────
@@ -437,6 +439,42 @@ def write_board():
     except Exception as ex:
         log.warning("board write error: %s", str(ex)[:60])
 
+def write_snapshot(game, consensus):
+    """Write T-1 wallet snapshot for bias-free historical analysis.
+    Logs every wallet position pre-resolution so we can compute CLV/ROI later."""
+    raw = consensus.get("_raw_holders", {}) if consensus else {}
+    if not raw:
+        return
+    markets = []
+    for m in game["markets"]:
+        cid = m["cid"]
+        holders = raw.get(cid, [])
+        if not holders:
+            continue
+        markets.append({
+            "cid": cid,
+            "question": m["question"],
+            "holders": [{"w": h["user"], "s": round(h["balance"], 2), "oi": h["oi"]}
+                        for h in holders if h["balance"] > 0.01],
+        })
+    snap = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "slug": game["slug"],
+        "sport": game["sport"],
+        "title": game.get("title", ""),
+        "kickoff": game["start"].isoformat(),
+        "consensus_pct": consensus["consensus_pct"],
+        "n_traders": consensus["n_traders"],
+        "best_side": consensus["best_side"],
+        "best_question": consensus["best_question"],
+        "markets": markets,
+    }
+    with open(SNAPSHOT_FILE, "a") as f:
+        f.write(json.dumps(snap) + "\n")
+    log.info("SNAPSHOT: %s — %d markets, %d total holders logged",
+             game["slug"], len(markets), sum(len(m["holders"]) for m in markets))
+
+
 def update_board_consensus(game, consensus):
     """Update board with consensus result."""
     board_data[game["slug"]] = {
@@ -520,6 +558,8 @@ def main():
                 }
                 with open(SCOUT_FILE, "a") as f:
                     f.write(json.dumps(scout_entry) + "\n")
+                if consensus:
+                    write_snapshot(game, consensus)
                 scouted.add(game["slug"])
                 if consensus:
                     log.info("SCOUT: %s — %.0f%% (%d traders) %s %s",
@@ -558,6 +598,9 @@ def main():
                          consensus["n_traders"], consensus["n_traders"],
                          consensus["consensus_shares"],
                          consensus["buy_market"]["question"][:40])
+
+                # Snapshot at T-1 (may differ from T-30 scout)
+                write_snapshot(game, consensus)
 
                 # Execute
                 result = execute_buy(game, consensus)

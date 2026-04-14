@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<title>Council — Strategieshift Evaluatie</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0A0A0A; color: #E0E0E0; font-family: 'Inter', -apple-system, sans-serif; padding: 24px; max-width: 900px; margin: 0 auto; line-height: 1.6; }
+h1 { color: #fff; font-size: 1.6rem; margin-bottom: 4px; }
+.subtitle { color: #888; font-size: 0.85rem; margin-bottom: 32px; }
+.question { background: #1a1a2e; border-left: 4px solid #e94560; padding: 16px 20px; margin-bottom: 32px; border-radius: 0 8px 8px 0; font-size: 1.05rem; color: #fff; }
+.section-title { color: #e94560; font-size: 1.1rem; margin: 32px 0 16px; text-transform: uppercase; letter-spacing: 1px; }
+.card { background: #141414; border: 1px solid #2a2a2a; border-radius: 10px; margin-bottom: 12px; overflow: hidden; }
+.card-header { display: flex; align-items: center; gap: 10px; padding: 14px 18px; cursor: pointer; user-select: none; }
+.card-header:hover { background: #1a1a1a; }
+.card-icon { font-size: 1.4rem; }
+.card-name { font-weight: 700; color: #fff; font-size: 0.95rem; }
+.card-summary { color: #aaa; font-size: 0.85rem; margin-left: auto; max-width: 55%; text-align: right; }
+.card-body { padding: 0 18px 16px; font-size: 0.88rem; color: #ccc; display: none; border-top: 1px solid #2a2a2a; padding-top: 14px; }
+.card.open .card-body { display: block; }
+.card.open .card-header { border-bottom: none; }
+.peer-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.peer { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; padding: 14px; font-size: 0.82rem; }
+.peer-label { color: #e94560; font-weight: 700; font-size: 0.75rem; margin-bottom: 6px; }
+.verdict-box { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border: 2px solid #e94560; border-radius: 12px; padding: 24px; margin: 32px 0; }
+.verdict-title { color: #e94560; font-size: 1.3rem; font-weight: 800; margin-bottom: 12px; }
+.verdict-text { color: #fff; font-size: 1.05rem; margin-bottom: 16px; }
+.verdict-action { background: #e94560; color: #fff; display: inline-block; padding: 8px 16px; border-radius: 6px; font-weight: 700; font-size: 0.9rem; }
+.tag { display: inline-block; background: #2a2a2a; color: #aaa; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; margin-right: 4px; }
+.tag.red { background: #3d1515; color: #e94560; }
+.tag.green { background: #153d1a; color: #45e960; }
+.consensus-item { padding: 8px 0; border-bottom: 1px solid #1a1a1a; }
+.consensus-item:last-child { border: none; }
+@media(max-width:600px) { .peer-grid { grid-template-columns: 1fr; } }
+</style>
+<script>
+document.addEventListener('click', e => {
+  const h = e.target.closest('.card-header');
+  if (h) h.parentElement.classList.toggle('open');
+});
+</script>
+</head>
+<body>
+
+<h1>LLM Council — Strategieshift Evaluatie</h1>
+<p class="subtitle">2026-04-13 | 5 adviseurs + 5 peer reviews | Chairman synthese</p>
+
+<div class="question">
+Is de strategieshift van Cannae copy-trading naar orderbook imbalance / consensus de juiste zet, en hoe alloceren we $1,476 bankroll optimaal over de actieve strategieën?
+</div>
+
+<div class="section-title">Adviseurs</div>
+
+<div class="card">
+  <div class="card-header">
+    <span class="card-icon">&#9888;</span>
+    <span class="card-name">De Contrariaan</span>
+    <span class="card-summary">Fatale fout: je verlaat bewezen voor onbewezen</span>
+  </div>
+  <div class="card-body">
+    <p>Cannae: 497 trades, 54% WR, +$698 — dat is meten op schaal. OB imbalance: 34% accuracy, -1.3% ROI — dit is niet "onbewezen," dit is <strong>negatief bewezen</strong>. NoSpreader: 8 cherry-picked leagues is survivorship bias in real time. De 61.7% WR met 1.3% ROI is het eerlijke getal.</p>
+    <p>De echte vraag: waarom is de Cannae ROI laag, en kun je <em>dat</em> fixen? Grotere positie, betere timing, andere marktfilter — allemaal reversibel.</p>
+    <p><span class="tag red">Advies:</span> $1,000+ op Cannae. Max $200 paper-trade NoSpreader. $76 max OB. Consensus bot: uit.</p>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <span class="card-icon">&#9881;</span>
+    <span class="card-name">Eerste Principes Denker</span>
+    <span class="card-summary">Lage ROI = sizing probleem, niet strategieprobleem</span>
+  </div>
+  <div class="card-body">
+    <p>54% WR over 497 trades is statistische zekerheid. Lage ROI per trade is een sizing-probleem. Verhoog Cannae sizing naar Kelly-optimum in plaats van diversifiëren naar onbewezen strategieën.</p>
+    <p>Aannames getest: "OB backtest 34% is bruikbaar" → Nee, negatieve EV. "NoSpreader 70% is reproduceerbaar" → Cherry-pick. "Consensus bot is klaar" → 0 trades + biased backtest.</p>
+    <p><span class="tag red">Advies:</span> $1,200 Cannae. $200 paper NoSpreader. $76 OB. Consensus: kill.</p>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <span class="card-icon">&#128640;</span>
+    <span class="card-name">De Expansionist</span>
+    <span class="card-summary">Je bouwt een data asset — Wallet Discovery Engine</span>
+  </div>
+  <div class="card-body">
+    <p>De grotere kans: systematisch alpha wallets scannen en ranken. Niet 3 wallets, 20. De consensus wordt statistisch robuust. Market making op dunne leagues als derde pijler — spread income met lagere variance.</p>
+    <p>$1,476 is te klein om te splitsen. Zet 100% op de strategie met de hoogste Sharpe. OB imbalance is een hypothese, geen strategie — paper trade 30 dagen.</p>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <span class="card-icon">&#128065;</span>
+    <span class="card-name">De Buitenstaander</span>
+    <span class="card-summary">Development-tempo op risicokapitaal</span>
+  </div>
+  <div class="card-body">
+    <p>Een werkende strategie vervangen door hypotheses. "Cherry-picked leagues tonen 70% WR" is het gevaarlijkste zinnetje. Je bouwt en deployt op dezelfde dag — Cannae had 497 trades nodig. De nieuwe hebben er nul.</p>
+    <p>Kapitaalallocatie over onbewezen systemen is precisie aanbrengen in een onduidelijke situatie.</p>
+    <p><span class="tag red">Advies:</span> Cannae draaien tot nieuw systeem 100+ trades heeft. OB stoppen of paper-trade. NoSpreader alleen op volledige dataset.</p>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <span class="card-icon">&#9889;</span>
+    <span class="card-name">De Uitvoerder</span>
+    <span class="card-summary">Kill alles nieuw. Eén werkend paard.</span>
+  </div>
+  <div class="card-body">
+    <p>$1.40/trade bij $1,476 bankroll is 0.095% per trade — proportioneel, niet langzaam. Het schaalt met bankroll.</p>
+    <p><strong>Actieplan:</strong></p>
+    <ol>
+      <li><strong>Maandag 09:00 (30 min):</strong> Kill OB en NoSpreader in config. Cannae solo.</li>
+      <li><strong>Maandag 10:00 (1 uur):</strong> Valideer NBA half-size pilot + kill criteria.</li>
+      <li><strong>Lopend:</strong> 50-trade minimum voor elke nieuwe strategie. Consensus = observe only.</li>
+    </ol>
+  </div>
+</div>
+
+<div class="section-title">Peer Review Highlights</div>
+
+<div class="peer-grid">
+  <div class="peer">
+    <div class="peer-label">STERKSTE ADVISEUR</div>
+    Eerste Principes / Contrariaan — sizing is het probleem, concrete allocatie met paper-trade gate. 4/5 reviewers kozen deze twee.
+  </div>
+  <div class="peer">
+    <div class="peer-label">GROOTSTE BLINDE VLEK</div>
+    Expansionist — Wallet Discovery Engine is scope creep. Introduceert nieuwe ongeteaste ideeën terwijl de vraag over consolidatie gaat.
+  </div>
+  <div class="peer">
+    <div class="peer-label">WAT IEDEREEN MISTE #1</div>
+    <strong>Cannae alpha-decay:</strong> wat is de halfwaardetijd van de Cannae edge? Als copy-trading bekend wordt, eroderen de marges. Niemand meet dit.
+  </div>
+  <div class="peer">
+    <div class="peer-label">WAT IEDEREEN MISTE #2</div>
+    <strong>De shift is al live.</strong> Consensus draait sinds 12 april. De vraag is niet "of" maar "kill criteria en evaluatiehorizon." Geen adviseur noemde een meetbaar stopcriterium.
+  </div>
+</div>
+
+<div class="verdict-box">
+  <div class="verdict-title">VERDICT</div>
+  <div class="verdict-text">
+    Cannae blijft primary. Alle nieuwe strategieën naar observe-only tot ze 50+ trades met positieve EV laten zien. Lage ROI is een sizing probleem — onderzoek Kelly-fractie verhoging.
+  </div>
+  <div class="verdict-action">Eerste stap: zet OB imbalance op observe-only (snapshots loggen, niet traden)</div>
+</div>
+
+</body>
+</html>

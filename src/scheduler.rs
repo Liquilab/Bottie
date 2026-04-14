@@ -261,9 +261,35 @@ fn parse_event(event: &GammaSportsEvent, sport_tag: &str) -> Option<UpcomingGame
 
 /// Derive unique sport tags from all watchlist entries' leagues.
 pub fn sport_tags_from_watchlist(watchlist: &[WatchlistEntry]) -> Vec<String> {
-    let tags: HashSet<String> = watchlist.iter()
+    let leagues: HashSet<String> = watchlist.iter()
         .flat_map(|w| w.leagues.iter().cloned())
         .collect();
+    // Map league prefixes to Gamma API tag_slugs.
+    // Football leagues use "soccer" or "soccer_{league}", US sports have their own tags.
+    let mut tags: HashSet<String> = HashSet::new();
+    for lg in &leagues {
+        match lg.as_str() {
+            // US sports
+            "nba" => { tags.insert("basketball_nba".into()); }
+            "cbb" => { tags.insert("basketball_ncaa".into()); }
+            "nhl" => { tags.insert("hockey_nhl".into()); }
+            "mlb" => { tags.insert("baseball_mlb".into()); }
+            "nfl" => { tags.insert("football_nfl".into()); }
+            // Tennis
+            "atp" => { tags.insert("tennis_atp".into()); }
+            "wta" => { tags.insert("tennis_wta".into()); }
+            // eSports
+            "lol" => { tags.insert("league_of_legends".into()); }
+            "cs2" => { tags.insert("cs2".into()); }
+            "dota2" => { tags.insert("dota2".into()); }
+            "val" => { tags.insert("valorant".into()); }
+            // Football: try both "soccer_{lg}" and "soccer" (catch-all)
+            _ => {
+                tags.insert(format!("soccer_{}", lg));
+                tags.insert("soccer".into());
+            }
+        }
+    }
     tags.into_iter().collect()
 }
 
@@ -453,6 +479,20 @@ pub fn confirm_and_execute_t5(
 
             if current_game_positions.is_empty() {
                 continue;
+            }
+
+            // min_source_usdc filter: skip if wallet's total position in this game is below threshold
+            if wallet_cfg.min_source_usdc > 0.0 {
+                let total_cv: f64 = current_game_positions.iter()
+                    .map(|p| p.current_value_f64())
+                    .sum();
+                if total_cv < wallet_cfg.min_source_usdc {
+                    info!(
+                        "T1 SKIP: {} position ${:.0} < min ${:.0} in {}",
+                        wallet_cfg.name, total_cv, wallet_cfg.min_source_usdc, game.event_slug,
+                    );
+                    continue;
+                }
             }
 
             let mins_to_start = game.start_time.signed_duration_since(now).num_minutes();

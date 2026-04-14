@@ -637,7 +637,7 @@ def render_why(trade, wallet_map):
                 f'<span class="badge" style="background:#3fb950;color:#000">+{edge:.1f}%</span>')
     return f'<span class="muted">{src or "?"}</span>'
 
-def render_kpi_row(kpis, wallet_map, trades=None, funder=None, label="Cannae"):
+def render_kpi_row(kpis, wallet_map, trades=None, funder=None, label="Bottie"):
     # PM API data (source of truth)
     portfolio = kpis.get("portfolio_value", 0)
     rendement = kpis.get("rendement", 0)
@@ -1632,14 +1632,9 @@ def page_wrap(active_page, body_html, token="", account="cannae"):
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     prefix = f"/t/{token}" if token else ""
     pages = [
-        ("Overview", "/"),
+        ("Home", "/"),
         ("Games", "/games"),
         ("Trades", "/trades"),
-        ("Wallets", "/wallets"),
-        ("Edge", "/edge"),
-        ("Ops", "/ops"),
-        ("Intel", "/intel"),
-        ("SSOT", "/ssot"),
         ("Settings", "/settings"),
     ]
     nav = ""
@@ -1647,16 +1642,7 @@ def page_wrap(active_page, body_html, token="", account="cannae"):
         cls = ' class="active"' if href == active_page else ""
         nav += f'<a href="{prefix}{href}?account={account}"{cls}>{label}</a>'
 
-    sel_cannae = ' selected' if account == 'cannae' else ''
-    sel_giyn   = ' selected' if account == 'giyn' else ''
-    account_selector = (
-        f'<select onchange="window.location.href=window.location.pathname+\'?account=\'+this.value"'
-        f' style="background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:6px;'
-        f'padding:4px 8px;font-size:0.8rem;cursor:pointer;margin-left:8px">'
-        f'<option value="cannae"{sel_cannae}>Cannae</option>'
-        f'<option value="giyn"{sel_giyn}>GIYN</option>'
-        f'</select>'
-    )
+    account_selector = ""
 
     return f"""<!DOCTYPE html>
 <html lang="nl">
@@ -1864,7 +1850,7 @@ def render_strategy_summary(wallet_map):
 
 
 def _load_cannae_slugs(service="bottie"):
-    """Parse game slugs from bot logs (CANNAE GAMES output)."""
+    """Parse game slugs from bot logs — all SIGNAL lines from any wallet."""
     import subprocess
     cannae_slugs = {}
     try:
@@ -1873,7 +1859,7 @@ def _load_cannae_slugs(service="bottie"):
             capture_output=True, text=True, timeout=10
         )
         for line in result.stdout.splitlines():
-            # Match: $   3538 | 7 legs (win+win+ou+ou+spread) | 15:15 UTC | win@5%+win@5%+draw@5% | es2-vld-bur-2026-03-28
+            # Legacy: $   3538 | 7 legs (win+win+ou+ou+spread) | 15:15 UTC | win@5%+win@5%+draw@5% | es2-vld-bur-2026-03-28
             if "legs (" in line and "|" in line:
                 parts = line.split("|")
                 if len(parts) >= 5:
@@ -1884,30 +1870,66 @@ def _load_cannae_slugs(service="bottie"):
                         amount = 0
                     legs = parts[1].strip()
                     sizing = parts[3].strip() if len(parts) > 3 else ""
-                    cannae_slugs[slug] = {"amount": amount, "legs": legs, "sizing": sizing}
+                    cannae_slugs[slug] = {"amount": amount, "legs": legs, "sizing": sizing, "wallet": "unknown"}
+            # New: SIGNAL: WalletName (79ct) | Will X win? | 123$ | ...
+            elif "SIGNAL:" in line and "|" in line:
+                try:
+                    sig_part = line.split("SIGNAL:")[1].strip()
+                    parts = sig_part.split("|")
+                    wallet_price = parts[0].strip()  # "NoSpreader (79ct)"
+                    wallet_name = wallet_price.split("(")[0].strip()
+                    question = parts[1].strip() if len(parts) > 1 else ""
+                    amount_str = parts[2].strip() if len(parts) > 2 else "0"
+                    try:
+                        amount = float(amount_str.replace("$", "").strip())
+                    except:
+                        amount = 0
+                    # Extract slug from question or use event_slug from later in the line
+                    slug = ""
+                    for p in parts:
+                        p = p.strip()
+                        if "-" in p and len(p.split("-")) >= 3 and "20" in p:
+                            slug = p
+                            break
+                    if not slug:
+                        # Try to find slug in the full line
+                        import re
+                        m = re.search(r'delay=\d+s\s*$', line)
+                        # Can't always get slug from SIGNAL, skip if not found
+                        continue
+                    if slug not in cannae_slugs:
+                        cannae_slugs[slug] = {"amount": amount, "legs": question[:40], "sizing": "", "wallet": wallet_name}
+                    else:
+                        # Append wallet name if different
+                        existing = cannae_slugs[slug].get("wallet", "")
+                        if wallet_name not in existing:
+                            cannae_slugs[slug]["wallet"] = f"{existing}+{wallet_name}"
+                except:
+                    pass
     except:
         pass
     return cannae_slugs
 
 def render_live_board(trades, service="bottie"):
-    """Live flight board — games tracked by the given service."""
+    """Live flight board — upcoming games in whitelisted leagues with wallet info."""
     import os
     svc_base = Path("/opt/bottie-test") if service == "bottie-test" else BASE_DIR
     schedule_file = svc_base / "data" / "schedule_cache.json"
 
-    # Load game slugs from bot logs for this service
-    cannae_slugs = _load_cannae_slugs(service)
-
-    # Whitelisted leagues for this service's source wallet (first watchlist entry)
+    # Whitelisted leagues + wallet mapping for ALL active wallets (weight > 0)
     cfg_file = GIYN_CONFIG_FILE if service == "bottie-test" else CONFIG_FILE
     whitelisted_leagues = set()
+    wallet_league_map = {}  # league -> [wallet_names]
     try:
         import yaml
         with open(cfg_file) as f:
             _cfg = yaml.safe_load(f) or {}
         _wl = _cfg.get("copy_trading", {}).get("watchlist", [])
-        if _wl:
-            whitelisted_leagues = set(_wl[0].get("leagues", []) or [])
+        for w in _wl:
+            if w.get("weight", 0) > 0:
+                for lg in (w.get("leagues") or []):
+                    whitelisted_leagues.add(lg)
+                    wallet_league_map.setdefault(lg, []).append(w.get("name", "?"))
     except Exception:
         pass
 
@@ -1917,55 +1939,48 @@ def render_live_board(trades, service="bottie"):
 
     now = datetime.now(timezone.utc)
 
-    # Build schedule lookup by slug
-    schedule_by_slug = {}
-    for g in games:
-        s = g.get("event_slug", "")
-        if s:
-            schedule_by_slug[s] = g
-
-    # Only show games that Cannae has positions in
+    # Show ALL upcoming games in whitelisted leagues (next 24h)
     upcoming = []
-    skipped_non_whitelist = 0
-    for slug, info in cannae_slugs.items():
-        sched = schedule_by_slug.get(slug)
-        if sched:
-            try:
-                start = datetime.fromisoformat(sched["start_time"].replace("Z", "+00:00"))
-            except:
-                start = now + timedelta(hours=12)  # unknown kickoff
-        else:
-            start = now + timedelta(hours=12)  # not in schedule
-
-        diff_min = (start - now).total_seconds() / 60
-        if diff_min >= 24*60:
+    for g in games:
+        slug = g.get("event_slug", "")
+        if not slug or "-more-markets" in slug:
             continue
         league = slug.split("-")[0] if slug else ""
-        in_whitelist = (not whitelisted_leagues) or (league in whitelisted_leagues)
-        if not in_whitelist:
-            skipped_non_whitelist += 1
+        if whitelisted_leagues and league not in whitelisted_leagues:
             continue
-        upcoming.append((slug, sched, start, diff_min, info, in_whitelist))
+        try:
+            start = datetime.fromisoformat(g["start_time"].replace("Z", "+00:00"))
+        except:
+            continue
+        diff_min = (start - now).total_seconds() / 60
+        if diff_min < 0 or diff_min >= 24*60:
+            continue
+        # Which wallet covers this league?
+        wallets = wallet_league_map.get(league, ["?"])
+        upcoming.append((slug, g, start, diff_min, {"wallet": ", ".join(wallets)}))
 
     upcoming.sort(key=lambda x: x[2])
 
-    # Whitelist header
+    # Whitelist header — show active wallets with their leagues
     if whitelisted_leagues:
-        wl_sorted = sorted(whitelisted_leagues)
-        wl_badges = " ".join(
-            f'<span class="badge sport" style="margin:2px">{lg}</span>'
-            for lg in wl_sorted
-        )
+        # Build wallet -> leagues mapping
+        wallet_leagues = {}
+        for lg, wallets in wallet_league_map.items():
+            for w in wallets:
+                wallet_leagues.setdefault(w, []).append(lg)
+        wallet_badges = ""
+        for wname, wleagues in sorted(wallet_leagues.items()):
+            league_list = ", ".join(sorted(wleagues))
+            wallet_badges += f'<span style="margin:2px 6px 2px 0;font-size:11px"><b>{wname}</b>: {league_list}</span>'
         wl_header = f"""
         <div style="margin-bottom:8px;font-size:12px">
-          <span class="muted">Whitelisted leagues ({len(wl_sorted)}):</span> {wl_badges}
-          {f'<span class="muted" style="margin-left:8px">— {skipped_non_whitelist} non-whitelist games hidden</span>' if skipped_non_whitelist else ''}
+          <span class="muted">Active wallets:</span> {wallet_badges}
         </div>"""
     else:
         wl_header = ""
 
     if not upcoming:
-        return wl_header + '<div class="empty">Geen whitelisted Cannae games binnen 24h.</div>'
+        return wl_header + '<div class="empty">Geen games in de pipeline.</div>'
 
     # Check which event_slugs already have fills
     filled_slugs = set()
@@ -1974,16 +1989,11 @@ def render_live_board(trades, service="bottie"):
             filled_slugs.add(t["event_slug"])
 
     rows = ""
-    for slug, sched, start, diff_min, info, _in_wl in upcoming[:25]:
+    for slug, sched, start, diff_min, info in upcoming[:30]:
         title = sched.get("title", slug) if sched else slug
         league = slug.split("-")[0] if slug else ""
-        cannae_amt = info["amount"]
-        sizing = info["sizing"]
 
-        # Determine status
-        if diff_min < -120:
-            continue  # game ended long ago
-        elif diff_min < 0:
+        if diff_min < 0:
             status = f'<span style="color:#3fb950">LIVE {abs(diff_min):.0f}min</span>'
         elif diff_min < 10:
             status = f'<span style="color:#f85149;font-weight:700">T-{diff_min:.0f}min!</span>'
@@ -1995,34 +2005,25 @@ def render_live_board(trades, service="bottie"):
             hours = diff_min / 60
             status = f'<span class="muted">{hours:.1f}h</span>'
 
-        # CET/CEST time (proper DST handling)
         if CET:
             cet = start.astimezone(CET)
         else:
             cet = start + timedelta(hours=1)
         time_str = cet.strftime("%H:%M")
 
-        # Check if already filled
         is_filled = slug in filled_slugs
         fill_badge = ' <span class="badge green">FILLED</span>' if is_filled else ""
+        row_style = 'opacity:0.5' if is_filled else ''
 
-        # Show sizing from bot logs (already computed)
-        if "SKIP" in sizing:
-            types_str = f'<span class="muted">SKIP</span>'
-        elif sizing:
-            types_str = sizing
-        else:
-            types_str = f'<span class="muted">—</span>'
-
-        row_style = 'opacity:0.5' if is_filled or "SKIP" in sizing else ''
+        wallet_name = info.get("wallet", "?")
+        wallet_badge = f'<span class="badge" style="background:#1a3a2a;color:#3fb950;font-size:11px">{wallet_name}</span>'
 
         rows += f"""
         <tr style="{row_style}">
           <td style="font-weight:600">{time_str}</td>
           <td><span class="badge sport">{league}</span></td>
           <td>{title}{fill_badge}</td>
-          <td>${cannae_amt:,.0f}</td>
-          <td>{types_str}</td>
+          <td>{wallet_badge}</td>
           <td>{status}</td>
         </tr>"""
 
@@ -2031,7 +2032,7 @@ def render_live_board(trades, service="bottie"):
     <div class="table-wrap">
     <table>
       <thead><tr>
-        <th>CET</th><th>League</th><th>Game</th><th>Cannae $</th><th>Onze Types</th><th>Status</th>
+        <th>CET</th><th>League</th><th>Game</th><th>Wallet</th><th>Status</th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table>
@@ -2264,61 +2265,27 @@ def render_giyn_section():
 
 
 def render_overview(trades, wallet_map, account="cannae"):
-    if account == "giyn":
-        giyn_trades  = load_trades_giyn()
-        giyn_wallets = parse_config_wallets_giyn()
-        giyn_kpis    = compute_kpis(giyn_trades, funder=GIYN_FUNDER)
-        giyn_open    = count_real_open_bets(giyn_trades, GIYN_FUNDER)
-        body  = render_kpi_row(giyn_kpis, giyn_wallets, giyn_trades, funder=GIYN_FUNDER, label="GIYN (bottie-test)")
-        body += f"""
-    <div class="section">
-      <div class="section-title">Dagelijkse P&L</div>
-      {render_daily_pnl(giyn_trades)}
-    </div>
-    <div class="section">
-      <div class="section-title">Live Board — GIYN</div>
-      {render_live_board(giyn_trades, service="bottie-test")}
-    </div>
-    <div class="section">
-      <div class="section-title">Open Bets ({giyn_open})</div>
-      {render_open_bets(giyn_trades, giyn_wallets)}
-    </div>
-    <div class="section">
-      <div class="section-title">Per Sport</div>
-      {render_sport_grid(compute_sport_stats(giyn_trades))}
-    </div>
-    <div class="section">
-      <div class="section-title">Trade Log (laatste 30)</div>
-      {render_resolved_trades(giyn_trades, giyn_wallets, limit=30)}
-    </div>"""
-        return page_wrap("/", body, account=account)
-
     kpis = compute_kpis(trades, funder=PM_FUNDER, initial_bankroll=INITIAL_BANKROLL)
     sport_stats = compute_sport_stats(trades)
 
     body = render_bot_health(trades)
-    body += render_kpi_row(kpis, wallet_map, trades, funder=PM_FUNDER, label="Cannae (bottie)")
-    body += f"""<div class="section">{render_giyn_section()}</div>"""
+    body += render_kpi_row(kpis, wallet_map, trades, funder=PM_FUNDER, label="Bottie")
     body += f"""
-    <div class="section">
-      <div class="section-title">Dagelijkse P&L</div>
-      {render_daily_pnl(trades)}
-    </div>
-    <div class="section">
-      <div class="section-title">Live Board — Cannae</div>
-      {render_live_board(trades, service="bottie")}
-    </div>
     <div class="section">
       <div class="section-title">Open Bets ({count_real_open_bets(trades)})</div>
       {render_open_bets(trades, wallet_map)}
     </div>
     <div class="section">
-      <div class="section-title">Per Sport</div>
-      {render_sport_grid(sport_stats)}
+      <div class="section-title">Live Board</div>
+      {render_live_board(trades, service="bottie")}
     </div>
     <div class="section">
-      <div class="section-title">Cannae Intelligence</div>
-      {render_cannae_intel()}
+      <div class="section-title">Dagelijkse P&L</div>
+      {render_daily_pnl(trades)}
+    </div>
+    <div class="section">
+      <div class="section-title">Per Sport</div>
+      {render_sport_grid(sport_stats)}
     </div>
     <div class="section">
       <div class="section-title">Trade Log (laatste 30)</div>
@@ -3526,20 +3493,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 wallet_map = parse_config_wallets()
                 if page == "/trades":
                     html = render_trades_page(trades, wallet_map, account=account)
-                elif page == "/wallets":
-                    html = render_wallets_page(trades, wallet_map, account=account)
-                elif page == "/edge":
-                    html = render_edge_page(trades, wallet_map, account=account)
-                elif page == "/ops":
-                    html = render_ops_page(trades, wallet_map, account=account)
-                elif page == "/strategy":
-                    html = render_edge_page(trades, wallet_map, account=account)
-                elif page == "/intel":
-                    html = page_wrap("/intel", f"""
-    <div class="section">
-      <div class="section-title">Cannae Intelligence Report</div>
-      {render_cannae_intel()}
-    </div>""", token, account=account)
                 else:
                     html = render_overview(trades, wallet_map, account=account)
                 # Inject token into page_wrap calls that don't have it yet

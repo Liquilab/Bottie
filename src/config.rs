@@ -104,6 +104,8 @@ pub struct AppConfig {
     pub sport_sizing: SportSizingConfig,
     #[serde(default)]
     pub whale_consensus: WhaleConsensusConfig,
+    #[serde(default)]
+    pub orderbook_imbalance: OrderbookImbalanceConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -146,6 +148,72 @@ fn default_top_n_holders() -> u32 { 100 }
 fn default_wc_min_traders() -> u32 { 10 }
 fn default_consensus_sizing_pct() -> f64 { 2.5 }
 fn default_query_delay_ms() -> u64 { 100 }
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OrderbookImbalanceConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Minimum bid depth ratio (team A / team B) to trigger a win trade.
+    #[serde(default = "default_ob_min_ratio")]
+    pub min_ratio: f64,
+    /// Minimum total bid depth in USDC across both sides.
+    #[serde(default = "default_ob_min_depth_usdc")]
+    pub min_depth_usdc: f64,
+    /// Flat sizing as % of bankroll per win trade.
+    #[serde(default = "default_ob_sizing_pct")]
+    pub sizing_pct: f64,
+    /// T-minus window in minutes.
+    #[serde(default = "default_ob_window_minutes")]
+    pub window_minutes: i64,
+    /// Minimum surprise (actual_depth_share - expected_depth_share).
+    /// 0.10 = team has 10% more depth share than price implies.
+    #[serde(default = "default_ob_min_surprise")]
+    pub min_surprise: f64,
+    /// Minimum bid concentration at best price (0.0-1.0).
+    /// Filters out market makers who spread bids across many levels.
+    #[serde(default = "default_ob_min_concentration")]
+    pub min_concentration: f64,
+    /// Enable spread trading (confirmed by win imbalance).
+    #[serde(default)]
+    pub spread_enabled: bool,
+    /// Minimum win surprise before spread is considered.
+    #[serde(default = "default_ob_spread_min_win_ratio")]
+    pub spread_min_win_ratio: f64,
+    /// Minimum spread market bid ratio to trigger spread trade.
+    #[serde(default = "default_ob_spread_min_ratio")]
+    pub spread_min_ratio: f64,
+    /// Sizing for spread trades (% of bankroll).
+    #[serde(default = "default_ob_spread_sizing_pct")]
+    pub spread_sizing_pct: f64,
+}
+
+impl Default for OrderbookImbalanceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_ratio: default_ob_min_ratio(),
+            min_depth_usdc: default_ob_min_depth_usdc(),
+            sizing_pct: default_ob_sizing_pct(),
+            window_minutes: default_ob_window_minutes(),
+            min_surprise: default_ob_min_surprise(),
+            min_concentration: default_ob_min_concentration(),
+            spread_enabled: false,
+            spread_min_win_ratio: default_ob_spread_min_win_ratio(),
+            spread_min_ratio: default_ob_spread_min_ratio(),
+            spread_sizing_pct: default_ob_spread_sizing_pct(),
+        }
+    }
+}
+
+fn default_ob_min_ratio() -> f64 { 2.0 }
+fn default_ob_min_depth_usdc() -> f64 { 100.0 }
+fn default_ob_sizing_pct() -> f64 { 2.5 }
+fn default_ob_window_minutes() -> i64 { 5 }
+fn default_ob_min_surprise() -> f64 { 0.10 }
+fn default_ob_min_concentration() -> f64 { 0.30 }
+fn default_ob_spread_min_win_ratio() -> f64 { 2.5 }
+fn default_ob_spread_min_ratio() -> f64 { 1.5 }
+fn default_ob_spread_sizing_pct() -> f64 { 2.0 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ScheduleConfig {
@@ -333,6 +401,10 @@ pub struct WatchlistEntry {
     /// Per-wallet max price override (falls back to global sizing.max_price)
     #[serde(default)]
     pub max_price: Option<f64>,
+    /// Minimum source wallet position size in USDC to trigger a copy.
+    /// Filters out small/noise bets. 0 = no minimum.
+    #[serde(default)]
+    pub min_source_usdc: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]

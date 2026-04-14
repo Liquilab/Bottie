@@ -336,13 +336,15 @@ async fn copy_trading_loop(
         consensus_cfg.query_delay_ms,
     );
     let mut consensus_bought: HashSet<String> = HashSet::new();
+    let mut ob_bought: HashSet<String> = HashSet::new();
 
     loop {
         let poll_interval = {
             let c = config.read().await;
             let copy_enabled = c.copy_trading.enabled;
             let consensus_enabled = c.whale_consensus.enabled;
-            if !copy_enabled && !consensus_enabled {
+            let ob_enabled = c.orderbook_imbalance.enabled;
+            if !copy_enabled && !consensus_enabled && !ob_enabled {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 continue;
             }
@@ -727,6 +729,394 @@ async fn copy_trading_loop(
                     }
 
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            }
+        }
+
+        // ══════════════════════════════════════════════════════════════
+        // ORDERBOOK IMBALANCE: buy opponent No when bid depth is lopsided
+        // Also: spread imbalance when confirmed by win imbalance.
+        // ══════════════════════════════════════════════════════════════
+        {
+            let ob_cfg = config.read().await.orderbook_imbalance.clone();
+            if ob_cfg.enabled {
+                let now = chrono::Utc::now();
+                let window = chrono::Duration::minutes(ob_cfg.window_minutes);
+
+                // Football games in window, not yet bought
+                let ob_games: Vec<&scheduler::UpcomingGame> = game_schedule.games.iter()
+                    .filter(|g| {
+                        let until = g.start_time.signed_duration_since(now);
+                        until >= chrono::Duration::zero() && until <= window
+                    })
+                    .filter(|g| {
+                        let sport = g.event_slug.split('-').next().unwrap_or("");
+                        !matches!(sport, "nba" | "nhl" | "mlb" | "nfl" | "cbb" | "ncaa")
+                    })
+                    .filter(|g| !ob_bought.contains(&g.event_slug))
+                    .collect();
+
+                for game in &ob_games {
+                    let slug = &game.event_slug;
+
+                    // Helper: extract markets by type filter
+                    let extract_markets = |filter: &dyn Fn(&str) -> bool| -> Vec<(&str, &str, &str, &str)> {
+                        game.market_tokens.iter()
+                            .filter(|(_, q, _)| filter(&q.to_lowercase()))
+                            .filter_map(|(cid, q, tokens)| {
+                                let yes = tokens.iter().find(|(o, _)| o == "Yes").map(|(_, t)| t.as_str());
+                                let no = tokens.iter().find(|(o, _)| o == "No").map(|(_, t)| t.as_str());
+                                match (yes, no) {
+                                    (Some(y), Some(n)) => Some((cid.as_str(), q.as_str(), y, n)),
+                                    _ => None,
+                                }
+                            })
+                            .collect()
+                    };
+
+                    let win_markets = extract_markets(&|ql: &str| {
+                        ql.contains("win") && !ql.contains("draw") && !ql.contains("o/u")
+                            && !ql.contains("both") && !ql.contains("spread")
+                    });
+
+                    if win_markets.len() < 2 { continue; }
+
+                    // Fetch full orderbooks for all win market Yes tokens
+                    // market_data: (cid, question, yes_token, no_token, bid_depth, best_bid_price, concentration)
+                    struct ObMarket<'a> {
+                        cid: &'a str,
+                        question: &'a str,
+                        yes_token: &'a str,
+                        no_token: &'a str,
+                        bid_depth: f64,
+                        ask_depth: f64,
+                        best_bid: f64,      // Yes best bid = implied win probability
+                        concentration: f64,  // fraction of depth at best bid
+                    }
+
+                    let mut market_data: Vec<ObMarket> = Vec::new();
+                    let mut total_depth = 0.0;
+                    let mut fetch_ok = true;
+
+                    for (cid, q, yes_tok, no_tok) in &win_markets {
+                        match client.get_orderbook(yes_tok).await {
+                            Ok(book) => {
+                                let bd = book.bid_depth_usdc();
+                                let ad = book.ask_depth_usdc();
+                                let bb = book.best_bid().unwrap_or(0.0);
+                                let conc = book.bid_concentration();
+                                market_data.push(ObMarket {
+                                    cid, question: q, yes_token: yes_tok, no_token: no_tok,
+                                    bid_depth: bd, ask_depth: ad, best_bid: bb, concentration: conc,
+                                });
+                                total_depth += bd;
+                            }
+                            Err(e) => {
+                                info!("OB SKIP: {} — orderbook error for {}: {}", slug, q, e);
+                                fetch_ok = false;
+                                break;
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+
+                    if !fetch_ok { continue; }
+
+                    // ── Compute SURPRISE per team ──
+                    // surprise = actual_depth_share - expected_depth_share (from price)
+                    let price_sum: f64 = market_data.iter().map(|m| m.best_bid).sum();
+                    let mut best_surprise_idx = 0usize;
+                    let mut best_surprise = f64::NEG_INFINITY;
+
+                    for (i, m) in market_data.iter().enumerate() {
+                        let expected_share = if price_sum > 0.0 { m.best_bid / price_sum } else { 0.5 };
+                        let actual_share = if total_depth > 0.0 { m.bid_depth / total_depth } else { 0.5 };
+                        let surprise = actual_share - expected_share;
+                        if surprise > best_surprise {
+                            best_surprise = surprise;
+                            best_surprise_idx = i;
+                        }
+                    }
+
+                    // Raw ratio for logging
+                    let mut sorted_depths: Vec<f64> = market_data.iter().map(|m| m.bid_depth).collect();
+                    sorted_depths.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+                    let raw_ratio = if sorted_depths.len() >= 2 && sorted_depths[1] > 0.01 {
+                        sorted_depths[0] / sorted_depths[1]
+                    } else { 0.0 };
+
+                    // ── Snapshot logging (every game, regardless of trade) ──
+                    {
+                        let snap = serde_json::json!({
+                            "ts": now.to_rfc3339(),
+                            "slug": slug,
+                            "kickoff": game.start_time.to_rfc3339(),
+                            "markets": market_data.iter().enumerate().map(|(i, m)| {
+                                let exp = if price_sum > 0.0 { m.best_bid / price_sum } else { 0.5 };
+                                let act = if total_depth > 0.0 { m.bid_depth / total_depth } else { 0.5 };
+                                serde_json::json!({
+                                    "cid": m.cid, "q": m.question,
+                                    "bid_depth": format!("{:.1}", m.bid_depth),
+                                    "ask_depth": format!("{:.1}", m.ask_depth),
+                                    "best_bid": format!("{:.3}", m.best_bid),
+                                    "concentration": format!("{:.2}", m.concentration),
+                                    "expected_share": format!("{:.3}", exp),
+                                    "actual_share": format!("{:.3}", act),
+                                    "surprise": format!("{:.3}", act - exp),
+                                })
+                            }).collect::<Vec<_>>(),
+                            "total_bid_depth": format!("{:.1}", total_depth),
+                            "raw_ratio": format!("{:.2}", raw_ratio),
+                            "best_surprise": format!("{:.3}", best_surprise),
+                        });
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true).append(true)
+                            .open("data/ob_snapshots.jsonl")
+                        {
+                            use std::io::Write;
+                            let _ = writeln!(f, "{}", snap);
+                        }
+                    }
+
+                    // Check minimum liquidity
+                    if total_depth < ob_cfg.min_depth_usdc {
+                        info!("OB SKIP: {} — total depth ${:.0} < min ${:.0}",
+                              slug, total_depth, ob_cfg.min_depth_usdc);
+                        ob_bought.insert(slug.clone());
+                        continue;
+                    }
+
+                    // ── Decision: use SURPRISE not raw ratio ──
+                    // Positive surprise = more depth than price implies = smart money signal.
+                    // The team with highest surprise is the one the orderbook "likes more than the price says."
+                    let signal_team = &market_data[best_surprise_idx];
+
+                    if best_surprise < ob_cfg.min_surprise {
+                        info!("OB SKIP: {} — surprise {:.1}% < {:.1}% (depth: ${:.0} vs ${:.0}, conc: {:.0}%/{:.0}%)",
+                              slug, best_surprise * 100.0, ob_cfg.min_surprise * 100.0,
+                              market_data[0].bid_depth, market_data[1].bid_depth,
+                              market_data[0].concentration * 100.0, market_data[1].concentration * 100.0);
+                        ob_bought.insert(slug.clone());
+                        continue;
+                    }
+
+                    // Concentration filter: signal team should have concentrated depth (informed, not MM)
+                    if signal_team.concentration < ob_cfg.min_concentration {
+                        info!("OB SKIP: {} — concentration {:.0}% < {:.0}% (likely market maker)",
+                              slug, signal_team.concentration * 100.0, ob_cfg.min_concentration * 100.0);
+                        ob_bought.insert(slug.clone());
+                        continue;
+                    }
+
+                    // ── WIN trade: buy opponent No (signal team expected to win) ──
+                    // Find opponent = the team that is NOT the signal team
+                    let opponent = market_data.iter().find(|m| m.cid != signal_team.cid);
+                    let opponent = match opponent {
+                        Some(o) => o,
+                        None => continue,
+                    };
+
+                    let buy_no_token = opponent.no_token;
+                    let buy_cid = opponent.cid;
+                    let buy_question = opponent.question;
+
+                    let buy_price = match client.get_best_ask(buy_no_token).await {
+                        Ok(p) if p > 0.05 && p < 0.95 => p,
+                        Ok(p) => {
+                            info!("OB SKIP: {} — No ask {:.2} out of range", slug, p);
+                            ob_bought.insert(slug.clone());
+                            continue;
+                        }
+                        Err(e) => {
+                            info!("OB SKIP: {} — No token orderbook error: {}", slug, e);
+                            continue;
+                        }
+                    };
+
+                    info!(
+                        "OB SIGNAL: {} — surprise {:.1}% conc {:.0}% (${:.0} vs ${:.0}, prices {:.0}¢/{:.0}¢) → buy {} No @ {:.0}¢",
+                        slug, best_surprise * 100.0, signal_team.concentration * 100.0,
+                        signal_team.bid_depth, opponent.bid_depth,
+                        signal_team.best_bid * 100.0, opponent.best_bid * 100.0,
+                        buy_question, buy_price * 100.0
+                    );
+
+                    let sport = slug.split('-').next().unwrap_or("").to_string();
+                    let ratio = raw_ratio; // keep for logging
+                    let agg_signal = signal::AggregatedSignal {
+                        token_id: buy_no_token.to_string(),
+                        condition_id: buy_cid.to_string(),
+                        side: "BUY".to_string(),
+                        price: buy_price,
+                        market_title: buy_question.to_string(),
+                        market_type: "win".to_string(),
+                        sport: sport.clone(),
+                        outcome: "No".to_string(),
+                        event_slug: slug.clone(),
+                        sources: vec![signal::SignalSource::Copy(signal::CopySignal {
+                            source_wallet: "orderbook".to_string(),
+                            source_name: "OB_Surprise".to_string(),
+                            token_id: buy_no_token.to_string(),
+                            condition_id: buy_cid.to_string(),
+                            side: "BUY".to_string(),
+                            price: buy_price,
+                            size: signal_team.bid_depth,
+                            market_title: buy_question.to_string(),
+                            sport: sport.clone(),
+                            outcome: "No".to_string(),
+                            event_slug: slug.clone(),
+                            confidence: (best_surprise * 5.0).clamp(0.1, 0.95),
+                            consensus_count: 0,
+                            consensus_wallets: vec![],
+                            timestamp: chrono::Utc::now(),
+                            signal_delay_ms: 0,
+                        })],
+                        combined_confidence: (buy_price * 1.10).min(0.95),
+                        edge_pct: best_surprise * 100.0,
+                        source_size_usdc: signal_team.bid_depth,
+                        source_shares: 0.0,
+                    };
+
+                    let mut risk_guard = risk.write().await;
+                    let ok = executor.execute_flat(
+                        &agg_signal, &mut risk_guard, &logger, true, ob_cfg.sizing_pct
+                    ).await;
+                    drop(risk_guard);
+
+                    match ok {
+                        Ok(true) => {
+                            info!("OB BOUGHT: {} — {} No @ {:.0}¢ (ratio {:.1}x)",
+                                  slug, buy_question, buy_price * 100.0, ratio);
+                            ob_bought.insert(slug.clone());
+                        }
+                        Ok(false) => {
+                            info!("OB SKIP: {} — executor returned false", slug);
+                            ob_bought.insert(slug.clone());
+                        }
+                        Err(e) => {
+                            tracing::warn!("OB ERROR: {} — {}", slug, e);
+                        }
+                    }
+
+                    // ── SPREAD trade: if win ratio confirms, check spread market ──
+                    if ob_cfg.spread_enabled && ratio >= ob_cfg.spread_min_win_ratio {
+                        let spread_markets = extract_markets(&|ql: &str| {
+                            ql.contains("spread")
+                        });
+
+                        if spread_markets.len() >= 2 {
+                            // Fetch spread orderbooks
+                            let mut sp_depths: Vec<(&str, &str, &str, &str, f64)> = Vec::new();
+                            let mut sp_ok = true;
+                            for (cid, q, yes_tok, no_tok) in &spread_markets {
+                                match client.get_orderbook(yes_tok).await {
+                                    Ok(book) => {
+                                        sp_depths.push((cid, q, yes_tok, no_tok, book.bid_depth_usdc()));
+                                    }
+                                    Err(_) => { sp_ok = false; break; }
+                                }
+                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                            }
+
+                            if sp_ok && sp_depths.len() >= 2 {
+                                sp_depths.sort_by(|a, b| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal));
+                                let sp_strong = &sp_depths[0];
+                                let sp_weak = &sp_depths[1];
+                                let sp_total: f64 = sp_depths.iter().map(|d| d.4).sum();
+                                let sp_ratio = if sp_weak.4 > 0.01 { sp_strong.4 / sp_weak.4 } else { 0.0 };
+
+                                // Log spread snapshot
+                                if let Ok(mut f) = std::fs::OpenOptions::new()
+                                    .create(true).append(true)
+                                    .open("data/ob_spread_snapshots.jsonl")
+                                {
+                                    use std::io::Write;
+                                    let snap = serde_json::json!({
+                                        "ts": now.to_rfc3339(),
+                                        "slug": slug,
+                                        "win_ratio": format!("{:.2}", ratio),
+                                        "spread_ratio": format!("{:.2}", sp_ratio),
+                                        "spread_depth": format!("{:.1}", sp_total),
+                                        "markets": sp_depths.iter().map(|(cid, q, _, _, d)| {
+                                            serde_json::json!({"cid": cid, "q": q, "depth": format!("{:.1}", d)})
+                                        }).collect::<Vec<_>>(),
+                                    });
+                                    let _ = writeln!(f, "{}", snap);
+                                }
+
+                                if sp_ratio >= ob_cfg.spread_min_ratio && sp_total >= ob_cfg.min_depth_usdc {
+                                    // Buy spread: weakest spread team No (strongest team covers)
+                                    let sp_buy_token = sp_weak.3;
+                                    let sp_buy_cid = sp_weak.0;
+                                    let sp_buy_q = sp_weak.1;
+
+                                    if let Ok(sp_price) = client.get_best_ask(sp_buy_token).await {
+                                        if sp_price > 0.05 && sp_price < 0.95 {
+                                            info!(
+                                                "OB SPREAD SIGNAL: {} — win {:.1}x + spread {:.1}x → {} No @ {:.0}¢",
+                                                slug, ratio, sp_ratio, sp_buy_q, sp_price * 100.0
+                                            );
+
+                                            let sp_signal = signal::AggregatedSignal {
+                                                token_id: sp_buy_token.to_string(),
+                                                condition_id: sp_buy_cid.to_string(),
+                                                side: "BUY".to_string(),
+                                                price: sp_price,
+                                                market_title: sp_buy_q.to_string(),
+                                                market_type: "spread".to_string(),
+                                                sport: sport.clone(),
+                                                outcome: "No".to_string(),
+                                                event_slug: slug.clone(),
+                                                sources: vec![signal::SignalSource::Copy(signal::CopySignal {
+                                                    source_wallet: "orderbook".to_string(),
+                                                    source_name: "OB_Spread".to_string(),
+                                                    token_id: sp_buy_token.to_string(),
+                                                    condition_id: sp_buy_cid.to_string(),
+                                                    side: "BUY".to_string(),
+                                                    price: sp_price,
+                                                    size: sp_strong.4,
+                                                    market_title: sp_buy_q.to_string(),
+                                                    sport: sport.clone(),
+                                                    outcome: "No".to_string(),
+                                                    event_slug: slug.clone(),
+                                                    confidence: (sp_ratio / 10.0).min(0.95),
+                                                    consensus_count: 0,
+                                                    consensus_wallets: vec![],
+                                                    timestamp: chrono::Utc::now(),
+                                                    signal_delay_ms: 0,
+                                                })],
+                                                combined_confidence: (sp_price * 1.10).min(0.95),
+                                                edge_pct: 0.0,
+                                                source_size_usdc: sp_strong.4,
+                                                source_shares: 0.0,
+                                            };
+
+                                            let mut rg = risk.write().await;
+                                            match executor.execute_flat(
+                                                &sp_signal, &mut rg, &logger, true, ob_cfg.spread_sizing_pct
+                                            ).await {
+                                                Ok(true) => {
+                                                    info!("OB SPREAD BOUGHT: {} — {} No @ {:.0}¢", slug, sp_buy_q, sp_price * 100.0);
+                                                }
+                                                Ok(false) => {
+                                                    info!("OB SPREAD SKIP: {} — executor false", slug);
+                                                }
+                                                Err(e) => {
+                                                    warn!("OB SPREAD ERROR: {} — {}", slug, e);
+                                                }
+                                            }
+                                            drop(rg);
+                                        }
+                                    }
+                                } else if sp_ratio > 0.0 {
+                                    info!("OB SPREAD SKIP: {} — spread ratio {:.1}x (need {:.1}x) depth ${:.0}",
+                                          slug, sp_ratio, ob_cfg.spread_min_ratio, sp_total);
+                                }
+                            }
+                        }
+                    }
+
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
             }
         }
@@ -1194,12 +1584,36 @@ async fn execute_stable_game(
                         info!("GAME MODE: {} → WIN_NO+DRAW_YES (opp NO not found, 2 legs only, ratio {:.1}%)", game.event_slug, draw_yes_ratio*100.0);
                     }
                 } else {
-                    // Win NO only (no draw, or draw < 5% dust)
-                    bets.retain(|b| b.game_line != "draw");
-                    if has_draw_yes {
-                        info!("GAME MODE: {} → WIN_NO (draw_yes ratio {:.1}% < 5% dust, dropped)", game.event_slug, draw_yes_ratio*100.0);
+                    // Check Draw NO as confirming signal:
+                    // Win NO + Draw NO = "opponent wins" (not draw, not team A)
+                    let draw_no_ratio = if win_no_cv > 0.0 { draw_no_cv / win_no_cv } else { 0.0 };
+                    if has_draw_no && draw_no_ratio >= 0.60 {
+                        // Source wallet is strongly convinced opponent wins (not just "not team A")
+                        // Keep win NO + draw NO as 2-leg bet
+                        bets.retain(|b| !(b.game_line == "draw" && b.pos.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("Yes")));
+                        if !bets.iter().any(|b| b.game_line == "draw") {
+                            let draw_no = draw_positions.iter()
+                                .filter(|p| p.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No"))
+                                .max_by(|a, b| a.current_value_f64().partial_cmp(&b.current_value_f64()).unwrap_or(std::cmp::Ordering::Equal));
+                            if let Some(dn) = draw_no {
+                                bets.push(GameLineBet { pos: (*dn).clone(), game_line: "draw".to_string(), size_pct: 2.5 * game_multiplier, fixed_size: true, exempt_win_yes_ban: false, synthetic: false });
+                            }
+                        }
+                        for b in bets.iter_mut() {
+                            b.size_pct = 2.5 * game_multiplier;
+                            b.fixed_size = true;
+                        }
+                        info!("GAME MODE: {} → WIN_NO+DRAW_NO (opponent wins, draw_no/win ratio {:.1}%)", game.event_slug, draw_no_ratio*100.0);
                     } else {
-                        info!("GAME MODE: {} → WIN_NO ({} bets)", game.event_slug, bets.len());
+                        // Win NO only (no draw, or draw ratio too low)
+                        bets.retain(|b| b.game_line != "draw");
+                        if has_draw_yes {
+                            info!("GAME MODE: {} → WIN_NO (draw_yes ratio {:.1}% < 60%, dropped)", game.event_slug, draw_yes_ratio*100.0);
+                        } else if has_draw_no {
+                            info!("GAME MODE: {} → WIN_NO (draw_no ratio {:.1}% < 60%, dropped)", game.event_slug, draw_no_ratio*100.0);
+                        } else {
+                            info!("GAME MODE: {} → WIN_NO ({} bets)", game.event_slug, bets.len());
+                        }
                     }
                 }
             } else {
