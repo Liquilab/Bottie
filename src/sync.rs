@@ -2,11 +2,10 @@
 //! and syncs bankroll with on-chain USDC balance.
 
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::DateTime;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::clob::client::ClobClient;
 use crate::copy_trader::CopyTrader;
@@ -36,6 +35,21 @@ pub async fn sync_own_trades(
 
     // Fetch recent activity for our own wallet (up to 500 trades)
     let activities = client.get_wallet_activity(own_address, 500).await?;
+
+    // Build condition_id → event_slug lookup from positions API (which has eventSlug)
+    let positions = client.get_wallet_positions(own_address, 500).await.unwrap_or_default();
+    let slug_lookup: std::collections::HashMap<String, String> = positions
+        .iter()
+        .filter_map(|p| {
+            let cid = p.condition_id.as_ref()?;
+            let slug = p.event_slug.as_ref()
+                .or(p.slug.as_ref())?
+                .trim_end_matches("-more-markets")
+                .to_string();
+            if slug.is_empty() { return None; }
+            Some((cid.clone(), slug))
+        })
+        .collect();
 
     let mut imported = 0u32;
 
@@ -89,7 +103,8 @@ pub async fn sync_own_trades(
         let title = act.title.clone().unwrap_or_else(|| {
             condition_id[..12.min(condition_id.len())].to_string()
         });
-        let sport = CopyTrader::detect_sport_static(&title, "");
+        let event_slug = slug_lookup.get(&condition_id).cloned().unwrap_or_default();
+        let sport = CopyTrader::detect_sport_static(&title, &event_slug);
         let size_shares = usdc_size / price;
         let asset = act.asset.clone().unwrap_or_default();
 
@@ -106,7 +121,7 @@ pub async fn sync_own_trades(
             sport,
             side: "BUY".to_string(),
             outcome,
-            event_slug: None,
+            event_slug: if event_slug.is_empty() { None } else { Some(event_slug) },
             price,
             size_usdc: usdc_size,
             size_shares,

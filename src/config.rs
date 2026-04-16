@@ -106,6 +106,8 @@ pub struct AppConfig {
     pub whale_consensus: WhaleConsensusConfig,
     #[serde(default)]
     pub orderbook_imbalance: OrderbookImbalanceConfig,
+    #[serde(default)]
+    pub spread: SpreadConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -214,6 +216,65 @@ fn default_ob_min_concentration() -> f64 { 0.30 }
 fn default_ob_spread_min_win_ratio() -> f64 { 2.5 }
 fn default_ob_spread_min_ratio() -> f64 { 1.5 }
 fn default_ob_spread_sizing_pct() -> f64 { 2.0 }
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SpreadConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Max combined leg1+leg2 price. Below this = guaranteed profit per share.
+    #[serde(default = "default_spread_max_combined")]
+    pub max_combined_price: f64,
+    /// USDC per side (equal shares on both legs).
+    #[serde(default = "default_spread_size_per_side")]
+    pub size_per_side_usdc: f64,
+    /// Max simultaneous spread pairs.
+    #[serde(default = "default_spread_max_pairs")]
+    pub max_concurrent_pairs: usize,
+    /// Seconds between scans/fill checks.
+    #[serde(default = "default_spread_poll_interval")]
+    pub poll_interval_seconds: u64,
+    /// How far ahead to scan for games (minutes).
+    #[serde(default = "default_spread_window_minutes")]
+    pub window_minutes: i64,
+    /// Minimum single-side price.
+    #[serde(default = "default_spread_min_price")]
+    pub min_price: f64,
+    /// Maximum single-side price.
+    #[serde(default = "default_spread_max_price")]
+    pub max_price: f64,
+    /// Max price for leg1 (underdog). RN1 buys at 35-45¢.
+    #[serde(default = "default_spread_leg1_max")]
+    pub leg1_max_price: f64,
+    /// Sport tags to scan (e.g. ["basketball_nba", "nhl"]).
+    #[serde(default)]
+    pub sport_tags: Vec<String>,
+}
+
+impl Default for SpreadConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_combined_price: default_spread_max_combined(),
+            size_per_side_usdc: default_spread_size_per_side(),
+            max_concurrent_pairs: default_spread_max_pairs(),
+            poll_interval_seconds: default_spread_poll_interval(),
+            window_minutes: default_spread_window_minutes(),
+            min_price: default_spread_min_price(),
+            max_price: default_spread_max_price(),
+            leg1_max_price: default_spread_leg1_max(),
+            sport_tags: vec![],
+        }
+    }
+}
+
+fn default_spread_max_combined() -> f64 { 0.97 }
+fn default_spread_size_per_side() -> f64 { 10.0 }
+fn default_spread_max_pairs() -> usize { 5 }
+fn default_spread_poll_interval() -> u64 { 30 }
+fn default_spread_window_minutes() -> i64 { 120 }
+fn default_spread_min_price() -> f64 { 0.15 }
+fn default_spread_max_price() -> f64 { 0.85 }
+fn default_spread_leg1_max() -> f64 { 0.45 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ScheduleConfig {
@@ -405,6 +466,15 @@ pub struct WatchlistEntry {
     /// Filters out small/noise bets. 0 = no minimum.
     #[serde(default)]
     pub min_source_usdc: f64,
+    /// Per-league minimum source USDC overrides.
+    /// E.g. {"cbb": 100000, "cfb": 100000} — falls back to min_source_usdc if not set.
+    #[serde(default)]
+    pub min_source_usdc_per_league: std::collections::HashMap<String, f64>,
+    /// Per-league average source USDC for proportional sizing.
+    /// E.g. {"nhl": 56000, "mlb": 32000} — used to calculate conviction ratio.
+    /// If not set, sizing falls back to 1.0× (base 5%).
+    #[serde(default)]
+    pub avg_source_usdc_per_league: std::collections::HashMap<String, f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -523,6 +593,12 @@ pub struct SportSizingConfig {
     /// NFL moneyline.
     #[serde(default)]
     pub nfl_ml_pct: f64,
+    /// Tennis (ATP/WTA) moneyline.
+    #[serde(default)]
+    pub tennis_ml_pct: f64,
+    /// eSports (LoL/CS2/Dota2/Valorant) moneyline.
+    #[serde(default)]
+    pub esports_ml_pct: f64,
     /// Fallback sizing % for leagues without a sport-specific field.
     #[serde(default = "default_fallback_pct")]
     pub fallback_pct: f64,
@@ -545,6 +621,8 @@ impl Default for SportSizingConfig {
             fif_draw_pct: 0.0,
             mlb_ml_pct: 0.0,
             nfl_ml_pct: 0.0,
+            tennis_ml_pct: 0.0,
+            esports_ml_pct: 0.0,
             fallback_pct: 2.0,
             min_bet_usdc: 2.50,
         }
@@ -594,6 +672,8 @@ impl SportSizingConfig {
                 ("nba", "ou") => Some(self.nba_ou_pct),
                 ("mlb", "win") => Some(self.mlb_ml_pct),
                 ("nfl", "win") => Some(self.nfl_ml_pct),
+                ("atp" | "wta", "win") => Some(self.tennis_ml_pct),
+                ("lol" | "cs2" | "dota2" | "val", "win") => Some(self.esports_ml_pct),
                 (_, "win") => Some(self.fallback_pct),
                 _ => None,
             }

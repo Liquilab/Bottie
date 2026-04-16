@@ -15,6 +15,7 @@ mod signal;
 mod signing;
 mod sizing;
 mod sports;
+mod spread;
 mod stability;
 mod subgraph;
 mod sync;
@@ -228,6 +229,17 @@ async fn main() -> Result<()> {
         })
     };
 
+    let spread_handle = {
+        let client = client.clone();
+        let config = shared_config.clone();
+        let logger = logger.clone();
+        let risk = risk.clone();
+
+        tokio::spawn(async move {
+            spread::spread_loop(client, config, logger, risk).await;
+        })
+    };
+
     // Status report loop
     let status_handle = {
         let logger = logger.clone();
@@ -284,6 +296,9 @@ async fn main() -> Result<()> {
         }
         _ = odds_handle => {
             error!("odds arb loop exited unexpectedly");
+        }
+        _ = spread_handle => {
+            error!("spread loop exited unexpectedly");
         }
     }
 
@@ -579,9 +594,10 @@ async fn copy_trading_loop(
                         }
                     }
 
-                    // Cleanup: remove watched games that have already started (past due)
+                    // Cleanup: remove watched games that started >2h ago (keep recent for T-1 window)
                     let now = chrono::Utc::now();
-                    watched_games.retain(|g| g.start_time > now);
+                    let cleanup_cutoff = now - chrono::Duration::hours(2);
+                    watched_games.retain(|g| g.start_time > cleanup_cutoff);
                 }
             }
         }
@@ -1359,10 +1375,11 @@ async fn execute_stable_game(
 
     let cfg = config.read().await;
     let sport_sizing = cfg.sport_sizing.clone();
-    let allowed_leagues = cfg.copy_trading.watchlist.iter()
-        .find(|w| w.address.eq_ignore_ascii_case(&game.source_wallet))
-        .map(|w| w.leagues.clone())
-        .unwrap_or_default();
+    let wallet_cfg = cfg.copy_trading.watchlist.iter()
+        .find(|w| w.address.eq_ignore_ascii_case(&game.source_wallet));
+    let allowed_leagues = wallet_cfg.map(|w| w.leagues.clone()).unwrap_or_default();
+    let wallet_market_types = wallet_cfg.map(|w| w.market_types.clone()).unwrap_or_default();
+    let avg_source_usdc_map = wallet_cfg.map(|w| w.avg_source_usdc_per_league.clone()).unwrap_or_default();
     drop(cfg);
 
     // League filter
@@ -1373,7 +1390,11 @@ async fn execute_stable_game(
     }
 
     // Which game lines are allowed for this sport?
-    let allowed_lines = sport_sizing.allowed_game_lines(league);
+    let mut allowed_lines = sport_sizing.allowed_game_lines(league);
+    // Per-wallet market_types filter: intersect with wallet's allowed types
+    if !wallet_market_types.is_empty() {
+        allowed_lines.retain(|gl| wallet_market_types.iter().any(|mt| mt == gl));
+    }
     if allowed_lines.is_empty() {
         info!("GAME SKIP: {} — no allowed game lines for league {}", game.event_slug, league);
         return vec![];
@@ -1445,33 +1466,30 @@ async fn execute_stable_game(
                 );
                 return vec![];
             }
-            match crate::sizing::cannae_cv_multiplier(haupt_cv) {
-                None => {
+            {
+                if haupt_cv <= 0.0 {
                     info!(
-                        "GAME SKIP: {} — true hauptbet CV ${:.0} below $500 skip-floor (type {}, {} / {})",
-                        game.event_slug,
-                        haupt_cv,
-                        haupt_type,
+                        "GAME SKIP: {} — true hauptbet CV ${:.0} (type {}, {} / {})",
+                        game.event_slug, haupt_cv, haupt_type,
                         true_haupt.outcome.as_deref().unwrap_or("?"),
                         true_haupt.title.as_deref().unwrap_or("?"),
                     );
                     return vec![];
                 }
-                Some(m) => {
-                    info!(
-                        "LADDER: {} — hauptbet ${:.0} CV ({} {}) → multiplier {:.2}× (effective {:.2}%)",
-                        game.event_slug,
-                        haupt_cv,
-                        haupt_type,
-                        true_haupt.outcome.as_deref().unwrap_or("?"),
-                        m,
-                        2.5 * m,
-                    );
-                    m
-                }
+                // Proportional sizing: trader's bet / trader's average for this league
+                let avg_cv = avg_source_usdc_map.get(league).copied().unwrap_or(0.0);
+                let m = crate::sizing::proportional_multiplier(haupt_cv, avg_cv);
+                let base_pct = crate::sizing::confidence_pct(0.0);
+                info!(
+                    "SIZING: {} — hauptbet ${:.0} CV, avg ${:.0} → {:.2}× (effective {:.1}%)",
+                    game.event_slug, haupt_cv, avg_cv, m, base_pct * m,
+                );
+                m
             }
         }
     };
+
+    let base_pct = crate::sizing::confidence_pct(0.0);
 
     // Classify all positions by game line, using currentValue for hauptbet selection
     #[derive(Clone)]
@@ -1486,7 +1504,7 @@ async fn execute_stable_game(
 
     let bankroll = risk.read().await.bankroll();
     let mut bets: Vec<GameLineBet> = Vec::new();
-    let is_football = !matches!(league, "nba" | "nhl" | "mlb" | "nfl" | "cbb" | "ncaa");
+    let is_football = !matches!(league, "nba" | "nhl" | "mlb" | "nfl" | "cbb" | "ncaa" | "lol" | "cs2" | "dota2" | "val");
 
     // Per allowed game line: find hauptbet (highest currentValue)
     for &gl in &allowed_lines {
@@ -1550,15 +1568,15 @@ async fn execute_stable_game(
                             .filter(|p| p.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("Yes"))
                             .max_by(|a, b| a.current_value_f64().partial_cmp(&b.current_value_f64()).unwrap_or(std::cmp::Ordering::Equal));
                         if let Some(dy) = draw_yes {
-                            bets.push(GameLineBet { pos: (*dy).clone(), game_line: "draw".to_string(), size_pct: 2.5 * game_multiplier, fixed_size: true, exempt_win_yes_ban: false, synthetic: false });
+                            bets.push(GameLineBet { pos: (*dy).clone(), game_line: "draw".to_string(), size_pct: base_pct * game_multiplier, fixed_size: true, exempt_win_yes_ban: false, synthetic: false });
                         }
                     }
                     // Set sizes: base 2.5% × Cannae CV ladder (2026-04-10)
                     for b in bets.iter_mut() {
                         if b.game_line == "win" {
-                            b.size_pct = 2.5 * game_multiplier;
+                            b.size_pct = base_pct * game_multiplier;
                         } else if b.game_line == "draw" {
-                            b.size_pct = 2.5 * game_multiplier;
+                            b.size_pct = base_pct * game_multiplier;
                         }
                         b.fixed_size = true;
                     }
@@ -1578,8 +1596,8 @@ async fn execute_stable_game(
                         opp_pos.outcome = Some("No".to_string());
                         opp_pos.avg_price = Some(serde_json::json!(no_price));
                         opp_pos.cur_price = Some(serde_json::json!(no_price));
-                        bets.push(GameLineBet { pos: opp_pos, game_line: "win".to_string(), size_pct: 2.5 * game_multiplier, fixed_size: true, exempt_win_yes_ban: false, synthetic: true });
-                        info!("GAME MODE: {} → 3-LEG WIN_NO+DRAW_YES+OPP_NO ({:.2}×3 legs, draw/win ratio {:.1}%)", game.event_slug, 2.5 * game_multiplier, draw_yes_ratio*100.0);
+                        bets.push(GameLineBet { pos: opp_pos, game_line: "win".to_string(), size_pct: base_pct * game_multiplier, fixed_size: true, exempt_win_yes_ban: false, synthetic: true });
+                        info!("GAME MODE: {} → 3-LEG WIN_NO+DRAW_YES+OPP_NO ({:.2}×3 legs, draw/win ratio {:.1}%)", game.event_slug, base_pct * game_multiplier, draw_yes_ratio*100.0);
                     } else {
                         info!("GAME MODE: {} → WIN_NO+DRAW_YES (opp NO not found, 2 legs only, ratio {:.1}%)", game.event_slug, draw_yes_ratio*100.0);
                     }
@@ -1596,11 +1614,11 @@ async fn execute_stable_game(
                                 .filter(|p| p.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No"))
                                 .max_by(|a, b| a.current_value_f64().partial_cmp(&b.current_value_f64()).unwrap_or(std::cmp::Ordering::Equal));
                             if let Some(dn) = draw_no {
-                                bets.push(GameLineBet { pos: (*dn).clone(), game_line: "draw".to_string(), size_pct: 2.5 * game_multiplier, fixed_size: true, exempt_win_yes_ban: false, synthetic: false });
+                                bets.push(GameLineBet { pos: (*dn).clone(), game_line: "draw".to_string(), size_pct: base_pct * game_multiplier, fixed_size: true, exempt_win_yes_ban: false, synthetic: false });
                             }
                         }
                         for b in bets.iter_mut() {
-                            b.size_pct = 2.5 * game_multiplier;
+                            b.size_pct = base_pct * game_multiplier;
                             b.fixed_size = true;
                         }
                         info!("GAME MODE: {} → WIN_NO+DRAW_NO (opponent wins, draw_no/win ratio {:.1}%)", game.event_slug, draw_no_ratio*100.0);
@@ -1730,17 +1748,17 @@ async fn execute_stable_game(
                                 .filter(|p| p.outcome.as_deref().unwrap_or("").eq_ignore_ascii_case("No"))
                                 .max_by(|a, b| a.current_value_f64().partial_cmp(&b.current_value_f64()).unwrap_or(std::cmp::Ordering::Equal));
                             if let Some(dn) = draw_no {
-                                bets.push(GameLineBet { pos: (*dn).clone(), game_line: "draw".to_string(), size_pct: 2.5 * game_multiplier, fixed_size: true, exempt_win_yes_ban: false, synthetic: false });
+                                bets.push(GameLineBet { pos: (*dn).clone(), game_line: "draw".to_string(), size_pct: base_pct * game_multiplier, fixed_size: true, exempt_win_yes_ban: false, synthetic: false });
                             }
                         }
                         if draw_no_ratio >= 0.05 {
                             // 3-LEG: WIN_YES_A + DRAW_NO + WIN_NO_B — base 2.5% × ladder (2026-04-10)
                             for b in bets.iter_mut() {
                                 if b.game_line == "win" {
-                                    b.size_pct = 2.5 * game_multiplier;
+                                    b.size_pct = base_pct * game_multiplier;
                                     b.exempt_win_yes_ban = true;
                                 } else if b.game_line == "draw" {
-                                    b.size_pct = 2.5 * game_multiplier;
+                                    b.size_pct = base_pct * game_multiplier;
                                 }
                                 b.fixed_size = true;
                             }
@@ -1759,8 +1777,8 @@ async fn execute_stable_game(
                                 opp_pos.outcome = Some("No".to_string());
                                 opp_pos.avg_price = Some(serde_json::json!(no_price));
                                 opp_pos.cur_price = Some(serde_json::json!(no_price));
-                                bets.push(GameLineBet { pos: opp_pos, game_line: "win".to_string(), size_pct: 2.5 * game_multiplier, fixed_size: true, exempt_win_yes_ban: false, synthetic: true });
-                                info!("GAME MODE: {} → 3-LEG WIN_YES+DRAW_NO+OPP_NO ({:.2}%×3 legs, draw/win ratio {:.1}%, WIN_YES exempt)", game.event_slug, 2.5 * game_multiplier, draw_no_ratio*100.0);
+                                bets.push(GameLineBet { pos: opp_pos, game_line: "win".to_string(), size_pct: base_pct * game_multiplier, fixed_size: true, exempt_win_yes_ban: false, synthetic: true });
+                                info!("GAME MODE: {} → 3-LEG WIN_YES+DRAW_NO+OPP_NO ({:.2}%×3 legs, draw/win ratio {:.1}%, WIN_YES exempt)", game.event_slug, base_pct * game_multiplier, draw_no_ratio*100.0);
                             } else {
                                 info!("GAME MODE: {} → WIN_YES+DRAW_NO (opp NO not found, 2 legs, ratio {:.1}%)", game.event_slug, draw_no_ratio*100.0);
                             }
@@ -1928,13 +1946,9 @@ async fn execute_stable_game(
         let condition_id = pos.condition_id.as_deref().unwrap_or("").to_string();
         let outcome = pos.outcome.as_deref().unwrap_or("").to_string();
         let token_id = pos.asset.as_deref().unwrap_or("").to_string();
-        let event_slug = pos
-            .event_slug
-            .clone()
-            .or_else(|| pos.slug.clone())
-            .unwrap_or_default()
-            .trim_end_matches("-more-markets")
-            .to_string();
+        // Use game.event_slug (from scheduler, always populated) instead of
+        // pos.event_slug which PM API often returns as null
+        let event_slug = game.event_slug.clone();
         let price = pos.avg_price_f64();
         let sport = CopyTrader::detect_sport_static(&title, &event_slug);
         let market_type = CopyTrader::detect_market_type(&title);
@@ -1963,15 +1977,10 @@ async fn execute_stable_game(
                 market_title: title.clone(),
                 sport: CopyTrader::detect_sport_static(
                     pos.title.as_deref().unwrap_or(""),
-                    &pos.event_slug.as_deref().unwrap_or(""),
+                    &game.event_slug,
                 ),
                 outcome: pos.outcome.as_deref().unwrap_or("").to_string(),
-                event_slug: pos
-                    .event_slug
-                    .clone()
-                    .unwrap_or_default()
-                    .trim_end_matches("-more-markets")
-                    .to_string(),
+                event_slug: game.event_slug.clone(),
                 confidence,
                 consensus_count: 1,
                 consensus_wallets: vec![game.source_name.clone()],

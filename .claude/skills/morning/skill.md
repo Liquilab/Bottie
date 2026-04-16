@@ -228,6 +228,18 @@ Als geen EOD of session file gevonden:
 - **Impact:** Foute sizing op live trades voor meerdere wedstrijden.
 - **Fix:** Binary md5 verificatie toegevoegd aan stap 2 (running vs disk vs build).
 
+### F2: Alleen voetbal/NBA gecheckt, eSports/tennis/NHL gemist (2026-04-14)
+- **Niveau:** Instructie (stap 1D miste non-football sports)
+- **Wat:** /morning trade analyse keek alleen naar resolved trades in voetbal/NBA leagues. eSports (lol/cs2/dota2/val), tennis (atp/wta), en NHL stonden niet in de schedule of analyse.
+- **Impact:** Gemiste signalen op 189 eSports + 121 tennis + 32 NHL games per dag.
+- **Fix:** Schedule nu uitgebreid met esports/tennis/nhl tags. Briefing moet ALLE actieve sports rapporteren.
+
+### F3: Wallet evaluatie op basis van onbetrouwbare API data (2026-04-14)
+- **Niveau:** Instructie (geen verificatie-stap voor wallet claims)
+- **Wat:** /morning presenteerde wallet WR/ROI cijfers die uit de scout kwamen zonder verificatie. NBAShark "64% WR" was 0W/3L, NoSpreader "70% WR" was 3.9%.
+- **Impact:** Verliesgevende wallets live gezet, bankroll risico.
+- **Fix:** Elke wallet claim MOET geverifieerd worden via PM profielpagina (Closed tab) of CLOB resolution check. Nooit curPrice-based WR rapporteren.
+
 ---
 
 ## Changelog
@@ -235,3 +247,5 @@ Als geen EOD of session file gevonden:
 | Datum | Type | Wijziging | Reden |
 |-------|------|-----------|-------|
 | 2026-04-04 | Add condition | Binary md5 check in stap 2 (running vs disk vs build) | F1: oud binary draaide na deploy |
+| 2026-04-14 | Add condition | Alle sports in trade analyse (niet alleen voetbal/NBA) | F2: eSports/tennis/NHL gemist |
+| 2026-04-14 | Add condition | Wallet WR claims vereisen CLOB verificatie of PM profile check | F3: Survivorship bias in scout data |

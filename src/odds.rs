@@ -75,12 +75,15 @@ impl OddsClient {
         Ok(events)
     }
 
-    /// Calculate consensus probability from bookmaker odds
+    /// Calculate sharp probability from bookmaker odds.
+    /// Prioritizes Pinnacle (sharpest bookmaker), falls back to average of all.
     pub fn consensus_probability(event: &OddsEvent, team: &str) -> Option<f64> {
         let bookmakers = event.bookmakers.as_ref()?;
-        let mut probs = Vec::new();
+        let mut pinnacle_prob: Option<f64> = None;
+        let mut all_probs = Vec::new();
 
         for bm in bookmakers {
+            let bm_key = bm.key.as_deref().unwrap_or("");
             let markets = bm.markets.as_ref()?;
             for market in markets {
                 if market.key.as_deref() != Some("h2h") {
@@ -91,7 +94,11 @@ impl OddsClient {
                     if outcome.name.as_deref() == Some(team) {
                         if let Some(decimal_odds) = outcome.price {
                             if decimal_odds > 1.0 {
-                                probs.push(1.0 / decimal_odds);
+                                let prob = 1.0 / decimal_odds;
+                                all_probs.push(prob);
+                                if bm_key == "pinnacle" {
+                                    pinnacle_prob = Some(prob);
+                                }
                             }
                         }
                     }
@@ -99,12 +106,16 @@ impl OddsClient {
             }
         }
 
-        if probs.is_empty() {
+        // Prefer Pinnacle (sharpest line), fall back to average
+        if let Some(p) = pinnacle_prob {
+            return Some(p);
+        }
+
+        if all_probs.is_empty() {
             return None;
         }
 
-        // Average implied probability (removing vig would be more accurate but this is a start)
-        let avg = probs.iter().sum::<f64>() / probs.len() as f64;
+        let avg = all_probs.iter().sum::<f64>() / all_probs.len() as f64;
         Some(avg)
     }
 }

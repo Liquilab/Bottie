@@ -269,20 +269,16 @@ pub fn sport_tags_from_watchlist(watchlist: &[WatchlistEntry]) -> Vec<String> {
     let mut tags: HashSet<String> = HashSet::new();
     for lg in &leagues {
         match lg.as_str() {
-            // US sports
+            // US sports — Gamma API uses short tag names
             "nba" => { tags.insert("basketball_nba".into()); }
             "cbb" => { tags.insert("basketball_ncaa".into()); }
-            "nhl" => { tags.insert("hockey_nhl".into()); }
-            "mlb" => { tags.insert("baseball_mlb".into()); }
+            "nhl" => { tags.insert("nhl".into()); }
+            "mlb" => { tags.insert("mlb".into()); }
             "nfl" => { tags.insert("football_nfl".into()); }
-            // Tennis
-            "atp" => { tags.insert("tennis_atp".into()); }
-            "wta" => { tags.insert("tennis_wta".into()); }
-            // eSports
-            "lol" => { tags.insert("league_of_legends".into()); }
-            "cs2" => { tags.insert("cs2".into()); }
-            "dota2" => { tags.insert("dota2".into()); }
-            "val" => { tags.insert("valorant".into()); }
+            // Tennis — Gamma uses "tennis" catch-all (not tennis_atp/tennis_wta)
+            "atp" | "wta" => { tags.insert("tennis".into()); }
+            // eSports — all live under the "esports" catch-all tag on Gamma API
+            "lol" | "cs2" | "dota2" | "val" => { tags.insert("esports".into()); }
             // Football: try both "soccer_{lg}" and "soccer" (catch-all)
             _ => {
                 tags.insert(format!("soccer_{}", lg));
@@ -481,15 +477,20 @@ pub fn confirm_and_execute_t5(
                 continue;
             }
 
-            // min_source_usdc filter: skip if wallet's total position in this game is below threshold
-            if wallet_cfg.min_source_usdc > 0.0 {
+            // min_source_usdc filter: per-league override, falls back to global
+            let league_prefix = game.event_slug.split('-').next().unwrap_or("");
+            let min_usdc = wallet_cfg.min_source_usdc_per_league
+                .get(league_prefix)
+                .copied()
+                .unwrap_or(wallet_cfg.min_source_usdc);
+            if min_usdc > 0.0 {
                 let total_cv: f64 = current_game_positions.iter()
                     .map(|p| p.current_value_f64())
                     .sum();
-                if total_cv < wallet_cfg.min_source_usdc {
+                if total_cv < min_usdc {
                     info!(
-                        "T1 SKIP: {} position ${:.0} < min ${:.0} in {}",
-                        wallet_cfg.name, total_cv, wallet_cfg.min_source_usdc, game.event_slug,
+                        "T1 SKIP: {} position ${:.0} < min ${:.0} ({}) in {}",
+                        wallet_cfg.name, total_cv, min_usdc, league_prefix, game.event_slug,
                     );
                     continue;
                 }
@@ -673,9 +674,11 @@ mod tests {
         ];
 
         let tags = sport_tags_from_watchlist(&watchlist);
-        assert_eq!(tags.len(), 3); // epl, nba, nhl (deduplicated)
-        assert!(tags.contains(&"epl".to_string()));
-        assert!(tags.contains(&"nba".to_string()));
+        // epl -> soccer_epl + soccer, nba -> basketball_nba, nhl -> nhl = 4 tags
+        assert_eq!(tags.len(), 4);
+        assert!(tags.contains(&"soccer_epl".to_string()));
+        assert!(tags.contains(&"soccer".to_string()));
+        assert!(tags.contains(&"basketball_nba".to_string()));
         assert!(tags.contains(&"nhl".to_string()));
     }
 }

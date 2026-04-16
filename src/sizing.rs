@@ -1,29 +1,33 @@
-/// Base sizing: flat 2.5% for both football and NBA (2026-04-10).
+/// Base sizing: 5% (2026-04-16, proportional sizing).
 ///
-/// History: confidence-based (2.5-10%) → flat 5% → flat 2% (2026-04-09)
-/// → flat 2.5% + Cannae CV ladder (2026-04-10).
+/// History: confidence-based → flat 5% → flat 2.5% + CV ladder → flat 7.5% → proportional 5% base.
+/// The base is multiplied by the trader's conviction ratio (their bet / their average).
+/// At 1.0× conviction = 5%. At 3.0× conviction = 15% (cap).
 pub fn confidence_pct(_confidence: f64) -> f64 {
-    2.5
+    5.0
 }
 
-/// Cannae conviction ladder (2026-04-10).
+/// Proportional sizing: trader's conviction drives the multiplier.
 ///
-/// Size multiplier based on the true hauptbet's current_value for the game.
-/// Returns None for CV below the skip-floor ($500).
+/// cv_usdc = trader's current_value on this game
+/// avg_cv = trader's average bet size on this league (from config)
 ///
-/// Reverses the old `feedback_hauptbet_strategy` rule that forbade $-based
-/// sizing. Data: 7d analysis showed <$500 bucket is 77% WR vs 90%+ above;
-/// user opted for aggressive ladder above the floor based on conviction priors.
+/// multiplier = cv_usdc / avg_cv, clamped to [0.5, 3.0]
+/// Result: base 5% × 0.5 = 2.5% (min) to 5% × 3.0 = 15% (max)
 ///
-/// Applied uniformly to all legs (hauptbet + hedge companions) on the game.
-pub fn cannae_cv_multiplier(cv_usdc: f64) -> Option<f64> {
-    // 2026-04-12: T-1 analysis (366 matched trades, 14 days)
-    // <$300:    137t, +13% ROI — best bucket, was skipped
-    // $300-1K:   92t, -27% ROI — toxic zone, now skipped
-    // $1K+:     137t, +6% ROI  — flat 2.5%
-    if cv_usdc < 300.0     { return Some(1.0); }   // 2.5% — was SKIP, now enabled
-    if cv_usdc < 1_000.0   { return None; }         // SKIP — toxic zone
-    Some(1.0)                                        // ≥$1K → flat 2.5%
+/// If avg_cv is 0 or not configured, falls back to 1.0× (= 5%).
+/// Returns None if cv_usdc is 0 (no position = skip).
+pub fn cannae_cv_multiplier(cv_usdc: f64, _league: &str) -> Option<f64> {
+    if cv_usdc <= 0.0 { return None; }
+    Some(1.0) // Default 1.0×; proportional override happens in main.rs using avg_source_usdc
+}
+
+/// Proportional multiplier: trader bet / trader average, clamped [0.5, 3.0].
+pub fn proportional_multiplier(trader_bet: f64, trader_avg: f64) -> f64 {
+    if trader_avg <= 0.0 {
+        return 1.0;
+    }
+    (trader_bet / trader_avg).clamp(0.5, 3.0)
 }
 
 /// Flat sizing: bankroll × pct / price = shares.

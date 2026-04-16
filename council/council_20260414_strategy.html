@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Council: Copy Trading is Kapot — Wat Nu? | 2026-04-14</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0A0A0A;
+      color: #e6edf3;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      font-size: 15px;
+      line-height: 1.6;
+      padding: 40px 20px 80px;
+    }
+
+    .container {
+      max-width: 860px;
+      margin: 0 auto;
+    }
+
+    /* Header */
+    .header {
+      border-bottom: 1px solid #30363d;
+      padding-bottom: 24px;
+      margin-bottom: 36px;
+    }
+
+    .header-meta {
+      font-size: 12px;
+      color: #8b949e;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 10px;
+    }
+
+    .header h1 {
+      font-size: 26px;
+      font-weight: 700;
+      color: #e6edf3;
+      line-height: 1.3;
+    }
+
+    .header h1 span {
+      color: #f85149;
+    }
+
+    /* Section label */
+    .section-label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: #8b949e;
+      margin-bottom: 10px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid #21262d;
+    }
+
+    /* Question block */
+    .question-block {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-left: 3px solid #8b949e;
+      border-radius: 6px;
+      padding: 18px 20px;
+      margin-bottom: 36px;
+      font-size: 15px;
+      color: #e6edf3;
+      font-style: italic;
+    }
+
+    /* Advisor cards */
+    .advisors-grid {
+      display: grid;
+      gap: 14px;
+      margin-bottom: 36px;
+    }
+
+    .card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 16px 18px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .card-header:hover {
+      background: #1c2128;
+    }
+
+    .card-emoji {
+      font-size: 20px;
+      flex-shrink: 0;
+      width: 28px;
+      text-align: center;
+    }
+
+    .card-title-wrap {
+      flex: 1;
+    }
+
+    .card-name {
+      font-weight: 700;
+      font-size: 14px;
+      color: #e6edf3;
+      margin-bottom: 2px;
+    }
+
+    .card-tagline {
+      font-size: 13px;
+      color: #8b949e;
+      font-style: italic;
+    }
+
+    .card-toggle {
+      font-size: 12px;
+      color: #58a6ff;
+      flex-shrink: 0;
+      font-weight: 500;
+    }
+
+    .card-body {
+      display: none;
+      padding: 0 18px 16px 58px;
+      font-size: 13.5px;
+      color: #c9d1d9;
+      line-height: 1.65;
+      border-top: 1px solid #21262d;
+      padding-top: 14px;
+    }
+
+    .card-body.open {
+      display: block;
+    }
+
+    /* Colored left borders per advisor */
+    .card:nth-child(1) { border-left: 3px solid #f85149; }
+    .card:nth-child(2) { border-left: 3px solid #58a6ff; }
+    .card:nth-child(3) { border-left: 3px solid #3fb950; }
+    .card:nth-child(4) { border-left: 3px solid #d29922; }
+    .card:nth-child(5) { border-left: 3px solid #bc8cff; }
+
+    /* Peer review */
+    .peer-review {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 36px;
+    }
+
+    .peer-review ul {
+      list-style: none;
+      padding: 0;
+    }
+
+    .peer-review ul li {
+      padding: 8px 0;
+      border-bottom: 1px solid #21262d;
+      font-size: 13.5px;
+      color: #c9d1d9;
+      display: flex;
+      gap: 10px;
+    }
+
+    .peer-review ul li:last-child {
+      border-bottom: none;
+    }
+
+    .peer-label {
+      font-weight: 700;
+      color: #e6edf3;
+      flex-shrink: 0;
+      width: 100px;
+    }
+
+    /* Verdict */
+    .verdict {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-left: 4px solid #3fb950;
+      border-radius: 8px;
+      padding: 24px;
+    }
+
+    .verdict-title {
+      font-size: 18px;
+      font-weight: 700;
+      color: #3fb950;
+      letter-spacing: 0.04em;
+      margin-bottom: 16px;
+    }
+
+    .verdict-pad {
+      margin-bottom: 14px;
+    }
+
+    .pad-label {
+      font-weight: 700;
+      color: #e6edf3;
+      font-size: 14px;
+      margin-bottom: 4px;
+    }
+
+    .pad-label .pad-tag {
+      display: inline-block;
+      background: #21262d;
+      border: 1px solid #30363d;
+      border-radius: 4px;
+      font-size: 11px;
+      padding: 1px 7px;
+      margin-right: 8px;
+      color: #8b949e;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      vertical-align: middle;
+    }
+
+    .pad-body {
+      font-size: 13.5px;
+      color: #c9d1d9;
+      line-height: 1.65;
+      padding-left: 4px;
+    }
+
+    .verdict-divider {
+      border: none;
+      border-top: 1px solid #21262d;
+      margin: 16px 0;
+    }
+
+    .first-step {
+      background: #0d1117;
+      border: 1px solid #3fb950;
+      border-radius: 6px;
+      padding: 14px 16px;
+      font-size: 13.5px;
+      color: #e6edf3;
+      line-height: 1.7;
+    }
+
+    .first-step strong {
+      color: #3fb950;
+    }
+
+    /* Footer */
+    .footer {
+      margin-top: 48px;
+      padding-top: 16px;
+      border-top: 1px solid #21262d;
+      font-size: 11px;
+      color: #484f58;
+      text-align: center;
+      letter-spacing: 0.04em;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+
+    <!-- Header -->
+    <div class="header">
+      <div class="header-meta">Council Report &nbsp;/&nbsp; 2026-04-14</div>
+      <h1>Council: Copy Trading is <span>Kapot</span> — Wat Nu?</h1>
+    </div>
+
+    <!-- Question -->
+    <div class="section-label">Vraag</div>
+    <div class="question-block">
+      "RN1 maakt +$1.8M/maand via arbitrage maar onze hauptbet copy strategie verliest -$209K.
+      Met $1,643: wat nu?"
+    </div>
+
+    <!-- Advisors -->
+    <div class="section-label">5 Advisors</div>
+    <div class="advisors-grid">
+
+      <!-- 1 -->
+      <div class="card">
+        <div class="card-header" onclick="toggle(this)">
+          <div class="card-emoji">🔴</div>
+          <div class="card-title-wrap">
+            <div class="card-name">Contrariaan</div>
+            <div class="card-tagline">"Geen werkend alpha-signaal. Je kopieert de hedge zonder de arb. Pauzeer."</div>
+          </div>
+          <div class="card-toggle">Details ▾</div>
+        </div>
+        <div class="card-body">
+          22% WR is structureel. Arb onmogelijk met $1,643. Elke wallet is survivorship bias of arb-hedger.
+          Pauzeer live trading en herbouw pas als er een aantoonbare edge is die los staat van de gekopieerde wallet.
+        </div>
+      </div>
+
+      <!-- 2 -->
+      <div class="card">
+        <div class="card-header" onclick="toggle(this)">
+          <div class="card-emoji">🧠</div>
+          <div class="card-title-wrap">
+            <div class="card-name">Eerste Principes</div>
+            <div class="card-tagline">"Stop copy trading. Gebruik Pinnacle closing line als alpha."</div>
+          </div>
+          <div class="card-toggle">Details ▾</div>
+        </div>
+        <div class="card-body">
+          Je kopieert de verkeerde metriek. RN1 is market maker, niet directional bettor.
+          Pinnacle CLV vs PM prijs is bewezen alpha — de closing line is de scherpste prijs op aarde.
+          Als je PM-prijs structureel boven Pinnacle zit, heb je een echte edge.
+          Jouw Rust-infra is er klaar voor: vervang de wallet-scanner door een odds-comparator.
+        </div>
+      </div>
+
+      <!-- 3 -->
+      <div class="card">
+        <div class="card-header" onclick="toggle(this)">
+          <div class="card-emoji">🚀</div>
+          <div class="card-title-wrap">
+            <div class="card-name">Expansionist</div>
+            <div class="card-tagline">"Micro-arb zelf doen: orderbook scan + parallel orders op tennis/eSports."</div>
+          </div>
+          <div class="card-toggle">Details ▾</div>
+        </div>
+        <div class="card-body">
+          Filter op beide kanten &lt; 97¢ in hetzelfde contract. Parallel Rust orders, sub-seconde uitvoering.
+          Bruto $65/trade bij 4¢ spread, minus gas en fees. 2 dagen bouwwerk voor de scanner.
+          De edge bestaat aantoonbaar — jij hoeft hem alleen zelf te pakken in plaats van na te lopen.
+          Scope: tennis en eSports hebben smallere books en dunnere spreads dan voetbal.
+        </div>
+      </div>
+
+      <!-- 4 -->
+      <div class="card">
+        <div class="card-header" onclick="toggle(this)">
+          <div class="card-emoji">👀</div>
+          <div class="card-title-wrap">
+            <div class="card-name">Buitenstaander</div>
+            <div class="card-tagline">"Stop. Copy van arbitrageurs met vertraging is een fee betalen."</div>
+          </div>
+          <div class="card-toggle">Details ▾</div>
+        </div>
+        <div class="card-body">
+          21W/75L is structureel kapot — geen filter of sizing lost dit op.
+          Alle 4 wallets die je volgt zijn verliesgevend voor jou terwijl zij zelf winstgevend zijn.
+          Dat verschil is de arb-spreads die zij pakken en jij niet. $1,643 naar $10K via deze strategie
+          is wishful thinking. Stop nu, bescherm het kapitaal.
+        </div>
+      </div>
+
+      <!-- 5 -->
+      <div class="card">
+        <div class="card-header" onclick="toggle(this)">
+          <div class="card-emoji">⚡</div>
+          <div class="card-title-wrap">
+            <div class="card-name">Uitvoerder</div>
+            <div class="card-tagline">"Valideer arb-edge met dry-run, dan go/no-go."</div>
+          </div>
+          <div class="card-toggle">Details ▾</div>
+        </div>
+        <div class="card-body">
+          (1) Scan orderbooks voor YES+NO &lt; 98¢ spreads op 20 live markten — 1 uur werk.
+          (2) Dry-run dual-leg $5/kant zonder echte orders — meet slippage en timing.
+          (3) Go/no-go na data: als &lt;5 matches/dag bij &lt;97¢ → stop, ga naar Pad B.
+          Geen code schrijven voor de go/no-go beslissing; eerst bewijzen dat de kansen bestaan.
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Peer Review -->
+    <div class="section-label">Peer Review Highlights</div>
+    <div class="peer-review">
+      <ul>
+        <li>
+          <span class="peer-label">Sterkst</span>
+          <span>Eerste Principes (Pinnacle CLV) — fundamentele strategie-switch met aantoonbaar bewijs uit literatuur en bestaande quant-research.</span>
+        </li>
+        <li>
+          <span class="peer-label">Blinde vlek</span>
+          <span>Expansionist overschat bouwsnelheid en onderschat de latency-war: professionele arb-bots zitten op co-located infra. 2 dagen vs. maanden verschil.</span>
+        </li>
+        <li>
+          <span class="peer-label">Gemist</span>
+          <span>Niemand vroeg naar RN1's timing — is de spread seconden of milliseconden open? Dat antwoord bepaalt of micro-arb überhaupt haalbaar is voor een retail runner.</span>
+        </li>
+      </ul>
+    </div>
+
+    <!-- Verdict -->
+    <div class="section-label">Verdict</div>
+    <div class="verdict">
+      <div class="verdict-title">TWEE PADEN</div>
+
+      <div class="verdict-pad">
+        <div class="pad-label"><span class="pad-tag">PAD A</span> Micro-arb</div>
+        <div class="pad-body">
+          Scan orderbooks op YES+NO &lt; 97¢, koop beide kanten tegelijk.
+          Test uitsluitend met dry-run eerst — geen echt geld voor de validatie klaar is.
+        </div>
+      </div>
+
+      <div class="verdict-pad">
+        <div class="pad-label"><span class="pad-tag">PAD B</span> Pinnacle CLV</div>
+        <div class="pad-body">
+          Stop copy trading volledig. Vergelijk PM-prijs met sharp bookmaker odds (Pinnacle).
+          Bet alleen als PM structureel hoger staat dan Pinnacle closing line. Bewezen alpha, geen timing-race.
+        </div>
+      </div>
+
+      <hr class="verdict-divider" />
+
+      <div class="first-step">
+        <strong>Eerste stap:</strong> Valideer Pad A in 1 uur — scan 20 live tennis/eSports orderbooks.
+        Als &gt;5 matches &lt; 97¢ gevonden → arb haalbaar, doorgaan met dual-leg dry-run.
+        Anders → direct naar Pad B, geen tussenweg.
+      </div>
+    </div>
+
+    <div class="footer">
+      Bottie Council &nbsp;|&nbsp; 2026-04-14 &nbsp;|&nbsp; Intern gebruik
+    </div>
+
+  </div>
+
+  <script>
+    function toggle(header) {
+      var body = header.nextElementSibling;
+      var btn = header.querySelector('.card-toggle');
+      if (body.classList.contains('open')) {
+        body.classList.remove('open');
+        btn.textContent = 'Details \u25be';
+      } else {
+        body.classList.add('open');
+        btn.textContent = 'Sluiten \u25b4';
+      }
+    }
+  </script>
+</body>
+</html>

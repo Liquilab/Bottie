@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Council: Wallet Scout Plan Review — 2026-04-14</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0A0A0A;
+    color: #e6edf3;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    padding: 40px 20px 80px;
+    max-width: 860px;
+    margin: 0 auto;
+  }
+  header {
+    border-bottom: 1px solid #30363d;
+    padding-bottom: 24px;
+    margin-bottom: 36px;
+  }
+  header h1 {
+    font-size: 26px;
+    font-weight: 700;
+    color: #e6edf3;
+    letter-spacing: -0.3px;
+    margin-bottom: 6px;
+  }
+  header .meta {
+    font-size: 13px;
+    color: #8b949e;
+  }
+  .section-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #8b949e;
+    margin-bottom: 10px;
+  }
+  .question-block {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-left: 4px solid #58a6ff;
+    border-radius: 6px;
+    padding: 18px 20px;
+    margin-bottom: 40px;
+    font-size: 16px;
+    font-style: italic;
+    color: #c9d1d9;
+  }
+  .advisors-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    margin-bottom: 40px;
+  }
+  .card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .card summary {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    padding: 18px 20px;
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+  }
+  .card summary::-webkit-details-marker { display: none; }
+  .card summary::marker { display: none; }
+  .card-icon {
+    font-size: 22px;
+    line-height: 1;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+  .card-header {
+    flex: 1;
+  }
+  .card-name {
+    font-size: 15px;
+    font-weight: 700;
+    color: #e6edf3;
+    margin-bottom: 3px;
+  }
+  .card-summary {
+    font-size: 13px;
+    color: #8b949e;
+    line-height: 1.4;
+  }
+  .card-toggle {
+    font-size: 12px;
+    color: #58a6ff;
+    flex-shrink: 0;
+    margin-top: 4px;
+    transition: transform 0.2s;
+  }
+  details[open] .card-toggle {
+    transform: rotate(180deg);
+  }
+  .card-body {
+    padding: 0 20px 18px 56px;
+    font-size: 14px;
+    color: #c9d1d9;
+    line-height: 1.65;
+    border-top: 1px solid #21262d;
+    padding-top: 14px;
+    margin-top: 0;
+  }
+  details[open] .card-body {
+    display: block;
+  }
+  .peer-review {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin-bottom: 40px;
+  }
+  .peer-review h2 {
+    font-size: 15px;
+    font-weight: 700;
+    color: #e6edf3;
+    margin-bottom: 14px;
+  }
+  .peer-review ul {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .peer-review li {
+    display: flex;
+    gap: 10px;
+    font-size: 14px;
+    color: #c9d1d9;
+    line-height: 1.5;
+  }
+  .peer-review li::before {
+    content: '—';
+    color: #30363d;
+    flex-shrink: 0;
+  }
+  .peer-review strong {
+    color: #e6edf3;
+  }
+  .verdict {
+    background: #0d1117;
+    border: 2px solid #3fb950;
+    border-radius: 10px;
+    padding: 28px 28px 24px;
+  }
+  .verdict-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #3fb950;
+    margin-bottom: 10px;
+  }
+  .verdict-title {
+    font-size: 22px;
+    font-weight: 800;
+    color: #f85149;
+    margin-bottom: 18px;
+    letter-spacing: -0.3px;
+  }
+  .verdict ol {
+    padding-left: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 22px;
+  }
+  .verdict ol li {
+    font-size: 15px;
+    color: #c9d1d9;
+    line-height: 1.55;
+  }
+  .verdict ol li strong {
+    color: #e6edf3;
+  }
+  .verdict-action {
+    background: #161b22;
+    border: 1px solid #3fb950;
+    border-radius: 6px;
+    padding: 14px 18px;
+    font-size: 14px;
+    color: #3fb950;
+  }
+  .verdict-action span {
+    color: #8b949e;
+    font-size: 12px;
+    display: block;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    font-weight: 600;
+  }
+  .verdict-action code {
+    font-family: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', Consolas, monospace;
+    font-size: 14px;
+    color: #3fb950;
+  }
+  .pos { color: #3fb950; }
+  .neg { color: #f85149; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Council: Wallet Scout Plan Review</h1>
+  <div class="meta">2026-04-14 &nbsp;·&nbsp; Bankroll: $1,643 &nbsp;·&nbsp; Vraag: T-1 snapshot-based wallet scout</div>
+</header>
+
+<div class="section-label">Vraag</div>
+<div class="question-block">
+  "Is het T-1 snapshot-based wallet scout plan realistisch gegeven $1,643 bankroll?"
+</div>
+
+<div class="section-label">Advisors</div>
+<div class="advisors-grid">
+
+  <div class="card">
+    <details>
+      <summary>
+        <div class="card-icon">🔴</div>
+        <div class="card-header">
+          <div class="card-name">Contrariaan</div>
+          <div class="card-summary">Data structureel vergiftigd, 5K–20K API calls/dag onhaalbaar, pipeline pas bij &gt;$5K</div>
+        </div>
+        <div class="card-toggle">▼</div>
+      </summary>
+      <div class="card-body">
+        Het plan is architectureel correct maar resource-onrealistisch. ALLE houders snapshottten = 5K–20K calls/dag — dat overleeft geen gratis API-tier. 20 resolved games duurt 7+ weken op $1,643 bankroll. $41/trade is te klein om CLV statistisch te detecteren boven ruis. Bulk-export kopen of een data-partnership is de enige eerlijke weg. Aanbeveling: verdiep bestaande wallets handmatig, geen nieuwe collector bouwen.
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>
+        <div class="card-icon">🧠</div>
+        <div class="card-header">
+          <div class="card-name">Eerste Principes</div>
+          <div class="card-summary">CLV &gt; WR als metric, fix resolution detection, sample size is echte bottleneck</div>
+        </div>
+        <div class="card-toggle">▼</div>
+      </summary>
+      <div class="card-body">
+        Bottleneck is sample size, niet discovery. Wilson CI op 40 observaties kan 55% win rate niet onderscheiden van 48% — de foutmarge slokt het signaal op. CLV (closing line value) meet edge direct: je hebt slechts 20–30 trades nodig om CLV +3% te detecteren met voldoende power. Tier wallets op CLV-drempel, niet win rate. Fix de resolved-loser bug eerst: als verliezende posities niet correct herkend worden als resolved, vergiftig je elke metric daarna.
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>
+        <div class="card-icon">🚀</div>
+        <div class="card-header">
+          <div class="card-name">Expansionist</div>
+          <div class="card-summary">Timing-fingerprinting en wallet-consensus zijn de echte edge</div>
+        </div>
+        <div class="card-toggle">▼</div>
+      </summary>
+      <div class="card-body">
+        Plan is te klein geformuleerd. T-1 validator is een structureel voordeel dat verder gaat dan win rate. Wallet fingerprinting op timing — wanneer slaat een wallet in relatief aan lijnbeweging? — onderscheidt sharp van lucky. Exit tracking toevoegen: wallets die vroeg uitstappen bij adverse movement tonen risicobeheer. Gecorreleerde wallets als consensus-signaal is de sterkste vorm: 3 onafhankelijke wallets op dezelfde kant = sterker dan 1 wallet met hoge WR. Maak consensus de kern van het model, niet een bijproduct.
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>
+        <div class="card-icon">👀</div>
+        <div class="card-header">
+          <div class="card-name">Buitenstaander</div>
+          <div class="card-summary">Hobbyist met $1,643 bouwt institutionele infra — eerst 3 maanden live draaien</div>
+        </div>
+        <div class="card-toggle">▼</div>
+      </summary>
+      <div class="card-body">
+        Sample size is dodelijk klein: een wallet met 50 bets/jaar levert pas na 4 jaar betrouwbare statistiek. Tiering is window dressing op $16/bet. Survivorship bias zit al in de wallets zelf — je hebt ze gevonden omdat ze gewonnen hebben; regressie naar het gemiddelde is waarschijnlijker dan persistente edge. Een quant team bij een fonds zou dit niet opstarten op deze bankroll. Aanbeveling: draai 3 maanden puur live, laat data groeien, beslis dan.
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>
+        <div class="card-icon">⚡</div>
+        <div class="card-header">
+          <div class="card-name">Uitvoerder</div>
+          <div class="card-summary">Valideer bestaande snapshots, bouw scorer, besluit — geen nieuwe infra eerst</div>
+        </div>
+        <div class="card-toggle">▼</div>
+      </summary>
+      <div class="card-body">
+        Actieplan in volgorde: (1) Check consensus_bot snapshot kwaliteit — hoeveel wallets, hoeveel trades, hoeveel resolved in bestaande data? (2) Bouw scorer op bestaande data die snapshots matcht met resoluties via conditionId. (3) Als WR &gt;55% of CLV &gt;+2% met vroege entry: ga door naar lichte collector. Geen nieuwe collector nodig voordat stap 1–3 groen zijn. De infra is er al — gebruik hem.
+      </div>
+    </details>
+  </div>
+
+</div>
+
+<div class="section-label">Peer Review Highlights</div>
+<div class="peer-review">
+  <h2>Wat de raad elkaar aanwees</h2>
+  <ul>
+    <li><strong>Sterkst: Eerste Principes (CLV metric shift)</strong> — won 3/5 peer reviews. CLV als primaire metric is de enige methodologisch verdedigbare keuze op kleine sample.</li>
+    <li><strong>Blinde vlek: Expansionist</strong> denkt te groot voor de bankroll. Timing-fingerprinting en exit tracking vereisen maanden data die er nog niet is.</li>
+    <li><strong class="neg">Gemist door allen:</strong> "Welke data heb je <em>al</em>?" — T5 logs hebben weken aan BigEdge/NoSpreader snapshots. De scorer kan nu al gebouwd worden op bestaande data, zonder nieuwe infra.</li>
+  </ul>
+</div>
+
+<div class="section-label">Verdict</div>
+<div class="verdict">
+  <div class="verdict-label">Raadsbesluit</div>
+  <div class="verdict-title">NIET BOUWEN zoals gepland</div>
+  <ol>
+    <li><strong>Fix de meting:</strong> CLV als primaire metric, resolution via conditionId (niet curPrice). Resolved-loser bug oplossen voor elke analyse.</li>
+    <li><strong>Evalueer wat je hebt:</strong> meet BigEdge en NoSpreader CLV met bestaande T5 logs. Pas als CLV &gt;+2% aantoonbaar is, heeft verdere discovery zin.</li>
+    <li><strong>Discovery = handmatig</strong> tot bankroll &gt;$5K. Geen nieuwe API-collector, geen nieuwe infra. Verdiepen op 3 bestaande wallets.</li>
+  </ol>
+  <div class="verdict-action">
+    <span>Eerste stap</span>
+    <code>scripts/clv_scorer.py &nbsp;—&nbsp; bouw op bestaande T5 log data</code>
+  </div>
+</div>
+
+</body>
+</html>

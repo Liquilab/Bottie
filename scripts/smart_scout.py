@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""Smart Wallet Scout — finds profitable wallets via Data API.
+"""Smart Wallet Scout v3 — classifies trading style, scores directional bets only.
 
-Scans recent trades on Polymarket sports markets, groups by wallet,
-computes ROI + conviction sizing, and ranks by actionable edge.
-
-Only considers wallets active in the last 7 days.
-Output: data/smart_scout.json + stdout summary.
+Distinguishes arb/spread traders from directional bettors:
+- Per event: 2+ outcomes = arb/spread, 1 outcome = directional
+- Only scores directional events for WR/ROI
+- Uses CLOB /markets/{cid} for resolution truth (not curPrice)
 
 Usage:
-    python scripts/smart_scout.py                    # all football
-    python scripts/smart_scout.py --sport nba        # NBA
-    python scripts/smart_scout.py --days 14          # 14-day window
+    python scripts/smart_scout.py evaluate 0xABC
+    python scripts/smart_scout.py evaluate 0xABC 0xDEF --min-games 10
+    python scripts/smart_scout.py discover --league atp --days 7
 """
 import argparse
 import json
@@ -25,12 +24,9 @@ DATA_API = "https://data-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
 RATE_LIMIT = 0.12
 
-FOOTBALL_PREFIXES = {
-    "epl", "bun", "lal", "fl1", "sea", "ucl", "uel", "ere", "por",
-    "elc", "es2", "mex", "arg", "bra", "aus", "tur", "mls", "fif",
-    "ukr1", "rus", "fr2", "col", "den", "spl", "bl2",
-}
-NBA_PREFIXES = {"nba", "cbb"}
+_cache_file = os.path.join(os.path.dirname(__file__), "..", "data", "resolution_cache.json")
+_resolution_cache = {}
+
 
 def api_get(url):
     time.sleep(RATE_LIMIT)
@@ -38,231 +34,340 @@ def api_get(url):
     return json.loads(urllib.request.urlopen(req, timeout=20).read())
 
 
-def fetch_recent_market_trades(condition_id, limit=200):
-    """Fetch recent trades on a market from Data API."""
+def load_cache():
+    global _resolution_cache
     try:
-        return api_get(f"{DATA_API}/trades?market={condition_id}&limit={limit}")
-    except:
-        return []
+        _resolution_cache = json.load(open(_cache_file))
+    except (FileNotFoundError, json.JSONDecodeError):
+        _resolution_cache = {}
 
 
-def resolve_market(condition_id):
-    """Check if market resolved and who won."""
+def save_cache():
+    os.makedirs(os.path.dirname(_cache_file), exist_ok=True)
+    json.dump(_resolution_cache, open(_cache_file, "w"))
+
+
+def check_resolution(cid: str) -> tuple[bool, str | None]:
+    """Check market resolution via CLOB API. Returns (is_resolved, winner_outcome)."""
+    if cid in _resolution_cache:
+        c = _resolution_cache[cid]
+        if c is not None:
+            return c.get("resolved", False), c.get("winner")
+        return False, None
+
     try:
-        mkt = api_get(f"{CLOB_API}/markets/{condition_id}")
-        tokens = mkt.get("tokens", [])
-        for tok in tokens:
-            if tok.get("winner") == True:
-                return tok.get("outcome")
-        return None  # not resolved
-    except:
-        return None
+        mkt = api_get(f"{CLOB_API}/markets/{cid}")
+        closed = mkt.get("closed", False)
+        winner = None
+        for tok in mkt.get("tokens", []):
+            if tok.get("winner") is True:
+                winner = tok.get("outcome")
+        resolved = closed and winner is not None
+        _resolution_cache[cid] = {"resolved": resolved, "winner": winner}
+        return resolved, winner
+    except Exception:
+        _resolution_cache[cid] = None
+        return False, None
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--sport", default="football", choices=["football", "nba"])
-    parser.add_argument("--days", type=int, default=7)
-    parser.add_argument("--min-games", type=int, default=5)
-    parser.add_argument("--min-cost", type=float, default=50, help="Min total cost to consider wallet")
-    args = parser.parse_args()
+def is_game_bet(slug: str) -> bool:
+    """Only individual matches (slug has date), no futures."""
+    if not slug:
+        return False
+    if any(kw in slug for kw in ["winner", "season", "trophy", "champion", "golden-boot", "mvp"]):
+        return False
+    parts = slug.split("-")
+    for i, p in enumerate(parts):
+        if len(p) == 4 and p.isdigit() and i + 2 < len(parts):
+            if len(parts[i + 1]) == 2 and len(parts[i + 2]) == 2:
+                return True
+    return False
 
-    prefixes = FOOTBALL_PREFIXES if args.sport == "football" else NBA_PREFIXES
-    cutoff = datetime.now(timezone.utc) - timedelta(days=args.days)
-    cutoff_ts = cutoff.timestamp()
 
-    print(f"Smart Scout — {args.sport} — last {args.days} days")
-    print(f"Cutoff: {cutoff.date()}")
-    print()
+def is_win_market(title: str) -> bool:
+    """Filter: only win markets, no spread/ou/btts/draw/maps."""
+    t = title.lower()
+    skip = ["spread", "o/u", "over", "under", "both teams", "btts", "corner",
+            "halftime", "exact", "total goals", "draw", "map ", "game 1",
+            "game 2", "game 3", "total corners"]
+    return not any(kw in t for kw in skip)
 
-    # Step 1: Get condition_ids from VPS schedule cache (has all games with cids)
-    print("Loading schedule cache from VPS...")
 
-    condition_ids = []  # (cid, slug, question)
-    seen_slugs = set()
+def evaluate_wallet(address: str, min_resolved: int = 10) -> dict:
+    """Evaluate wallet: classify style, score directional bets only."""
+    address = address.lower()
 
+    # Fetch all positions (paginated)
+    all_pos = []
+    offset = 0
+    while True:
+        try:
+            data = api_get(f"{DATA_API}/positions?user={address}&limit=500&sizeThreshold=0.01&offset={offset}")
+        except Exception as e:
+            print(f"  Error: {e}", file=sys.stderr)
+            break
+        if not data:
+            break
+        all_pos.extend(data)
+        if len(data) < 500:
+            break
+        offset += len(data)
+
+    # Group by eventSlug
+    by_event = defaultdict(list)
+    for p in all_pos:
+        slug = p.get("eventSlug", "") or ""
+        if not slug or "-more-markets" in slug:
+            continue
+        if not is_game_bet(slug):
+            continue
+        title = p.get("title", "") or ""
+        if not is_win_market(title):
+            continue
+        size = float(p.get("size", 0))
+        if size < 0.01:
+            continue
+        by_event[slug].append(p)
+
+    print(f"  {len(all_pos)} total positions, {len(by_event)} game-bet win-only events", flush=True)
+
+    # Classify each event: single-sided vs both-sides
+    single_events = {}  # slug -> [positions]
+    arb_events = {}
+    for slug, positions in by_event.items():
+        outcomes = set(p.get("outcome", "") for p in positions)
+        if len(outcomes) >= 2:
+            arb_events[slug] = positions
+        else:
+            single_events[slug] = positions
+
+    total = len(by_event)
+    n_single = len(single_events)
+    n_arb = len(arb_events)
+    arb_pct = n_arb / total * 100 if total > 0 else 0
+
+    print(f"  Style: {n_single} single-sided, {n_arb} both-sides ({arb_pct:.0f}% arb)", flush=True)
+
+    if arb_pct > 70:
+        style = "arb_trader"
+    elif arb_pct > 30:
+        style = "mixed"
+    else:
+        style = "directional"
+
+    # Score ONLY single-sided events via CLOB resolution
+    stats = defaultdict(lambda: {"w": 0, "l": 0, "open": 0, "w_pnl": 0.0, "l_pnl": 0.0, "trades": []})
+    checked = 0
+
+    for slug, positions in single_events.items():
+        checked += 1
+        if checked % 50 == 0:
+            print(f"  Checking {checked}/{n_single}...", end="\r", flush=True)
+            save_cache()
+
+        # All positions have same outcome (single-sided)
+        pos = positions[0]
+        cid = pos.get("conditionId", "")
+        outcome = pos.get("outcome", "")
+        total_iv = sum(float(p.get("initialValue", 0) or 0) for p in positions)
+        total_shares = sum(float(p.get("size", 0)) for p in positions)
+        avg_price = total_iv / total_shares if total_shares > 0 else 0
+
+        resolved, winner = check_resolution(cid)
+
+        prefix = slug.split("-")[0]
+        if prefix in ("lol", "cs2", "dota2", "val"):
+            cat = "esports"
+        elif prefix in ("atp", "wta"):
+            cat = "tennis"
+        else:
+            cat = prefix
+
+        if not resolved:
+            stats[cat]["open"] += 1
+            continue
+
+        won = outcome == winner
+        pnl = (total_shares - total_iv) if won else -total_iv
+
+        if won:
+            stats[cat]["w"] += 1
+            stats[cat]["w_pnl"] += pnl
+        else:
+            stats[cat]["l"] += 1
+            stats[cat]["l_pnl"] += pnl
+
+        stats[cat]["trades"].append({
+            "result": "W" if won else "L",
+            "pnl": round(pnl, 2),
+            "iv": round(total_iv, 2),
+            "avg_price": round(avg_price, 3),
+            "outcome": outcome,
+            "slug": slug,
+        })
+
+    print(flush=True)
+    save_cache()
+
+    # Aggregate
+    total_w = sum(s["w"] for s in stats.values())
+    total_l = sum(s["l"] for s in stats.values())
+    total_resolved = total_w + total_l
+    total_wpnl = sum(s["w_pnl"] for s in stats.values())
+    total_lpnl = sum(s["l_pnl"] for s in stats.values())
+
+    return {
+        "address": address,
+        "profile_url": f"https://polymarket.com/profile/{address}",
+        "total_positions": len(all_pos),
+        "game_events": total,
+        "style": style,
+        "arb_pct": round(arb_pct, 1),
+        "single_sided_events": n_single,
+        "arb_events": n_arb,
+        "directional_resolved": total_resolved,
+        "directional_wins": total_w,
+        "directional_losses": total_l,
+        "directional_wr": round(total_w / total_resolved * 100, 1) if total_resolved > 0 else 0,
+        "directional_pnl": round(total_wpnl + total_lpnl, 2),
+        "by_league": {
+            cat: {
+                "w": s["w"], "l": s["l"], "open": s["open"],
+                "wr": round(s["w"] / (s["w"] + s["l"]) * 100, 1) if (s["w"] + s["l"]) > 0 else 0,
+                "pnl": round(s["w_pnl"] + s["l_pnl"], 2),
+                "sample": sorted(s["trades"], key=lambda t: -abs(t["pnl"]))[:5],
+            }
+            for cat, s in sorted(stats.items())
+        },
+    }
+
+
+def discover_wallets(league: str, days: int = 7, min_bets: int = 5):
+    """Find active wallets from recent resolved games."""
     import subprocess
     try:
         result = subprocess.run(
             ["ssh", "-T", "-o", "ConnectTimeout=10", "root@78.141.222.227",
              "cat /opt/bottie/data/schedule_cache.json"],
-            capture_output=True, text=True, timeout=20,
-        )
+            capture_output=True, text=True, timeout=20)
         sched = json.loads(result.stdout)
     except Exception as ex:
-        print(f"  Error loading schedule: {ex}")
-        sched = []
+        print(f"Error: {ex}")
+        return []
 
     now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=days)
+
+    cids = []
     for g in sched:
         slug = g.get("event_slug", "")
-        sport = slug.split("-")[0]
-        if sport not in prefixes:
+        prefix = slug.split("-")[0]
+        if prefix != league and league != "all":
             continue
-        if "-more-markets" in slug:
+        if not is_game_bet(slug) or "-more-markets" in slug:
             continue
         st = g.get("start_time", "")
         try:
             dt = datetime.fromisoformat(st.replace("Z", "+00:00"))
-            if dt < cutoff:
+            if dt < cutoff or dt > now:
                 continue
-            if dt > now:
-                continue  # not yet played
-        except:
+        except ValueError:
             continue
-        seen_slugs.add(slug)
-        for cid in g.get("condition_ids", []):
-            condition_ids.append((cid, slug, ""))
+        for cid in g.get("condition_ids", [])[:3]:
+            cids.append((cid, slug))
 
-    print(f"Found {len(condition_ids)} markets across {len(seen_slugs)} events")
-    print()
+    print(f"Found {len(cids)} markets in '{league}' last {days} days", flush=True)
 
-    # Step 2: For each market, fetch trades and collect per-wallet stats
-    # wallet -> {cid -> {cost, shares, outcome, won}}
-    wallet_trades = defaultdict(lambda: defaultdict(lambda: {
-        "cost": 0, "shares": 0, "outcome": "", "slug": "", "question": ""
-    }))
-
-    for i, (cid, slug, question) in enumerate(condition_ids):
-        if i % 20 == 0:
-            print(f"  Scanning market {i+1}/{len(condition_ids)}...", end="\r", flush=True)
-
-        # Resolve
-        winner = resolve_market(cid)
-        if winner is None:
-            continue  # not resolved yet
-
-        # Fetch trades
-        trades = fetch_recent_market_trades(cid, limit=500)
-
+    wallet_bets = defaultdict(lambda: {"slugs": set(), "total_size": 0})
+    for i, (cid, slug) in enumerate(cids):
+        if i % 10 == 0:
+            print(f"  Scanning {i + 1}/{len(cids)}...", end="\r", flush=True)
+        try:
+            trades = api_get(f"{DATA_API}/trades?market={cid}&limit=200")
+        except Exception:
+            continue
         for t in trades:
-            ts = float(t.get("timestamp", 0))
-            if ts < cutoff_ts:
+            if (t.get("side") or "").upper() != "BUY":
                 continue
-            side = (t.get("side") or "").upper()
-            if side != "BUY":
-                continue
-
             wallet = (t.get("proxyWallet") or "").lower()
             if not wallet:
                 continue
+            wallet_bets[wallet]["slugs"].add(slug)
+            wallet_bets[wallet]["total_size"] += float(t.get("size", 0))
 
-            outcome = t.get("outcome", "")
-            price = float(t.get("price", 0))
-            size = float(t.get("size", 0))
+    candidates = [
+        {"address": w, "games": len(info["slugs"]), "total_size": round(info["total_size"], 2),
+         "profile_url": f"https://polymarket.com/profile/{w}"}
+        for w, info in wallet_bets.items() if len(info["slugs"]) >= min_bets
+    ]
+    candidates.sort(key=lambda c: -c["games"])
+    return candidates[:30]
 
-            wt = wallet_trades[wallet][cid]
-            wt["cost"] += price * size
-            wt["shares"] += size
-            wt["outcome"] = outcome
-            wt["slug"] = slug
-            wt["question"] = question
-            wt["winner"] = winner
-            wt["won"] = (outcome == winner)
 
-    print(f"\n  Scanned {len(condition_ids)} markets, found {len(wallet_trades)} wallets")
-    print()
+def main():
+    parser = argparse.ArgumentParser(description="Smart Wallet Scout v3")
+    sub = parser.add_subparsers(dest="cmd")
 
-    # Step 3: Aggregate per wallet
-    results = []
-    for wallet, positions in wallet_trades.items():
-        games = set()
-        total_cost = 0
-        total_pnl = 0
-        wins = 0
-        losses = 0
-        costs_list = []  # per-position costs for median split
+    ev = sub.add_parser("evaluate", help="Evaluate wallet(s)")
+    ev.add_argument("wallets", nargs="+")
+    ev.add_argument("--min-games", type=int, default=10)
 
-        for cid, pos in positions.items():
-            if pos["cost"] < 0.01:
-                continue
-            slug = pos["slug"]
-            games.add(slug)
-            total_cost += pos["cost"]
-            won = pos["won"]
-            if won:
-                pnl = pos["shares"] - pos["cost"]
-                wins += 1
-            else:
-                pnl = -pos["cost"]
-                losses += 1
-            total_pnl += pnl
-            costs_list.append((pos["cost"], won))
+    disc = sub.add_parser("discover", help="Find wallets from recent games")
+    disc.add_argument("--league", default="all")
+    disc.add_argument("--days", type=int, default=7)
+    disc.add_argument("--min-bets", type=int, default=5)
 
-        n_games = len(games)
-        n_trades = wins + losses
+    args = parser.parse_args()
+    if not args.cmd:
+        parser.print_help()
+        return
 
-        if n_trades < args.min_games:
-            continue
-        if total_cost < args.min_cost:
-            continue
+    load_cache()
 
-        # Conviction split: WR above/below median bet size
-        if costs_list:
-            costs_list.sort(key=lambda x: x[0])
-            median_cost = costs_list[len(costs_list) // 2][0]
-            above = [c for c in costs_list if c[0] >= median_cost]
-            below = [c for c in costs_list if c[0] < median_cost]
-            wr_above = sum(1 for _, w in above if w) / len(above) * 100 if above else 0
-            wr_below = sum(1 for _, w in below if w) / len(below) * 100 if below else 0
-        else:
-            wr_above = wr_below = 0
-            median_cost = 0
+    if args.cmd == "evaluate":
+        results = []
+        for wallet in args.wallets:
+            print(f"\n{'=' * 60}")
+            print(f"Evaluating {wallet[:12]}...")
+            r = evaluate_wallet(wallet, args.min_games)
+            results.append(r)
 
-        wr = wins / n_trades * 100
-        roi = total_pnl / total_cost * 100 if total_cost > 0 else 0
-        avg_cost = total_cost / n_trades
+            # Print summary
+            marker = {"arb_trader": "ARB", "mixed": "MIX", "directional": "DIR"}[r["style"]]
+            print(f"\n  [{marker}] {r['address'][:12]} | {r['arb_pct']:.0f}% arb | "
+                  f"directional: {r['directional_wins']}W/{r['directional_losses']}L "
+                  f"({r['directional_wr']}% WR) | PnL ${r['directional_pnl']:+,.0f}")
+            print(f"  Profile: {r['profile_url']}")
 
-        results.append({
-            "wallet": wallet,
-            "games": n_games,
-            "trades": n_trades,
-            "wins": wins,
-            "losses": losses,
-            "wr": round(wr, 1),
-            "total_cost": round(total_cost, 2),
-            "total_pnl": round(total_pnl, 2),
-            "roi": round(roi, 1),
-            "avg_cost": round(avg_cost, 2),
-            "median_cost": round(median_cost, 2),
-            "wr_above_median": round(wr_above, 1),
-            "wr_below_median": round(wr_below, 1),
-            "conviction_gap": round(wr_above - wr_below, 1),
-        })
+            if r["style"] == "arb_trader":
+                print(f"  ⚠️  ARB TRADER — {r['arb_pct']:.0f}% of events are both-sides. NOT copyable via hauptbet.")
 
-    # Sort by ROI (profitable first), then by volume
-    results.sort(key=lambda r: (-r["roi"], -r["total_cost"]))
+            print()
+            for cat, s in r["by_league"].items():
+                res = s["w"] + s["l"]
+                if res == 0 and s["open"] == 0:
+                    continue
+                print(f"  {cat:<12s}  {s['w']}W/{s['l']}L  WR {s['wr']:>5.1f}%  PnL ${s['pnl']:>+8,.0f}  ({s['open']} open)")
+                for t in s["sample"][:3]:
+                    print(f"    [{t['result']}] ${t['pnl']:>+7,.0f} @ {t['avg_price']*100:.0f}¢  {t['slug'][:40]}")
 
-    # Filter: only profitable wallets with conviction gap
-    profitable = [r for r in results if r["roi"] > 5]
+        out_file = os.path.join(os.path.dirname(__file__), "..", "data", "smart_scout.json")
+        json.dump({"timestamp": datetime.now(timezone.utc).isoformat(), "results": results}, open(out_file, "w"), indent=2)
+        print(f"\nSaved to {out_file}")
 
-    print(f"{'Wallet':<14s} {'G':>3s} {'W':>3s} {'L':>3s} {'WR':>5s} {'Cost':>7s} {'PnL':>8s} {'ROI':>6s} {'Avg$':>6s} {'WR>med':>6s} {'WR<med':>6s} {'Gap':>5s}")
-    print("-" * 95)
-    for r in profitable[:30]:
-        print(f"{r['wallet'][:12]:<14s} {r['games']:>3d} {r['wins']:>3d} {r['losses']:>3d} {r['wr']:>4.0f}% ${r['total_cost']:>6.0f} ${r['total_pnl']:>+7.0f} {r['roi']:>+5.0f}% ${r['avg_cost']:>5.0f} {r['wr_above_median']:>5.0f}% {r['wr_below_median']:>5.0f}% {r['conviction_gap']:>+4.0f}")
+    elif args.cmd == "discover":
+        candidates = discover_wallets(args.league, args.days, args.min_bets)
+        print(f"\n{'Wallet':<14s} {'Games':>5s} {'Volume':>10s}  URL")
+        print("-" * 70)
+        for c in candidates:
+            print(f"{c['address'][:12]:<14s} {c['games']:>5d} ${c['total_size']:>9,.0f}  {c['profile_url']}")
 
-    print(f"\nTotal profitable wallets (>5% ROI, >={args.min_games}g, >=${args.min_cost} cost): {len(profitable)}")
+        out_file = os.path.join(os.path.dirname(__file__), "..", "data", "scout_candidates.json")
+        json.dump({"timestamp": datetime.now(timezone.utc).isoformat(), "candidates": candidates}, open(out_file, "w"), indent=2)
+        print(f"\nNext: evaluate top candidates:")
+        print(f"  python scripts/smart_scout.py evaluate {' '.join(c['address'] for c in candidates[:5])}")
 
-    # Highlight: wallets with conviction gap > 20% (WR above median >> WR below)
-    print()
-    print("=== HIGH CONVICTION WALLETS (WR gap > 20%) ===")
-    high_conv = [r for r in profitable if r["conviction_gap"] > 20]
-    for r in high_conv[:15]:
-        print(f"  {r['wallet'][:12]}  {r['wins']}W/{r['losses']}L ({r['wr']:.0f}%)  ROI {r['roi']:+.0f}%  avg ${r['avg_cost']:.0f}  big={r['wr_above_median']:.0f}% small={r['wr_below_median']:.0f}%  gap={r['conviction_gap']:+.0f}%")
-
-    # Save
-    out_dir = os.path.join(os.path.dirname(__file__), "..", "data")
-    out_file = os.path.join(out_dir, "smart_scout.json")
-    with open(out_file, "w") as f:
-        json.dump({
-            "sport": args.sport,
-            "days": args.days,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "wallets_scanned": len(wallet_trades),
-            "profitable": profitable[:50],
-            "high_conviction": high_conv[:20],
-        }, f, indent=2)
-    print(f"\nSaved to {out_file}")
+    save_cache()
 
 
 if __name__ == "__main__":
