@@ -28,7 +28,7 @@ GAMMA_URL = "https://gamma-api.polymarket.com"
 DATA_API = "https://data-api.polymarket.com"
 
 # Sizing: fixed USD per side, split across 3 tiers
-BET_USD_PER_SIDE = 20.00  # 2026-04-17 12:19 user bumped 40->20 (Binance filter live, kleinere bet meer windows)
+BET_USD_PER_SIDE = 10.00  # 2026-04-17 14:xx user bumped to $10 (van $20)
 MIN_SHARES = 5  # PM minimum
 
 # 3-tier bid ladder — catcht shallow crashes (2-3c) en deep crashes (1c)
