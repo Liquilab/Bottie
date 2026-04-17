@@ -869,13 +869,14 @@ def main():
                         check_fills(client, w)
                         check_both_sides_filled(w)
 
-                # T-15s: cancel ALL unfilled tiers.
-                # HARVESTER data (5h, N=1773 BTC 5M fills): edge zit in T-30..T-15 bucket
-                # (1c T-20..T-15 = 75% WR, +3051% ROI). Fills na T-15 zijn 0% WR / -100% ROI
-                # op alle tiers, inclusief POST-window settlement. Cancel T-15 + cancel_orders
-                # post-window (T+15s) samen = juiste dekking.
-                if w.orders_placed and not w.resolved and 0 < secs_to_end <= 15:
-                    cancel_unfilled_tiers(client, w, [0.01, 0.02, 0.03, 0.04], "T-15s")
+                # T-3s: cancel ALL unfilled tiers.
+                # 2026-04-17 revised: oude T-15s cancel was te agressief. Bewijs 5:45-5:50
+                # window: 1595sh HV fills bij T+290-297s (= T-10 tot T-3), wij misten dat
+                # omdat onze T-15 cancel onze 1c/2c/3c al dood had gemaakt.
+                # Nu: cancel pas bij secs_to_end <= 5 (fires op laatste tick voor T-0).
+                # MUST cancel VOOR window close — fills post-window = settlement = 0% WR.
+                if w.orders_placed and not w.resolved and 0 < secs_to_end <= 5:
+                    cancel_unfilled_tiers(client, w, [0.01, 0.02, 0.03, 0.04], "T-3s")
 
                 # Cancel unfilled after window ends
                 if w.orders_placed and secs_to_end < -CANCEL_AFTER_END and not w.resolved:
