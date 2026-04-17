@@ -883,8 +883,8 @@ def main():
                 # omdat onze T-15 cancel onze 1c/2c/3c al dood had gemaakt.
                 # Nu: cancel pas bij secs_to_end <= 5 (fires op laatste tick voor T-0).
                 # MUST cancel VOOR window close — fills post-window = settlement = 0% WR.
-                if w.orders_placed and not w.resolved and 0 < secs_to_end <= 5:
-                    cancel_unfilled_tiers(client, w, [0.01, 0.02, 0.03], "T-3s")
+                if w.orders_placed and not w.resolved and 0 < secs_to_end <= 15:
+                    cancel_unfilled_tiers(client, w, [0.01, 0.02, 0.03], "T-15s")
 
                 # Cancel unfilled after window ends
                 if w.orders_placed and secs_to_end < -CANCEL_AFTER_END and not w.resolved:
