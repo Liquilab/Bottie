@@ -270,9 +270,15 @@ def get_bankroll() -> float:
 
 
 
+# 2026-04-17: filter UITGEZET. Raw bewijs 11 resolved skipped windows:
+# 7 trend-continue (skip correct) + 4 reversals (gemiste wins). 36% miss-rate
+# op de skip-set, potentieel -$3K netto vs +$140 savings. Filter werkt tegen
+# de reversal-strategie in. Flag BINANCE_FILTER_ENABLED = False.
+BINANCE_FILTER_ENABLED = False
+
 def should_skip_binance_momentum():
-    """Check Binance BTCUSDT last 10 1-min bars. Skip if |move| > threshold.
-    Returns (skip: bool, move_pct: float). Fails open on error.
+    """Returns (skip, move_pct). Filter disabled; altijd skip=False.
+    Fetch nog steeds Binance voor logging van bin_mv bij elke PLACING.
     """
     try:
         req = urllib.request.Request(
@@ -284,10 +290,12 @@ def should_skip_binance_momentum():
             return False, 0.0
         open_10m_ago = float(bars[0][1])
         close_now = float(bars[-2][4])
-        move = (close_now - open_10m_ago) / open_10m_ago
-        return abs(move) > SKIP_MOVE_10M_THRESHOLD, move * 100
+        move_pct = (close_now - open_10m_ago) / open_10m_ago * 100
+        if BINANCE_FILTER_ENABLED and abs(move_pct) > SKIP_MOVE_10M_THRESHOLD * 100:
+            return True, move_pct
+        return False, move_pct
     except Exception as e:
-        log.debug(f"Binance skip check failed (fail-open): {e}")
+        log.debug(f"Binance fetch failed: {e}")
         return False, 0.0
 
 
