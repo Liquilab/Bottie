@@ -36,9 +36,12 @@ pub async fn sync_own_trades(
     // Fetch recent activity for our own wallet (up to 500 trades)
     let activities = client.get_wallet_activity(own_address, 500).await?;
 
-    // Build condition_id → event_slug lookup from positions API (which has eventSlug)
+    // Build condition_id → event_slug lookup.
+    // Open positions API only has live markets; for resolved markets we also
+    // page /closed-positions so manual imports of finished games get their
+    // league slug (avoids sport="unknown" in trades.jsonl).
     let positions = client.get_wallet_positions(own_address, 500).await.unwrap_or_default();
-    let slug_lookup: std::collections::HashMap<String, String> = positions
+    let mut slug_lookup: std::collections::HashMap<String, String> = positions
         .iter()
         .filter_map(|p| {
             let cid = p.condition_id.as_ref()?;
@@ -50,6 +53,11 @@ pub async fn sync_own_trades(
             Some((cid.clone(), slug))
         })
         .collect();
+    if let Ok(closed) = client.get_closed_position_slugs(own_address).await {
+        for (cid, slug) in closed {
+            slug_lookup.entry(cid).or_insert(slug);
+        }
+    }
 
     let mut imported = 0u32;
 
@@ -128,7 +136,7 @@ pub async fn sync_own_trades(
             signal_source: "manual".to_string(),
             copy_wallet: None,
             consensus_count: None,
-            consensus_wallets: None,
+            consensus_wallets: Some(vec!["Manual".to_string()]),
             edge_pct: 0.0,
             confidence: 0.0,
             signal_delay_ms: 0,

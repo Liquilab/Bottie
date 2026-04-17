@@ -1,0 +1,14 @@
+[Unit]
+Description=Crypto Milestone Dry-Run Logger
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/bottie
+ExecStart=/usr/bin/python3 /opt/bottie/scripts/crypto_dryrun.py
+Restart=on-failure
+RestartSec=10
+EnvironmentFile=/opt/bottie/.env
+
+[Install]
+WantedBy=multi-user.target

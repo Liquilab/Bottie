@@ -11,11 +11,17 @@ API = "https://data-api.polymarket.com"
 DATA_DIR = Path(os.environ.get("BOTTIE_DATA", "data"))
 BASELINE_FILE = DATA_DIR / "wallet_baselines.json"
 REPORT_FILE = DATA_DIR / "drift_report.json"
+TRADES_FILE = DATA_DIR / "trades.jsonl"
 CONFIG_FILE = Path("config.yaml")
 
 # Drift threshold: alert if recent WR drops more than this below baseline
 DRIFT_THRESHOLD = 0.15  # 15%
 INACTIVE_DAYS = 14
+
+# Kill switch thresholds — applied to our bot's realized copies per wallet
+KILL_MIN_N = 30
+KILL_WR_FLOOR = 0.40
+KILL_PNL_FLOOR = -50.0
 
 def fetch(u):
     time.sleep(0.4)
@@ -102,6 +108,71 @@ def load_baselines():
 def save_baselines(baselines):
     with open(BASELINE_FILE, "w") as f:
         json.dump(baselines, f, indent=2)
+
+def realized_per_wallet_killswitch():
+    """Kill switch: realized PnL + WR per wallet over last KILL_MIN_N resolved copies.
+
+    Reads data/trades.jsonl (SSOT for our bot's actual trades) — NOT tracked
+    wallet's history. Catches the case where tracked wallet's baseline WR stays
+    high but OUR copies of them go bad (lag, selection, regime change).
+
+    Returns (section_for_report, list_of_alerts).
+    """
+    if not TRADES_FILE.exists():
+        return {"enabled": False, "reason": "trades.jsonl missing"}, []
+
+    buckets = defaultdict(list)
+    for line in open(TRADES_FILE):
+        try:
+            r = json.loads(line)
+        except Exception:
+            continue
+        if not r.get("resolved_at"):
+            continue
+        if r.get("pnl") is None:
+            continue
+        cw = r.get("consensus_wallets") or []
+        if not cw:
+            continue
+        wallet = cw[0]
+        if wallet in ("Manual", "WhaleConsensus"):
+            continue  # not a followed-wallet signal
+        buckets[wallet].append({
+            "resolved_at": r["resolved_at"],
+            "pnl": float(r["pnl"]),
+            "result": r.get("result"),
+            "sport": r.get("sport", "?"),
+        })
+
+    section = {"enabled": True, "wallets": []}
+    alerts = []
+    print("\n=== REALIZED KILL SWITCH (last %d copies/wallet) ===" % KILL_MIN_N)
+    for wallet, trades in sorted(buckets.items()):
+        trades.sort(key=lambda t: t["resolved_at"], reverse=True)
+        recent = trades[:KILL_MIN_N]
+        n = len(recent)
+        pnl = sum(t["pnl"] for t in recent)
+        wins = sum(1 for t in recent if t.get("result") == "win")
+        wr = wins / n if n else 0.0
+
+        status = "OK"
+        if n < KILL_MIN_N:
+            status = "INSUFFICIENT_N"
+        elif wr < KILL_WR_FLOOR or pnl < KILL_PNL_FLOOR:
+            status = "DISABLE_RECOMMENDED"
+            alerts.append(
+                "KILL %s: n=%d wr=%.0f%% pnl=$%+.2f (floor wr=%.0f%% pnl=$%.0f)"
+                % (wallet, n, wr*100, pnl, KILL_WR_FLOOR*100, KILL_PNL_FLOOR)
+            )
+
+        print("  %-16s n=%-3d wr=%5.1f%% pnl=$%+8.2f %s"
+              % (wallet, n, wr*100, pnl, status))
+        section["wallets"].append({
+            "wallet": wallet, "n": n, "wr": round(wr, 3),
+            "pnl": round(pnl, 2), "status": status,
+        })
+    return section, alerts
+
 
 def main():
     now = datetime.now(timezone.utc)
@@ -220,6 +291,11 @@ def main():
 
         report["wallets"].append(wallet_report)
 
+    # Realized kill switch (our bot's actual copy performance per wallet)
+    killswitch_section, kill_alerts = realized_per_wallet_killswitch()
+    report["realized_killswitch"] = killswitch_section
+    alerts.extend(kill_alerts)
+
     # Save
     save_baselines(baselines)
     with open(REPORT_FILE, "w") as f:
@@ -231,7 +307,7 @@ def main():
         for a in alerts:
             print(a)
     else:
-        print("✅ All wallets OK")
+        print("All wallets OK")
 
     print("\nSaved: %s, %s" % (BASELINE_FILE, REPORT_FILE))
 

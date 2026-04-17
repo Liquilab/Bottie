@@ -405,6 +405,40 @@ impl ClobClient {
         Ok(all)
     }
 
+    /// Fetch (condition_id, event_slug) pairs from /closed-positions.
+    /// Used by sync to resolve slugs of resolved markets (where /positions no
+    /// longer has the row). Paginates with a 20-page safety cap.
+    pub async fn get_closed_position_slugs(&self, address: &str) -> Result<Vec<(String, String)>> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        let mut offset: u32 = 0;
+        let page_size: u32 = 50;
+        for _ in 0..20 {
+            let url = format!(
+                "{DATA_API}/closed-positions?user={address}&limit={page_size}&offset={offset}"
+            );
+            let page: serde_json::Value = self.http.get(&url).send().await?.error_for_status()?.json().await?;
+            let arr = match page.as_array() {
+                Some(a) => a,
+                None => break,
+            };
+            if arr.is_empty() {
+                break;
+            }
+            for row in arr {
+                let cid = row.get("conditionId").and_then(|v| v.as_str()).unwrap_or("");
+                let slug = row.get("eventSlug").and_then(|v| v.as_str()).unwrap_or("");
+                if !cid.is_empty() && !slug.is_empty() {
+                    out.push((cid.to_string(), slug.trim_end_matches("-more-markets").to_string()));
+                }
+            }
+            if (arr.len() as u32) < page_size {
+                break;
+            }
+            offset += page_size;
+        }
+        Ok(out)
+    }
+
     // --- Portfolio Value ---
 
     /// Get total value of open positions from data-api /value endpoint.

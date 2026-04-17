@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Council: justdance Edge Analyse</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0A0A0A; color: #E0E0E0; font-family: 'SF Mono', 'Fira Code', monospace; padding: 2rem; line-height: 1.6; }
+.header { text-align: center; margin-bottom: 3rem; border-bottom: 1px solid #333; padding-bottom: 2rem; }
+.header h1 { color: #FF6B6B; font-size: 1.4rem; margin-bottom: 0.5rem; }
+.header .question { color: #FFF; font-size: 1.1rem; max-width: 700px; margin: 0 auto; }
+.header .meta { color: #666; font-size: 0.8rem; margin-top: 1rem; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 1.5rem; margin-bottom: 3rem; }
+.card { background: #141414; border: 1px solid #2A2A2A; border-radius: 8px; padding: 1.5rem; transition: border-color 0.2s; }
+.card:hover { border-color: #444; }
+.card .role { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem; }
+.card .icon { font-size: 1.5rem; }
+.card .name { font-weight: bold; font-size: 0.9rem; }
+.card .verdict-tag { font-size: 0.7rem; padding: 2px 8px; border-radius: 12px; margin-left: auto; }
+.tag-red { background: #3D1515; color: #FF6B6B; }
+.tag-green { background: #153D15; color: #6BFF6B; }
+.tag-yellow { background: #3D3D15; color: #FFFF6B; }
+.card .summary { color: #BBB; font-size: 0.85rem; margin-bottom: 1rem; }
+.card details { margin-top: 0.5rem; }
+.card summary { cursor: pointer; color: #888; font-size: 0.8rem; }
+.card summary:hover { color: #FFF; }
+.card .full-text { color: #999; font-size: 0.8rem; margin-top: 0.75rem; white-space: pre-wrap; }
+.verdict-box { background: #1A0A0A; border: 2px solid #FF6B6B; border-radius: 12px; padding: 2rem; margin-bottom: 2rem; }
+.verdict-box h2 { color: #FF6B6B; font-size: 1.2rem; margin-bottom: 1rem; }
+.verdict-box .decision { color: #FFF; font-size: 1.3rem; font-weight: bold; margin-bottom: 1rem; }
+.verdict-box ul { list-style: none; padding: 0; }
+.verdict-box li { padding: 0.4rem 0; color: #CCC; font-size: 0.9rem; }
+.verdict-box li::before { content: ""; margin-right: 0.5rem; }
+.peer-review { background: #0F0F1A; border: 1px solid #2A2A3A; border-radius: 8px; padding: 1.5rem; margin-bottom: 2rem; }
+.peer-review h3 { color: #8888FF; font-size: 1rem; margin-bottom: 1rem; }
+.peer-review .highlight { background: #1A1A2A; padding: 0.75rem; border-radius: 6px; margin-bottom: 0.75rem; font-size: 0.85rem; }
+.peer-review .highlight strong { color: #AAAAFF; }
+.action-box { background: #0A1A0A; border: 2px solid #4CAF50; border-radius: 12px; padding: 2rem; }
+.action-box h2 { color: #4CAF50; font-size: 1.1rem; margin-bottom: 1rem; }
+.action-box .step { display: flex; gap: 1rem; padding: 0.5rem 0; color: #CCC; font-size: 0.9rem; }
+.action-box .step-num { color: #4CAF50; font-weight: bold; min-width: 24px; }
+.data-context { background: #141414; border: 1px solid #2A2A2A; border-radius: 8px; padding: 1.5rem; margin-bottom: 2rem; }
+.data-context h3 { color: #FFB347; margin-bottom: 0.75rem; font-size: 0.95rem; }
+.data-context table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+.data-context td, .data-context th { padding: 0.3rem 0.5rem; text-align: left; border-bottom: 1px solid #222; }
+.data-context th { color: #888; }
+.data-context .pos { color: #6BFF6B; }
+.data-context .neg { color: #FF6B6B; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>LLM COUNCIL</h1>
+  <div class="question">Is de edge van justdance (cheap crypto milestone bets: 66.4% WR, +$2.5M PnL) kopieerbaar en winstgevend voor ons?</div>
+  <div class="meta">2026-04-17 | 5 adviseurs + 5 peer reviews | justdance 0xcc500c...</div>
+</div>
+
+<div class="data-context">
+  <h3>Data Context</h3>
+  <table>
+    <tr><th>Metric</th><th>Waarde</th></tr>
+    <tr><td>LB Profit (SSOT)</td><td class="pos">$1,596,282</td></tr>
+    <tr><td>Sweet spot (reach YES &lt;35c + dip YES &lt;20c)</td><td class="pos">462W/234L = 66.4% WR | +$2,492,806</td></tr>
+    <tr><td>Anti-pattern (NO bets @80c+)</td><td class="neg">206W/501L = 29.1% WR | -$2,316,447</td></tr>
+    <tr><td>5M/15M up/down</td><td class="neg">44% WR | -$1,850,000</td></tr>
+    <tr><td>Closed positions</td><td>24,696 (gededupliceerd)</td></tr>
+    <tr><td>Ghost losses</td><td>389 ($138K)</td></tr>
+    <tr><td>Portfolio (open)</td><td>$472,358</td></tr>
+  </table>
+</div>
+
+<div class="grid">
+
+  <div class="card">
+    <div class="role">
+      <span class="icon">&#x1F525;</span>
+      <span class="name">De Contrariaan</span>
+      <span class="verdict-tag tag-red">NIET BOUWEN</span>
+    </div>
+    <div class="summary">696 trades zijn NIET onafhankelijk. BTC reach $75K/80K/85K winnen allemaal bij een rally. Echte N = 30-50. Bij die N is 66% WR toeval.</div>
+    <details>
+      <summary>Lees volledig advies</summary>
+      <div class="full-text">Het kernprobleem: je hebt geen 696 onafhankelijke trades geanalyseerd, je hebt 696 bets op dezelfde onderliggende asset geanalyseerd.
+
+1. Gecorreleerde outcomes vernietigen je N: "BTC reach $75K", "BTC reach $80K", "BTC reach $85K" winnen ALLEMAAL tegelijk bij een rally. Je echte N is 30-50 onafhankelijke crypto-bewegingen. Met N=40 is 66% WR statistisch niet te onderscheiden van toeval (CI: 50-82%).
+
+2. Bull market = alles-wint-tegelijk. In een bull run wint justdance 15 "reach" bets tegelijk. In een bear market verliest hij 15 tegelijk. Je +$2.5M PnL is waarschijnlijk geconcentreerd in 3-4 goede maanden.
+
+3. De dip bets bewijzen het probleem. Dip YES @<20c: 44% WR maar +$710K — waarschijnlijk tijdens korte dips in een overall bull trend, niet echte bear markets.
+
+4. 234 verliezers x $25 = $5,850 in clusters. Dat is 38% drawdown op $1,319 bankroll.
+
+Advies: Paper trade 3 maanden, tel onafhankelijke events.</div>
+    </details>
+  </div>
+
+  <div class="card">
+    <div class="role">
+      <span class="icon">&#x1F9E0;</span>
+      <span class="name">Eerste Principes</span>
+      <span class="verdict-tag tag-red">NIET BOUWEN</span>
+    </div>
+    <div class="summary">Je optimaliseert de verkeerde variabele. De vraag is "snelste weg $1.3K naar $10K", niet "is justdance kopieerbaar". Timing is de edge, niet selectie.</div>
+    <details>
+      <summary>Lees volledig advies</summary>
+      <div class="full-text">1. Timing is de edge, niet selectie. justdance koopt milestone bets op specifieke momenten bij sentimentdips. Tegen de tijd dat jij zijn positie ziet, is de prijs al 18-22c en is de asymmetrie weg.
+
+2. Sizing mismatch. justdance doet ~$3,600/trade. Jij $25-50/trade. Bij die sizing betaal je 2-4% fees. EV van +$0.51 wordt +$0.47 of minder.
+
+3. Crypto milestones resolven over weken/maanden. Met $1,319 bankroll en $25/trade heb je ~53 slots. Verwachte winst ~$50-75/maand = 18+ maanden naar $10K.
+
+Concreet: Stop met nieuwe bots. Maximaliseer sports throughput. Verhoog portfolio_reference_usdc naar 1000-1100. Handmatig 3-5 milestone bets per maand is genoeg, geen bot nodig.</div>
+    </details>
+  </div>
+
+  <div class="card">
+    <div class="role">
+      <span class="icon">&#x1F680;</span>
+      <span class="name">De Expansionist</span>
+      <span class="verdict-tag tag-green">BOUWEN</span>
+    </div>
+    <div class="summary">Denk groter: bouw een universele milestone-scanner, niet alleen crypto. Twee lagen: copy + independent scaling. Kelly zegt $100+/trade.</div>
+    <details>
+      <summary>Lees volledig advies</summary>
+      <div class="full-text">1. Dit is geen aparte bot, dit is CATEGORIE-EXPANSIE. justdance's edge zit in structureel mispricing van milestone-markten. Dat patroon bestaat ook buiten crypto: social media, GDP, entertainment. Bouw een universele milestone-scanner.
+
+2. Je hoeft niet te kopieren, je kunt VOORLOPEN. justdance's trades zijn signaal, niet strategie. Bouw twee lagen: Layer 1 copy, Layer 2 onafhankelijk schalen via eigen data (CoinGecko, on-chain).
+
+3. Sizing te conservatief. Kelly zegt ~12% bankroll ($158/trade). Start met $100/trade. Elke dollar die je NIET inzet is verloren EV.
+
+De edge is niet justdance. De edge is goedkope milestones.</div>
+    </details>
+  </div>
+
+  <div class="card">
+    <div class="role">
+      <span class="icon">&#x1F440;</span>
+      <span class="name">De Buitenstaander</span>
+      <span class="verdict-tag tag-red">NIET BOUWEN</span>
+    </div>
+    <div class="summary">De data heeft te veel gaten. Invested=$0 maakt PnL onverifieerbaar. Recent $1-$120 per trade vs $2.5M historisch. Valideer eerst.</div>
+    <details>
+      <summary>Lees volledig advies</summary>
+      <div class="full-text">1. Invested amount = $0 — de hele PnL is niet verifieerbaar. Je weet niet wat er IN ging.
+
+2. Recent trade sizes $1-$120 vs $2.5M PnL. Hoe is die $2.5M opgebouwd? Drie opties: hij handelde vroeger veel groter (en is gestopt), PnL klopt niet, of een handvol grote winners. Alle drie maken kopieren zinloos.
+
+3. Dip YES 44% WR maar +$710K = klein aantal grote winners draagt het resultaat. Niet kopieerbaar met $25/trade.
+
+4. Geen timestamps = je weet niet WANNEER hij koopt.
+
+5. API cap: van 24,696 posities heb je een onbekende subset. Survivorship bias niet uitgesloten.
+
+Advies: Los data gaps op (on-chain PnL verificatie, 50 trades handmatig), bepaal of recent sizing = verdampte edge.</div>
+    </details>
+  </div>
+
+  <div class="card">
+    <div class="role">
+      <span class="icon">&#x1F528;</span>
+      <span class="name">De Uitvoerder</span>
+      <span class="verdict-tag tag-yellow">DRY-RUN</span>
+    </div>
+    <div class="summary">Edge is real maar drie killers: slippage, bull market, schaal ($2-4K/jaar). Dry-run 2 weken in Bottie. Geen aparte bot.</div>
+    <details>
+      <summary>Lees volledig advies</summary>
+      <div class="full-text">Killer 1: Slippage. 15s polling delay = 38-42c entry vs 35c. Vreet 30-50% EV.
+Killer 2: Bull market regime-edge die draait.
+Killer 3: $2-4K verwachte jaaropbrengst rechtvaardigt geen aparte bot.
+
+Actieplan:
+Stap 1 (maandag, 2u): Dry-run mode in Bottie — log justdance's trades, meet slippage.
+Stap 2 (week 3, 1u): Evalueer. Als slippage <5c: doorgaan. Als >5c: stop.
+Stap 3 (week 3, 3u): Go live als strategy in Bottie, niet aparte bot. $25 sizing.
+
+Verdict: Dry-run eerst. Bewijs slippage-edge met data, niet met hoop.</div>
+    </details>
+  </div>
+
+</div>
+
+<div class="peer-review">
+  <h3>Peer Review Highlights</h3>
+  <div class="highlight"><strong>Unaniem sterkst: D (Contrariaan)</strong> — Gecorreleerde outcomes is het dodelijke argument. 5/5 reviewers noemen dit als kernprobleem.</div>
+  <div class="highlight"><strong>Unaniem zwakst: A (Expansionist)</strong> — Negeert alle risico's, wil schalen op ongevalideerde data. "Gevaarlijk optimistisch."</div>
+  <div class="highlight"><strong>Wat ALLE vijf misten:</strong>
+    <br>1. Benchmark: is +$2.5M beter dan simpelweg BTC houden? In een 300% bull run is dit mogelijk underperformance risicogecorrigeerd.
+    <br>2. Entry timing: justdance koopt waarschijnlijk bij 2-5c wanneer niemand kijkt. Wij zien het pas bij 15-20c. Timing-edge = niet kopieerbaar. (Vergelijkbaar met RN1 conclusie)
+    <br>3. Data audit: invested=$0 en merged-position artifacts maken de hele $2.5M verdacht zonder on-chain verificatie.</div>
+</div>
+
+<div class="verdict-box">
+  <h2>VERDICT</h2>
+  <div class="decision">NIET BOUWEN</div>
+  <ul>
+    <li>Gecorreleerde outcomes: echte N = 30-50, niet 696. WR statistisch niet significant.</li>
+    <li>Timing-edge niet kopieerbaar via polling (RN1-parallel: market maker, niet copy-baar).</li>
+    <li>Data-kwaliteit onvoldoende: invested=$0, API cap, geen timestamps.</li>
+    <li>Opportunity cost: elke dev-uur aan crypto = uur niet aan bewezen sports edge.</li>
+    <li>$2-4K/jaar verwachte opbrengst rechtvaardigt geen infra-investering.</li>
+  </ul>
+</div>
+
+<div class="action-box">
+  <h2>ALS JE HET TOCH WILT VERKENNEN</h2>
+  <div class="step"><span class="step-num">1.</span>Dry-run logger in Bottie (2 uur): log justdance's milestone trades, meet slippage (zijn prijs vs. jouw mogelijke prijs). 0 risico.</div>
+  <div class="step"><span class="step-num">2.</span>Na 2 weken: tel onafhankelijke events (niet trades). Als effectieve WR >60% op >15 events EN slippage <5c: heroverwegen.</div>
+  <div class="step"><span class="step-num">3.</span>Overweeg handmatig: 3-5 milestone bets per maand manueel plaatsen. Geen bot nodig voor dat volume.</div>
+</div>
+
+</body>
+</html>
