@@ -34,10 +34,10 @@ MIN_SHARES = 5  # PM minimum
 # 3-tier bid ladder — catcht shallow crashes (2-3c) en deep crashes (1c)
 # Empirisch (HARVESTER, 246 markets): ≤1c WR 3.2%, ≤2c 6.2%, ≤3c 12% — alle profitable
 TIERS = [
-    (0.01, 0.35),  # 35% op 1c — ROI-king (+239% ROI in HARVESTER 5h data); 5% naar 4c experiment
-    (0.02, 0.20),  # 20% op 2c — zwakste WR (1.2%) maar nog steeds +146% ROI
-    (0.03, 0.40),  # 40% op 3c — hoogste WR (7.4%), frequency-tier (HARVESTER weegt 3c net zo zwaar als 1c)
-    (0.04, 0.05),  # 5% op 4c — 2026-04-17 experiment, break-even WR=4%, HARVESTER plaatst hier 0 trades (N=3495) dus geen prior
+    (0.01, 0.70),  # 70% op 1c — HV 72h data: ROI +1192% (3x meer dan 3c). Max share-efficiency.
+    (0.02, 0.20),  # 20% op 2c — fallback als 1c orderbook-depth uitgeput
+    (0.03, 0.10),  # 10% op 3c — kleine fallback; ROI +399% per HV 72h
+    # 4c verwijderd 2026-04-17: HV 3495 fills in 72h = 0 op 4c. Experiment N=1 win.
 ]
 BANKROLL_PCT = None  # deprecated — use BET_USD_PER_SIDE
 
@@ -876,7 +876,7 @@ def main():
                 # Nu: cancel pas bij secs_to_end <= 5 (fires op laatste tick voor T-0).
                 # MUST cancel VOOR window close — fills post-window = settlement = 0% WR.
                 if w.orders_placed and not w.resolved and 0 < secs_to_end <= 5:
-                    cancel_unfilled_tiers(client, w, [0.01, 0.02, 0.03, 0.04], "T-3s")
+                    cancel_unfilled_tiers(client, w, [0.01, 0.02, 0.03], "T-3s")
 
                 # Cancel unfilled after window ends
                 if w.orders_placed and secs_to_end < -CANCEL_AFTER_END and not w.resolved:
