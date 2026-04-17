@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Withdraw USDC from GIYN Gnosis Safe via Polymarket bridge relay.
+"""Withdraw USDC from Crypto 5M Gnosis Safe via Polymarket bridge relay.
 
 Adapted from /opt/bottie/scripts/transfer_usdc.py — same flow, different Safe.
 
@@ -12,7 +12,7 @@ import os, sys, json, urllib.request
 
 USDC_E = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 USDC_NATIVE_POLYGON = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
-SAFE_ADDR = "0x8A3A19AeC04eeB6E3C183ee5750D06fe5c08066a"  # GIYN funder (bottie-test)
+SAFE_ADDR = "0x8A3A19AeC04eeB6E3C183ee5750D06fe5c08066a"  # Crypto 5M funder (bottie-test)
 RPC = "https://polygon-bor-rpc.publicnode.com"
 CHAIN_ID = 137
 BRIDGE_URL = "https://bridge.polymarket.com/withdraw"

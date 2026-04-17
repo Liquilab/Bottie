@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Resolve scanner for fivemin-bot.
 
-Reads PM /closed-positions for the GIYN funder and appends missing resolutions
+Reads PM /closed-positions for the Crypto 5M funder and appends missing resolutions
 to trades.jsonl. Idempotent — dedupes by condition_id. Runs via cron, independent
 of the bot's in-memory active_windows dict (which resets on every restart and
 caused a 15h gap where fills resolved on-chain but were never recorded locally).

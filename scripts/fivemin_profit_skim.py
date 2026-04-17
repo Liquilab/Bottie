@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fivemin bot profit skim: transfer 25% of realized profit from GIYN Safe to owner.
+"""Fivemin bot profit skim: transfer 25% of realized profit from Crypto 5M Safe to owner.
 
 Runs 2x/day via cron. Sums PnL of trades resolved in the last 12 hours and, if
 positive, transfers 25% to SKIM_TO via fivemin_transfer_usdc.py (which handles
@@ -67,11 +67,11 @@ def get_window_pnl():
 
 
 def transfer(amount_usdc):
-    """Call fivemin_transfer_usdc.py to send USDC from GIYN Safe to owner."""
+    """Call fivemin_transfer_usdc.py to send USDC from Crypto 5M Safe to owner."""
     script = os.path.join(os.path.dirname(__file__), "fivemin_transfer_usdc.py")
     env = os.environ.copy()
 
-    # Load GIYN private key from bottie-test .env
+    # Load Crypto 5M private key from bottie-test .env
     env_file = "/opt/bottie-test/.env"
     if os.path.exists(env_file):
         with open(env_file) as f:

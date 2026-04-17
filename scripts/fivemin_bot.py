@@ -6,7 +6,7 @@ Plaatst limit BUY orders @1c op BEIDE kanten (Up + Down) van 5m crypto candles.
 Als de candle beweegt vult één kant. Bij reversal = 100x winst.
 Als beide kanten vullen = gegarandeerde winst.
 
-Draait op GIYN wallet (bottie-test .env).
+Draait op Crypto 5M wallet (bottie-test .env).
 
 Usage:
     python3 fivemin_bot.py                # live mode (5 shares @1c)
@@ -74,7 +74,7 @@ DRY_RUN = "--dry-run" in sys.argv
 
 
 def init_clob():
-    """Initialize CLOB client with GIYN wallet credentials."""
+    """Initialize CLOB client with Crypto 5M wallet credentials."""
     from py_clob_client.client import ClobClient
 
     global FUNDER

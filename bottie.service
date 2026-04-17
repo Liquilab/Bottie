@@ -14,7 +14,7 @@ Group=bottie
 WorkingDirectory=/opt/bottie
 
 # SSOT Pilaar 1 — rules.yaml load asserts cfg.instance_id == BOTTIE_INSTANCE.
-# Must be "cannae" on /opt/bottie and "giyn" on /opt/bottie-test.
+# Must be "cannae" on /opt/bottie and "crypto5m" on /opt/bottie-test.
 Environment=BOTTIE_INSTANCE=cannae
 
 # Load secrets from .env file (not visible in process list)

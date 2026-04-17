@@ -36,10 +36,10 @@ LB_API     = "https://lb-api.polymarket.com"
 PM_FUNDER       = "0x89dcA91b49AfB7bEfb953a7658a1B83fC7Ab8F42"
 INITIAL_BANKROLL = 1400.0  # moved here for clarity
 
-# GIYN (bottie-test, /opt/bottie-test/)
-GIYN_FUNDER          = "0x8A3A19AeC04eeB6E3C183ee5750D06fe5c08066a"
-GIYN_TRADES_FILE     = Path("/opt/bottie-test/data/trades.jsonl")
-GIYN_CONFIG_FILE     = Path("/opt/bottie-test/config.yaml")
+# Crypto 5M (bottie-test, /opt/bottie-test/)
+CRYPTO5M_FUNDER          = "0x8A3A19AeC04eeB6E3C183ee5750D06fe5c08066a"
+CRYPTO5M_TRADES_FILE     = Path("/opt/bottie-test/data/trades.jsonl")
+CRYPTO5M_CONFIG_FILE     = Path("/opt/bottie-test/config.yaml")
 
 
 # ── PM API Data (source of truth) ──────────────────────────────────────────
@@ -230,12 +230,12 @@ def load_trades():
                     pass
     return trades
 
-def load_trades_giyn():
-    """Load GIYN (bottie-test) trades from /opt/bottie-test/data/trades.jsonl."""
-    if not GIYN_TRADES_FILE.exists():
+def load_trades_crypto5m():
+    """Load Crypto 5M (bottie-test) trades from /opt/bottie-test/data/trades.jsonl."""
+    if not CRYPTO5M_TRADES_FILE.exists():
         return []
     trades = []
-    with open(GIYN_TRADES_FILE) as f:
+    with open(CRYPTO5M_TRADES_FILE) as f:
         for line in f:
             line = line.strip()
             if line:
@@ -252,13 +252,13 @@ def load_trades_giyn():
     return trades
 
 
-def parse_config_wallets_giyn():
-    """Parse GIYN watchlist from /opt/bottie-test/config.yaml."""
-    if not GIYN_CONFIG_FILE.exists():
+def parse_config_wallets_crypto5m():
+    """Parse Crypto 5M watchlist from /opt/bottie-test/config.yaml."""
+    if not CRYPTO5M_CONFIG_FILE.exists():
         return {}
     try:
         import yaml
-        with open(GIYN_CONFIG_FILE) as f:
+        with open(CRYPTO5M_CONFIG_FILE) as f:
             config = yaml.safe_load(f)
         wallets = {}
         for w in config.get("copy_trading", {}).get("watchlist", []):
@@ -637,7 +637,7 @@ def render_why(trade, wallet_map):
                 f'<span class="badge" style="background:#3fb950;color:#000">+{edge:.1f}%</span>')
     return f'<span class="muted">{src or "?"}</span>'
 
-def render_kpi_row(kpis, wallet_map, trades=None, funder=None, label="Bottie"):
+def render_kpi_row(kpis, wallet_map, trades=None, funder=None, label="Cannae"):
     # PM API data (source of truth)
     portfolio = kpis.get("portfolio_value", 0)
     rendement = kpis.get("rendement", 0)
@@ -1381,248 +1381,7 @@ tr.group-cont .market-title { padding-left: 12px; font-size: 0.85em; }
 .hyp-changes { background: var(--bg); border-radius: 6px; padding: 8px; margin-top: 8px; }
 .hyp-changes code { font-size: 0.75rem; color: var(--muted); white-space: pre; }
 .empty { color: var(--muted); padding: 24px; text-align: center; background: var(--surface); border-radius: 8px; border: 1px dashed var(--border); }
-
-/* Game cards */
-.game-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 16px; overflow: hidden; }
-.game-card-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); }
-.game-card-header .game-title { font-weight: 700; font-size: 0.95rem; }
-.game-card-header .game-meta { font-size: 0.75rem; color: var(--muted); }
-.game-card-header .game-pnl { font-size: 1.1rem; font-weight: 700; font-family: 'Courier New', monospace; }
-.game-leg { display: grid; grid-template-columns: 1fr auto auto auto auto; gap: 12px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); }
-.game-leg:last-child { border-bottom: none; }
-.game-leg .leg-name { font-size: 0.85rem; }
-.game-leg .leg-name .leg-outcome { font-weight: 600; }
-.game-leg .leg-prices { font-family: 'Courier New', monospace; font-size: 0.85rem; text-align: right; }
-.game-leg .leg-pnl { font-family: 'Courier New', monospace; font-size: 0.9rem; font-weight: 600; text-align: right; min-width: 70px; }
-.game-leg .leg-size { font-size: 0.8rem; color: var(--muted); text-align: right; min-width: 60px; }
-.sell-btn { background: var(--red); color: #fff; border: none; border-radius: 6px; padding: 6px 14px; font-size: 0.75rem; font-weight: 700; cursor: pointer; white-space: nowrap; }
-.sell-btn:hover { opacity: 0.8; }
-.sell-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-@media(max-width:600px) {
-  .game-leg { grid-template-columns: 1fr auto auto; gap: 8px; padding: 8px 12px; }
-  .game-leg .leg-prices { font-size: 0.75rem; }
-  .game-leg .leg-size { display: none; }
-  .game-card-header { padding: 10px 12px; }
-}
 """
-
-
-def build_games_data(trades, funder=None):
-    """Build per-game data with live prices for open positions."""
-    if funder is None:
-        funder = PM_FUNDER
-    open_trades = [t for t in trades if t.get("filled") and t.get("result") is None and not t.get("dry_run")]
-
-    pm = fetch_pm_data(funder)
-    pm_positions = pm.get("positions", [])
-
-    # Build PM position lookup: conditionId:outcome → position data (with curPrice, size)
-    pm_lookup = {}
-    for p in pm_positions:
-        if sf(p.get("size", 0)) > 0.01:
-            key = (p.get("conditionId", "") + ":" + (p.get("outcome") or "")).lower()
-            pm_lookup[key] = p
-
-    # Match our trades with PM positions, group by event_slug
-    from collections import OrderedDict
-    games = OrderedDict()
-
-    for t in open_trades:
-        key = (t.get("condition_id", "") + ":" + (t.get("outcome") or "")).lower()
-        pm_pos = pm_lookup.get(key)
-        if not pm_pos:
-            continue  # position no longer exists on PM
-
-        slug = t.get("event_slug") or t.get("market_title", "unknown")[:30]
-        entry_price = sf(t.get("price", 0))
-        cur_price = sf(pm_pos.get("curPrice", 0))
-        shares = sf(pm_pos.get("size", 0))
-        cost = sf(pm_pos.get("initialValue", 0)) or (entry_price * shares)
-        cur_value = sf(pm_pos.get("currentValue", 0)) or (cur_price * shares)
-        token_id = pm_pos.get("asset", t.get("token_id", ""))
-
-        leg = {
-            "title": t.get("market_title", "?"),
-            "outcome": t.get("outcome", "?"),
-            "sport": t.get("sport", "?"),
-            "entry_price": entry_price,
-            "cur_price": cur_price,
-            "shares": shares,
-            "cost": cost,
-            "cur_value": cur_value,
-            "pnl": cur_value - cost,
-            "pnl_pct": ((cur_price / entry_price) - 1) * 100 if entry_price > 0 else 0,
-            "token_id": token_id,
-            "condition_id": t.get("condition_id", ""),
-            "age": fmt_age(t.get("timestamp")),
-        }
-
-        if slug not in games:
-            # Extract game name from slug: league-team1-team2-YYYY-MM-DD
-            game_name = slug.replace("-more-markets", "")
-            parts = game_name.split("-")
-            league = parts[0] if parts else "?"
-            # Find date part (YYYY-MM-DD at end)
-            date_idx = -1
-            for i, p in enumerate(parts):
-                if len(p) == 4 and p.isdigit():
-                    date_idx = i
-                    break
-            if date_idx > 0:
-                teams = " ".join(p.upper() for p in parts[1:date_idx])
-                date_part = "-".join(parts[date_idx:])
-            else:
-                teams = "-".join(parts[1:])
-                date_part = ""
-            games[slug] = {
-                "slug": slug,
-                "league": league,
-                "teams": teams,
-                "date": date_part,
-                "legs": [],
-                "total_cost": 0,
-                "total_value": 0,
-                "total_pnl": 0,
-            }
-
-        games[slug]["legs"].append(leg)
-        games[slug]["total_cost"] += leg["cost"]
-        games[slug]["total_value"] += leg["cur_value"]
-        games[slug]["total_pnl"] += leg["pnl"]
-
-    return list(games.values())
-
-
-def render_game_cards(trades, wallet_map, token="", funder=None):
-    """Render open positions grouped by game as cards with live P&L and sell buttons."""
-    games = build_games_data(trades, funder)
-
-    if not games:
-        return '<div class="empty">Geen open posities.</div>'
-
-    # Sort: live games first (largest absolute PnL), then by cost
-    games.sort(key=lambda g: -abs(g["total_pnl"]))
-
-    total_cost = sum(g["total_cost"] for g in games)
-    total_value = sum(g["total_value"] for g in games)
-    total_pnl = total_value - total_cost
-    pnl_color = "var(--green)" if total_pnl >= 0 else "var(--red)"
-
-    summary = f"""
-    <div class="kpi-row" style="margin-bottom:20px">
-      <div class="kpi-tile">
-        <div class="kpi-label">Open Games</div>
-        <div class="kpi-value">{len(games)}</div>
-      </div>
-      <div class="kpi-tile">
-        <div class="kpi-label">Deployed</div>
-        <div class="kpi-value">${total_cost:.2f}</div>
-      </div>
-      <div class="kpi-tile">
-        <div class="kpi-label">Huidige Waarde</div>
-        <div class="kpi-value">${total_value:.2f}</div>
-      </div>
-      <div class="kpi-tile">
-        <div class="kpi-label">Unrealized P&L</div>
-        <div class="kpi-value" style="color:{pnl_color}">${total_pnl:+.2f}</div>
-      </div>
-    </div>"""
-
-    prefix = f"/t/{token}" if token else ""
-    cards = ""
-    for g in games:
-        gpnl_color = "var(--green)" if g["total_pnl"] >= 0 else "var(--red)"
-        league_badge = f'<span class="badge sport">{g["league"]}</span>'
-
-        legs_html = ""
-        for leg in g["legs"]:
-            lpnl_color = "var(--green)" if leg["pnl"] >= 0 else "var(--red)"
-            arrow = "+" if leg["pnl_pct"] >= 0 else ""
-            price_change_color = "var(--green)" if leg["cur_price"] >= leg["entry_price"] else "var(--red)"
-
-            # Sell button — disable if price near 1.00 (awaiting resolution) or near 0 (worthless)
-            near_resolution = leg["cur_price"] > 0.95 or leg["cur_price"] < 0.05
-            if near_resolution:
-                sell_btn = f'<button class="sell-btn" disabled title="Wacht op resolutie">WAIT</button>'
-            else:
-                sell_btn = (
-                    f'<button class="sell-btn" onclick="sellLeg(this, \'{leg["token_id"]}\', {leg["shares"]:.1f}, '
-                    f'{leg["cur_price"]:.3f}, \'{leg["outcome"]} {leg["title"][:30]}\')">'
-                    f'SELL</button>'
-                )
-
-            legs_html += f"""
-            <div class="game-leg">
-              <div class="leg-name">
-                <span class="leg-outcome">{leg["outcome"]}</span>
-                <span class="muted" style="font-size:0.8rem"> {leg["title"][:45]}</span>
-              </div>
-              <div class="leg-prices">
-                <span class="muted">{leg["entry_price"]:.0%}</span>
-                <span style="color:{price_change_color}"> &rarr; {leg["cur_price"]:.0%}</span>
-              </div>
-              <div class="leg-pnl" style="color:{lpnl_color}">${leg["pnl"]:+.2f}<br><span style="font-size:0.7rem">{arrow}{leg["pnl_pct"]:.1f}%</span></div>
-              <div class="leg-size">{leg["shares"]:.0f}sh<br><span class="muted">${leg["cur_value"]:.2f}</span></div>
-              {sell_btn}
-            </div>"""
-
-        cards += f"""
-        <div class="game-card">
-          <div class="game-card-header">
-            <div>
-              {league_badge}
-              <span class="game-title">{g["teams"]}</span>
-              <span class="game-meta" style="margin-left:8px">{g["date"]}</span>
-            </div>
-            <div class="game-pnl" style="color:{gpnl_color}">${g["total_pnl"]:+.2f}</div>
-          </div>
-          {legs_html}
-        </div>"""
-
-    sell_js = """
-<script>
-async function sellLeg(btn, tokenId, shares, curPrice, label) {
-  if (!confirm('Verkoop ' + shares.toFixed(0) + ' shares ' + label + ' @ ' + (curPrice*100).toFixed(0) + 'ct?')) return;
-  btn.disabled = true;
-  btn.textContent = '...';
-  try {
-    const resp = await fetch(window.location.pathname.replace(/\\/games.*/, '/sell'), {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({token_id: tokenId, shares: shares, min_price: curPrice * 0.95})
-    });
-    const data = await resp.json();
-    if (data.ok) {
-      btn.textContent = 'SOLD $' + data.usdc.toFixed(2);
-      btn.style.background = 'var(--green)';
-      setTimeout(() => location.reload(), 2000);
-    } else {
-      alert('Sell failed: ' + data.error);
-      btn.disabled = false;
-      btn.textContent = 'SELL';
-    }
-  } catch(e) {
-    alert('Error: ' + e);
-    btn.disabled = false;
-    btn.textContent = 'SELL';
-  }
-}
-</script>"""
-
-    return summary + cards + sell_js
-
-
-def render_games_page(trades, wallet_map, token="", account="cannae"):
-    funder = GIYN_FUNDER if account == "giyn" else PM_FUNDER
-    if account == "giyn":
-        trades = load_trades_giyn()
-        wallet_map = parse_config_wallets_giyn()
-    body = f"""
-    <div class="section">
-      <div class="section-title">Live Games</div>
-      {render_game_cards(trades, wallet_map, token=token, funder=funder)}
-    </div>"""
-    return page_wrap("/games", body, token, account=account)
 
 
 def page_wrap(active_page, body_html, token="", account="cannae"):
@@ -1632,9 +1391,13 @@ def page_wrap(active_page, body_html, token="", account="cannae"):
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     prefix = f"/t/{token}" if token else ""
     pages = [
-        ("Home", "/"),
-        ("Games", "/games"),
+        ("Overview", "/"),
         ("Trades", "/trades"),
+        ("Wallets", "/wallets"),
+        ("Edge", "/edge"),
+        ("Ops", "/ops"),
+        ("Intel", "/intel"),
+        ("SSOT", "/ssot"),
         ("Settings", "/settings"),
     ]
     nav = ""
@@ -1642,14 +1405,23 @@ def page_wrap(active_page, body_html, token="", account="cannae"):
         cls = ' class="active"' if href == active_page else ""
         nav += f'<a href="{prefix}{href}?account={account}"{cls}>{label}</a>'
 
-    account_selector = ""
+    sel_cannae = ' selected' if account == 'cannae' else ''
+    sel_crypto5m   = ' selected' if account == 'crypto5m' else ''
+    account_selector = (
+        f'<select onchange="window.location.href=window.location.pathname+\'?account=\'+this.value"'
+        f' style="background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:6px;'
+        f'padding:4px 8px;font-size:0.8rem;cursor:pointer;margin-left:8px">'
+        f'<option value="cannae"{sel_cannae}>Cannae</option>'
+        f'<option value="crypto5m"{sel_crypto5m}>Crypto 5M</option>'
+        f'</select>'
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="nl">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  {"" if active_page in ("/settings", "/games") else '<meta http-equiv="refresh" content="30">'}
+  {"" if active_page == "/settings" else '<meta http-equiv="refresh" content="30">'}
   <title>Bottie — {active_page}</title>
   <style>{CSS}</style>
 </head>
@@ -1850,7 +1622,7 @@ def render_strategy_summary(wallet_map):
 
 
 def _load_cannae_slugs(service="bottie"):
-    """Parse game slugs from bot logs — all SIGNAL lines from any wallet."""
+    """Parse game slugs from bot logs (CANNAE GAMES output)."""
     import subprocess
     cannae_slugs = {}
     try:
@@ -1859,7 +1631,7 @@ def _load_cannae_slugs(service="bottie"):
             capture_output=True, text=True, timeout=10
         )
         for line in result.stdout.splitlines():
-            # Legacy: $   3538 | 7 legs (win+win+ou+ou+spread) | 15:15 UTC | win@5%+win@5%+draw@5% | es2-vld-bur-2026-03-28
+            # Match: $   3538 | 7 legs (win+win+ou+ou+spread) | 15:15 UTC | win@5%+win@5%+draw@5% | es2-vld-bur-2026-03-28
             if "legs (" in line and "|" in line:
                 parts = line.split("|")
                 if len(parts) >= 5:
@@ -1870,66 +1642,30 @@ def _load_cannae_slugs(service="bottie"):
                         amount = 0
                     legs = parts[1].strip()
                     sizing = parts[3].strip() if len(parts) > 3 else ""
-                    cannae_slugs[slug] = {"amount": amount, "legs": legs, "sizing": sizing, "wallet": "unknown"}
-            # New: SIGNAL: WalletName (79ct) | Will X win? | 123$ | ...
-            elif "SIGNAL:" in line and "|" in line:
-                try:
-                    sig_part = line.split("SIGNAL:")[1].strip()
-                    parts = sig_part.split("|")
-                    wallet_price = parts[0].strip()  # "NoSpreader (79ct)"
-                    wallet_name = wallet_price.split("(")[0].strip()
-                    question = parts[1].strip() if len(parts) > 1 else ""
-                    amount_str = parts[2].strip() if len(parts) > 2 else "0"
-                    try:
-                        amount = float(amount_str.replace("$", "").strip())
-                    except:
-                        amount = 0
-                    # Extract slug from question or use event_slug from later in the line
-                    slug = ""
-                    for p in parts:
-                        p = p.strip()
-                        if "-" in p and len(p.split("-")) >= 3 and "20" in p:
-                            slug = p
-                            break
-                    if not slug:
-                        # Try to find slug in the full line
-                        import re
-                        m = re.search(r'delay=\d+s\s*$', line)
-                        # Can't always get slug from SIGNAL, skip if not found
-                        continue
-                    if slug not in cannae_slugs:
-                        cannae_slugs[slug] = {"amount": amount, "legs": question[:40], "sizing": "", "wallet": wallet_name}
-                    else:
-                        # Append wallet name if different
-                        existing = cannae_slugs[slug].get("wallet", "")
-                        if wallet_name not in existing:
-                            cannae_slugs[slug]["wallet"] = f"{existing}+{wallet_name}"
-                except:
-                    pass
+                    cannae_slugs[slug] = {"amount": amount, "legs": legs, "sizing": sizing}
     except:
         pass
     return cannae_slugs
 
 def render_live_board(trades, service="bottie"):
-    """Live flight board — upcoming games in whitelisted leagues with wallet info."""
+    """Live flight board — games tracked by the given service."""
     import os
     svc_base = Path("/opt/bottie-test") if service == "bottie-test" else BASE_DIR
     schedule_file = svc_base / "data" / "schedule_cache.json"
 
-    # Whitelisted leagues + wallet mapping for ALL active wallets (weight > 0)
-    cfg_file = GIYN_CONFIG_FILE if service == "bottie-test" else CONFIG_FILE
+    # Load game slugs from bot logs for this service
+    cannae_slugs = _load_cannae_slugs(service)
+
+    # Whitelisted leagues for this service's source wallet (first watchlist entry)
+    cfg_file = CRYPTO5M_CONFIG_FILE if service == "bottie-test" else CONFIG_FILE
     whitelisted_leagues = set()
-    wallet_league_map = {}  # league -> [wallet_names]
     try:
         import yaml
         with open(cfg_file) as f:
             _cfg = yaml.safe_load(f) or {}
         _wl = _cfg.get("copy_trading", {}).get("watchlist", [])
-        for w in _wl:
-            if w.get("weight", 0) > 0:
-                for lg in (w.get("leagues") or []):
-                    whitelisted_leagues.add(lg)
-                    wallet_league_map.setdefault(lg, []).append(w.get("name", "?"))
+        if _wl:
+            whitelisted_leagues = set(_wl[0].get("leagues", []) or [])
     except Exception:
         pass
 
@@ -1939,48 +1675,55 @@ def render_live_board(trades, service="bottie"):
 
     now = datetime.now(timezone.utc)
 
-    # Show ALL upcoming games in whitelisted leagues (next 24h)
-    upcoming = []
+    # Build schedule lookup by slug
+    schedule_by_slug = {}
     for g in games:
-        slug = g.get("event_slug", "")
-        if not slug or "-more-markets" in slug:
+        s = g.get("event_slug", "")
+        if s:
+            schedule_by_slug[s] = g
+
+    # Only show games that Cannae has positions in
+    upcoming = []
+    skipped_non_whitelist = 0
+    for slug, info in cannae_slugs.items():
+        sched = schedule_by_slug.get(slug)
+        if sched:
+            try:
+                start = datetime.fromisoformat(sched["start_time"].replace("Z", "+00:00"))
+            except:
+                start = now + timedelta(hours=12)  # unknown kickoff
+        else:
+            start = now + timedelta(hours=12)  # not in schedule
+
+        diff_min = (start - now).total_seconds() / 60
+        if diff_min >= 24*60:
             continue
         league = slug.split("-")[0] if slug else ""
-        if whitelisted_leagues and league not in whitelisted_leagues:
+        in_whitelist = (not whitelisted_leagues) or (league in whitelisted_leagues)
+        if not in_whitelist:
+            skipped_non_whitelist += 1
             continue
-        try:
-            start = datetime.fromisoformat(g["start_time"].replace("Z", "+00:00"))
-        except:
-            continue
-        diff_min = (start - now).total_seconds() / 60
-        if diff_min < 0 or diff_min >= 24*60:
-            continue
-        # Which wallet covers this league?
-        wallets = wallet_league_map.get(league, ["?"])
-        upcoming.append((slug, g, start, diff_min, {"wallet": ", ".join(wallets)}))
+        upcoming.append((slug, sched, start, diff_min, info, in_whitelist))
 
     upcoming.sort(key=lambda x: x[2])
 
-    # Whitelist header — show active wallets with their leagues
+    # Whitelist header
     if whitelisted_leagues:
-        # Build wallet -> leagues mapping
-        wallet_leagues = {}
-        for lg, wallets in wallet_league_map.items():
-            for w in wallets:
-                wallet_leagues.setdefault(w, []).append(lg)
-        wallet_badges = ""
-        for wname, wleagues in sorted(wallet_leagues.items()):
-            league_list = ", ".join(sorted(wleagues))
-            wallet_badges += f'<span style="margin:2px 6px 2px 0;font-size:11px"><b>{wname}</b>: {league_list}</span>'
+        wl_sorted = sorted(whitelisted_leagues)
+        wl_badges = " ".join(
+            f'<span class="badge sport" style="margin:2px">{lg}</span>'
+            for lg in wl_sorted
+        )
         wl_header = f"""
         <div style="margin-bottom:8px;font-size:12px">
-          <span class="muted">Active wallets:</span> {wallet_badges}
+          <span class="muted">Whitelisted leagues ({len(wl_sorted)}):</span> {wl_badges}
+          {f'<span class="muted" style="margin-left:8px">— {skipped_non_whitelist} non-whitelist games hidden</span>' if skipped_non_whitelist else ''}
         </div>"""
     else:
         wl_header = ""
 
     if not upcoming:
-        return wl_header + '<div class="empty">Geen games in de pipeline.</div>'
+        return wl_header + '<div class="empty">Geen whitelisted Cannae games binnen 24h.</div>'
 
     # Check which event_slugs already have fills
     filled_slugs = set()
@@ -1989,11 +1732,16 @@ def render_live_board(trades, service="bottie"):
             filled_slugs.add(t["event_slug"])
 
     rows = ""
-    for slug, sched, start, diff_min, info in upcoming[:30]:
+    for slug, sched, start, diff_min, info, _in_wl in upcoming[:25]:
         title = sched.get("title", slug) if sched else slug
         league = slug.split("-")[0] if slug else ""
+        cannae_amt = info["amount"]
+        sizing = info["sizing"]
 
-        if diff_min < 0:
+        # Determine status
+        if diff_min < -120:
+            continue  # game ended long ago
+        elif diff_min < 0:
             status = f'<span style="color:#3fb950">LIVE {abs(diff_min):.0f}min</span>'
         elif diff_min < 10:
             status = f'<span style="color:#f85149;font-weight:700">T-{diff_min:.0f}min!</span>'
@@ -2005,25 +1753,34 @@ def render_live_board(trades, service="bottie"):
             hours = diff_min / 60
             status = f'<span class="muted">{hours:.1f}h</span>'
 
+        # CET/CEST time (proper DST handling)
         if CET:
             cet = start.astimezone(CET)
         else:
             cet = start + timedelta(hours=1)
         time_str = cet.strftime("%H:%M")
 
+        # Check if already filled
         is_filled = slug in filled_slugs
         fill_badge = ' <span class="badge green">FILLED</span>' if is_filled else ""
-        row_style = 'opacity:0.5' if is_filled else ''
 
-        wallet_name = info.get("wallet", "?")
-        wallet_badge = f'<span class="badge" style="background:#1a3a2a;color:#3fb950;font-size:11px">{wallet_name}</span>'
+        # Show sizing from bot logs (already computed)
+        if "SKIP" in sizing:
+            types_str = f'<span class="muted">SKIP</span>'
+        elif sizing:
+            types_str = sizing
+        else:
+            types_str = f'<span class="muted">—</span>'
+
+        row_style = 'opacity:0.5' if is_filled or "SKIP" in sizing else ''
 
         rows += f"""
         <tr style="{row_style}">
           <td style="font-weight:600">{time_str}</td>
           <td><span class="badge sport">{league}</span></td>
           <td>{title}{fill_badge}</td>
-          <td>{wallet_badge}</td>
+          <td>${cannae_amt:,.0f}</td>
+          <td>{types_str}</td>
           <td>{status}</td>
         </tr>"""
 
@@ -2032,7 +1789,7 @@ def render_live_board(trades, service="bottie"):
     <div class="table-wrap">
     <table>
       <thead><tr>
-        <th>CET</th><th>League</th><th>Game</th><th>Wallet</th><th>Status</th>
+        <th>CET</th><th>League</th><th>Game</th><th>Cannae $</th><th>Onze Types</th><th>Status</th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table>
@@ -2237,14 +1994,14 @@ def render_cannae_intel():
     </div>"""
 
 
-def render_giyn_section():
-    """Render GIYN (bottie-test) KPI row for the overview page."""
-    giyn_trades    = load_trades_giyn()
-    giyn_wallets   = parse_config_wallets_giyn()
-    giyn_kpis      = compute_kpis(giyn_trades, funder=GIYN_FUNDER)
-    giyn_open      = count_real_open_bets(giyn_trades, GIYN_FUNDER)
+def render_crypto5m_section():
+    """Render Crypto 5M (bottie-test) KPI row for the overview page."""
+    crypto5m_trades    = load_trades_crypto5m()
+    crypto5m_wallets   = parse_config_wallets_crypto5m()
+    crypto5m_kpis      = compute_kpis(crypto5m_trades, funder=CRYPTO5M_FUNDER)
+    crypto5m_open      = count_real_open_bets(crypto5m_trades, CRYPTO5M_FUNDER)
 
-    html = render_kpi_row(giyn_kpis, giyn_wallets, giyn_trades, funder=GIYN_FUNDER, label="GIYN (bottie-test)")
+    html = render_kpi_row(crypto5m_kpis, crypto5m_wallets, crypto5m_trades, funder=CRYPTO5M_FUNDER, label="Crypto 5M (bottie-test)")
 
     # Bot health: last STATUS line from bottie-test logs
     try:
@@ -2265,27 +2022,61 @@ def render_giyn_section():
 
 
 def render_overview(trades, wallet_map, account="cannae"):
+    if account == "crypto5m":
+        crypto5m_trades  = load_trades_crypto5m()
+        crypto5m_wallets = parse_config_wallets_crypto5m()
+        crypto5m_kpis    = compute_kpis(crypto5m_trades, funder=CRYPTO5M_FUNDER)
+        crypto5m_open    = count_real_open_bets(crypto5m_trades, CRYPTO5M_FUNDER)
+        body  = render_kpi_row(crypto5m_kpis, crypto5m_wallets, crypto5m_trades, funder=CRYPTO5M_FUNDER, label="Crypto 5M (bottie-test)")
+        body += f"""
+    <div class="section">
+      <div class="section-title">Dagelijkse P&L</div>
+      {render_daily_pnl(crypto5m_trades)}
+    </div>
+    <div class="section">
+      <div class="section-title">Live Board — Crypto 5M</div>
+      {render_live_board(crypto5m_trades, service="bottie-test")}
+    </div>
+    <div class="section">
+      <div class="section-title">Open Bets ({crypto5m_open})</div>
+      {render_open_bets(crypto5m_trades, crypto5m_wallets)}
+    </div>
+    <div class="section">
+      <div class="section-title">Per Sport</div>
+      {render_sport_grid(compute_sport_stats(crypto5m_trades))}
+    </div>
+    <div class="section">
+      <div class="section-title">Trade Log (laatste 30)</div>
+      {render_resolved_trades(crypto5m_trades, crypto5m_wallets, limit=30)}
+    </div>"""
+        return page_wrap("/", body, account=account)
+
     kpis = compute_kpis(trades, funder=PM_FUNDER, initial_bankroll=INITIAL_BANKROLL)
     sport_stats = compute_sport_stats(trades)
 
     body = render_bot_health(trades)
-    body += render_kpi_row(kpis, wallet_map, trades, funder=PM_FUNDER, label="Bottie")
+    body += render_kpi_row(kpis, wallet_map, trades, funder=PM_FUNDER, label="Cannae (bottie)")
+    body += f"""<div class="section">{render_crypto5m_section()}</div>"""
     body += f"""
-    <div class="section">
-      <div class="section-title">Open Bets ({count_real_open_bets(trades)})</div>
-      {render_open_bets(trades, wallet_map)}
-    </div>
-    <div class="section">
-      <div class="section-title">Live Board</div>
-      {render_live_board(trades, service="bottie")}
-    </div>
     <div class="section">
       <div class="section-title">Dagelijkse P&L</div>
       {render_daily_pnl(trades)}
     </div>
     <div class="section">
+      <div class="section-title">Live Board — Cannae</div>
+      {render_live_board(trades, service="bottie")}
+    </div>
+    <div class="section">
+      <div class="section-title">Open Bets ({count_real_open_bets(trades)})</div>
+      {render_open_bets(trades, wallet_map)}
+    </div>
+    <div class="section">
       <div class="section-title">Per Sport</div>
       {render_sport_grid(sport_stats)}
+    </div>
+    <div class="section">
+      <div class="section-title">Cannae Intelligence</div>
+      {render_cannae_intel()}
     </div>
     <div class="section">
       <div class="section-title">Trade Log (laatste 30)</div>
@@ -3444,7 +3235,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         _parsed = urlparse(page)
         page = _parsed.path
         account = parse_qs(_parsed.query).get("account", ["cannae"])[0]
-        if account not in ("cannae", "giyn"):
+        if account not in ("cannae", "crypto5m"):
             account = "cannae"
 
         if page == "/settings":
@@ -3461,38 +3252,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 import traceback
                 self._send_html(f"<pre>Error: {e}\n{traceback.format_exc()}</pre>", 500)
-        elif page == "/games":
-            try:
-                trades     = load_trades()
-                wallet_map = parse_config_wallets()
-                html = render_games_page(trades, wallet_map, token=token, account=account)
-                if token and f"/t/{token}" not in html:
-                    html = html.replace('href="/', f'href="/t/{token}/')
-                    html = html.replace("fetch('/", f"fetch('/t/{token}/")
-                self._send_html(html)
-            except Exception as e:
-                import traceback
-                self._send_html(f"<pre>Error: {e}\n{traceback.format_exc()}</pre>", 500)
-        elif page == "/api/games":
-            try:
-                trades = load_trades()
-                funder = GIYN_FUNDER if account == "giyn" else PM_FUNDER
-                games = build_games_data(trades, funder)
-                body = json.dumps(games).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", len(body))
-                self.end_headers()
-                self.wfile.write(body)
-            except Exception as e:
-                self.send_response(500)
-                self.end_headers()
         elif page in ("/", "/index.html", "/trades", "/wallets", "/edge", "/ops", "/strategy", "/intel"):
             try:
                 trades     = load_trades()
                 wallet_map = parse_config_wallets()
                 if page == "/trades":
                     html = render_trades_page(trades, wallet_map, account=account)
+                elif page == "/wallets":
+                    html = render_wallets_page(trades, wallet_map, account=account)
+                elif page == "/edge":
+                    html = render_edge_page(trades, wallet_map, account=account)
+                elif page == "/ops":
+                    html = render_ops_page(trades, wallet_map, account=account)
+                elif page == "/strategy":
+                    html = render_edge_page(trades, wallet_map, account=account)
+                elif page == "/intel":
+                    html = page_wrap("/intel", f"""
+    <div class="section">
+      <div class="section-title">Cannae Intelligence Report</div>
+      {render_cannae_intel()}
+    </div>""", token, account=account)
                 else:
                     html = render_overview(trades, wallet_map, account=account)
                 # Inject token into page_wrap calls that don't have it yet
@@ -3550,49 +3329,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 body = f"Stop failed: {e}".encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
-            self.send_header("Content-Length", len(body))
-            self.end_headers()
-            self.wfile.write(body)
-        elif page == "/sell":
-            import subprocess
-            try:
-                content_len = int(self.headers.get("Content-Length", 0))
-                raw = self.rfile.read(content_len) if content_len else b"{}"
-                data = json.loads(raw)
-                token_id = data.get("token_id", "")
-                shares = float(data.get("shares", 0))
-                min_price = float(data.get("min_price", 0.01))
-
-                if not token_id or shares <= 0:
-                    raise ValueError("token_id and shares required")
-
-                script = str(CODE_DIR / "scripts" / "sell_position.py")
-                result = subprocess.run(
-                    ["python3", script, token_id, str(shares), str(min_price)],
-                    capture_output=True, text=True, timeout=30,
-                    cwd=str(BASE_DIR),
-                )
-                resp = json.loads(result.stdout) if result.stdout.strip() else {"ok": False, "error": result.stderr or "No output"}
-
-                # Telegram notification on success
-                if resp.get("ok"):
-                    tg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-                    tg_chat = os.environ.get("TELEGRAM_CHAT_ID", "")
-                    if tg_token and tg_chat:
-                        msg = f"MANUAL SELL: {shares:.0f}sh @ {resp.get('price', 0):.0%} = ${resp.get('usdc', 0):.2f}"
-                        try:
-                            urllib.request.urlopen(urllib.request.Request(
-                                f"https://api.telegram.org/bot{tg_token}/sendMessage",
-                                data=f"chat_id={tg_chat}&text={msg}".encode(),
-                                headers={"Content-Type": "application/x-www-form-urlencoded"},
-                            ), timeout=5)
-                        except: pass
-
-                body = json.dumps(resp).encode()
-            except Exception as e:
-                body = json.dumps({"ok": False, "error": str(e)}).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", len(body))
             self.end_headers()
             self.wfile.write(body)
