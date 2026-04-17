@@ -59,6 +59,15 @@ WINDOW_LEAD_TIME = 10  # place orders 10s after window opens
 CANCEL_AFTER_END = 15  # cancel unfilled orders 15s after window ends
 LOOP_INTERVAL = 5  # main loop interval
 
+# Binance momentum skip-filter (2026-04-17):
+# Skip windows where |10-min BTC move| > threshold. Raw 72h data: 5 wins all had
+# m600 <= 0.125%, 66/177 losses had m600 > 0.15% -> skip saves ~$2,640/72h.
+# Rationale: sterke 10-min momentum = losende kant van ladder fills gegarandeerd,
+# orderbook reverseert niet in 5 min.
+BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=11"
+SKIP_MOVE_10M_THRESHOLD = 0.0015  # 0.15%
+BINANCE_TIMEOUT = 2.0
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -258,6 +267,28 @@ def get_bankroll() -> float:
     except Exception as e:
         log.warning(f"Bankroll check failed: {e}")
         return 0
+
+
+
+def should_skip_binance_momentum():
+    """Check Binance BTCUSDT last 10 1-min bars. Skip if |move| > threshold.
+    Returns (skip: bool, move_pct: float). Fails open on error.
+    """
+    try:
+        req = urllib.request.Request(
+            BINANCE_KLINES_URL,
+            headers={"User-Agent": "Bottie-fivemin/1"},
+        )
+        bars = json.loads(urllib.request.urlopen(req, timeout=BINANCE_TIMEOUT).read())
+        if not bars or len(bars) < 11:
+            return False, 0.0
+        open_10m_ago = float(bars[0][1])
+        close_now = float(bars[-2][4])
+        move = (close_now - open_10m_ago) / open_10m_ago
+        return abs(move) > SKIP_MOVE_10M_THRESHOLD, move * 100
+    except Exception as e:
+        log.debug(f"Binance skip check failed (fail-open): {e}")
+        return False, 0.0
 
 
 def place_orders(client, window: Window, shares: int) -> bool:
@@ -821,8 +852,16 @@ def main():
 
                 # Place orders shortly after window opens
                 if not w.orders_placed and WINDOW_LEAD_TIME < secs_since_start < 180:
-                    log.info(f"PLACING {w.coin} {w.title[:50]}")
-                    place_orders(client, w, 0)
+                    skip, move_pct = should_skip_binance_momentum()
+                    if skip:
+                        log.info(
+                            f"SKIP {w.coin} {w.title[:45]} — "
+                            f"Binance 10m move {move_pct:+.3f}% > {SKIP_MOVE_10M_THRESHOLD*100:.2f}%"
+                        )
+                        w.orders_placed = True  # don't retry
+                    else:
+                        log.info(f"PLACING {w.coin} {w.title[:50]} (bin_mv={move_pct:+.3f}%)")
+                        place_orders(client, w, 0)
 
                 # Check fills during window — every 10s for fast opposite-side cancel
                 if w.orders_placed and not w.resolved and secs_to_end > -60:
