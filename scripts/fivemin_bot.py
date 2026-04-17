@@ -65,7 +65,7 @@ LOOP_INTERVAL = 5  # main loop interval
 # Rationale: sterke 10-min momentum = losende kant van ladder fills gegarandeerd,
 # orderbook reverseert niet in 5 min.
 BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=11"
-SKIP_MOVE_10M_THRESHOLD = 0.0015  # 0.15%
+SKIP_MOVE_10M_THRESHOLD = 0.0013  # 0.13% — raw scan 24h/190 outcomes: max win at 0.125%, 0.13% skipt +15 losses vs 0.15%, 0 wins geraakt. Buffer dun (0.005%).
 BINANCE_TIMEOUT = 2.0
 
 logging.basicConfig(
