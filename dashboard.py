@@ -3757,7 +3757,7 @@ def render_5m_page(token="", account="cannae"):
         else:
             out = subprocess.check_output(
                 ["journalctl", "-u", "fivemin-bot", "--since", "24 hours ago",
-                 "--no-pager", "-o", "short-iso", "--grep", "FILL BTC"],
+                 "--no-pager", "-o", "short-iso", "--grep", "FILL BTC|SKIP BTC"],
                 timeout=15
             ).decode(errors="ignore")
             _journal_cache["data"] = out
@@ -3780,6 +3780,35 @@ def render_5m_page(token="", account="cannae"):
     total_fills = before_60 + after_60
     bet_per_side = 5.00
     saved_usd = after_60 * bet_per_side
+
+    # SKIP events from same cached journal output
+    skip_re = re.compile(r"(\S+)\s+.*SKIP BTC (Bitcoin Up or Down - [^—]+?)\s*—\s*Binance 10m move ([+-][\d.]+)%")
+    skipped = []
+    try:
+        for line in out.split("\n"):
+            m = skip_re.search(line)
+            if m:
+                ts_str, title, move = m.groups()
+                skipped.append({
+                    "ts": ts_str[:16].replace("T", " "),
+                    "title": title.strip().replace("Bitcoin Up or Down - ", "").replace(" ET", ""),
+                    "move": float(move),
+                })
+    except Exception: pass
+    skipped = skipped[-20:][::-1]
+    if skipped:
+        _rows = "".join(
+            '<div class="trade-row"><div class="trade-left">'
+            '<div class="trade-time">' + s["ts"] + '</div>'
+            '<div class="trade-title">' + s["title"] + '</div></div>'
+            '<div class="trade-right"><div class="result-pill skip">SKIP</div>'
+            '<div class="trade-pnl">{:+.3f}%</div></div></div>'.format(s["move"])
+            for s in skipped
+        )
+        skip_html = '<div class="section"><h2>Geskipte Windows (Binance filter)</h2>' + _rows + '</div>'
+    else:
+        skip_html = ""
+
 
     skim_pct_str = "0% (compound)"
     try:
@@ -3961,6 +3990,7 @@ def render_5m_page(token="", account="cannae"):
   .trade-title {{ color: #e5e7eb; font-size: 13px; margin-top: 2px; }}
   .trade-right {{ text-align: right; flex-shrink: 0; }}
   .result-pill {{ display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 700; letter-spacing: 0.5px; }}
+    .result-pill.skip {{ background: #334155; color: #cbd5e1; }}
   .result-pill.win {{ background: rgba(34,197,94,0.15); color: #22c55e; }}
   .result-pill.loss {{ background: rgba(239,68,68,0.15); color: #ef4444; }}
   .trade-pnl {{ font-size: 14px; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }}
@@ -4046,6 +4076,8 @@ def render_5m_page(token="", account="cannae"):
   <h2>Recente Trades</h2>
   {trades_html if trades_html else '<div class="empty">Nog geen trades</div>'}
 </div>
+
+{skip_html}
 """
 
     return page_wrap("/5m", body, token, account=account)
