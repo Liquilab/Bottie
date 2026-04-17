@@ -14,7 +14,7 @@ Usage:
     python3 fivemin_bot.py --shares 10    # custom share size
 """
 
-import json, os, sys, re, time, logging, urllib.request
+import json, os, sys, re, time, signal, logging, urllib.request
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from dataclasses import dataclass
@@ -28,7 +28,7 @@ GAMMA_URL = "https://gamma-api.polymarket.com"
 DATA_API = "https://data-api.polymarket.com"
 
 # Sizing: fixed USD per side, split across 3 tiers
-BET_USD_PER_SIDE = 10.00  # 2026-04-17 user-bumped 5→10. Eerdere council waarschuwing ($8 = 10× HARVESTER eff, 77% capital util op $1,428) blijft van toepassing.
+BET_USD_PER_SIDE = 40.00  # 2026-04-17 08:55 CET user-bumped 10→40 voor 2u test (revert 10:55)
 MIN_SHARES = 5  # PM minimum
 
 # 3-tier bid ladder — catcht shallow crashes (2-3c) en deep crashes (1c)
@@ -766,6 +766,16 @@ def update_stats():
 def main():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+    # SIGTERM/SIGINT -> graceful cleanup (2026-04-17 bug fix:
+    # restart mid-window left orders live on CLOB → orphan fills like the
+    # 2:55-3:00 Down 233sh position that cost $5.99 this morning)
+    _shutdown = {"flag": False}
+    def _sig(signum, frame):
+        _shutdown["flag"] = True
+        log.info(f"Received signal {signum} — will cleanup on next loop iter")
+    signal.signal(signal.SIGTERM, _sig)
+    signal.signal(signal.SIGINT, _sig)
+
     log.info("=" * 60)
     log.info(f"5-Minute Crypto Bot {'(DRY RUN)' if DRY_RUN else 'LIVE'}")
     tier_str = " + ".join(f"{int(p*100)}% @ {int(pr*100)}c" for pr, p in TIERS)
@@ -845,19 +855,30 @@ def main():
             if cycle % 60 == 0 and cycle > 0:
                 update_stats()
 
-        except KeyboardInterrupt:
+        except Exception as e:
+            log.error(f"Loop error: {e}")
+
+        if _shutdown["flag"]:
             log.info("Shutting down — cancelling all open orders")
             if client and not DRY_RUN:
                 for w in active_windows.values():
                     if w.orders_placed and not w.resolved:
-                        cancel_orders(client, w)
-            update_stats()
+                        try:
+                            cancel_orders(client, w)
+                        except Exception as e:
+                            log.error(f"cleanup cancel_orders failed: {e}")
+            try:
+                update_stats()
+            except Exception:
+                pass
             break
-        except Exception as e:
-            log.error(f"Loop error: {e}")
 
         cycle += 1
-        time.sleep(LOOP_INTERVAL)
+        # Interruptible sleep: wake on signal instead of waiting full interval.
+        for _ in range(int(LOOP_INTERVAL)):
+            if _shutdown["flag"]:
+                break
+            time.sleep(1)
 
 
 if __name__ == "__main__":
