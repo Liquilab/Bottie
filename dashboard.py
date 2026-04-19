@@ -48,6 +48,7 @@ import urllib.request, urllib.error, time
 
 _pm_caches = {}
 _journal_cache = {"data": None, "ts": 0}  # 30s TTL for fivemin-bot journalctl  # per-funder cache: {funder: {"data": ..., "ts": ...}}
+_binance_cache = {"data": None, "ts": 0}  # 30s TTL for BTC 5m klines
 _lb_cache   = {}  # per-address lb-api cache: {address: {"val": ..., "ts": ...}}
 
 def fetch_pm_data(funder=None):
@@ -3696,6 +3697,243 @@ def render_ssot_page(token="", account="cannae"):
     return page_wrap("/ssot", body, token, account=account)
 
 
+def render_market_vitals():
+    """Live BTC volatility + volume panel for /5m page.
+
+    Fetches last 15 Binance BTCUSDT 5m bars with 30s cache. Shows:
+    - median range % vs 30d baseline (0.131%)
+    - median volume (BTC)
+    - regime classification per bar (V1 low / V2 mid-low / V3 mid-high / V4 high)
+    """
+    import time as _t, urllib.request as _ur, json as _json, statistics as _st
+    from datetime import datetime as _dt, timezone as _tz
+    now = _t.time()
+    if _binance_cache["data"] is not None and now - _binance_cache["ts"] < 30:
+        bars = _binance_cache["data"]
+    else:
+        try:
+            req = _ur.Request(
+                "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=15",
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            bars = _json.loads(_ur.urlopen(req, timeout=5).read())
+            _binance_cache["data"] = bars
+            _binance_cache["ts"] = now
+        except Exception as e:
+            return f'<div class="section"><h2>Market Vitals</h2><div class="empty">Binance fetch failed: {e}</div></div>'
+    if not bars:
+        return ""
+    rows = []
+    ranges = []
+    vols = []
+    for b in bars:
+        o, h, l, c, v = float(b[1]), float(b[2]), float(b[3]), float(b[4]), float(b[5])
+        r_pct = (h - l) / o * 100 if o else 0
+        ranges.append(r_pct); vols.append(v)
+        ts = _dt.fromtimestamp(b[0] / 1000, tz=_tz.utc).strftime("%H:%M")
+        # regime bucket
+        if r_pct < 0.08: bucket, bcol = "V1", "#ef4444"      # low-vol = bad
+        elif r_pct < 0.15: bucket, bcol = "V2", "#10b981"    # mid-low = good
+        elif r_pct < 0.25: bucket, bcol = "V3", "#10b981"    # mid-high = good
+        else: bucket, bcol = "V4", "#f59e0b"                 # high = mixed
+        rows.append((ts, c, r_pct, v, bucket, bcol))
+    med_range = _st.median(ranges)
+    med_vol = _st.median(vols)
+    baseline = 0.131  # 30d p50
+    rel_pct = int(100 * med_range / baseline)
+    regime_col = "#10b981" if 80 <= rel_pct <= 150 else ("#ef4444" if rel_pct < 80 else "#f59e0b")
+    # current bar
+    last = rows[-1]
+    # build bar list HTML
+    bar_html = ""
+    for ts, c, r_pct, v, bucket, bcol in rows[-10:]:
+        bar_html += f'''<tr>
+<td style="padding:3px 8px;color:#9ca3af;font-size:11px">{ts}</td>
+<td style="padding:3px 8px;color:#fff;font-size:11px;text-align:right">${c:,.0f}</td>
+<td style="padding:3px 8px;text-align:right;font-size:11px;color:{bcol};font-weight:600">{r_pct:.3f}%</td>
+<td style="padding:3px 8px;text-align:right;font-size:11px;color:#9ca3af">{v:.1f}</td>
+<td style="padding:3px 8px;text-align:center;font-size:10px;color:{bcol}">{bucket}</td>
+</tr>'''
+    return f"""
+<div class="section" style="background:#0a0a0a">
+  <h2>Market Vitals (BTC 5m)</h2>
+  <div style="color:#6b7280;font-size:11px;margin-bottom:12px">
+    Live Binance · 30s cache · baseline = 30d median 0.131%
+  </div>
+  <div class="kpi-strip">
+    <div class="kpi-item">
+      <div class="kpi-item-label">Median Range</div>
+      <div class="kpi-item-value" style="color:{regime_col}">{med_range:.3f}%</div>
+      <div class="kpi-item-sub">{rel_pct}% of baseline</div>
+    </div>
+    <div class="kpi-item">
+      <div class="kpi-item-label">Median Volume</div>
+      <div class="kpi-item-value">{med_vol:.1f}</div>
+      <div class="kpi-item-sub">BTC / 5m bar</div>
+    </div>
+    <div class="kpi-item">
+      <div class="kpi-item-label">Last Bar</div>
+      <div class="kpi-item-value" style="color:{last[5]}">{last[4]}</div>
+      <div class="kpi-item-sub">{last[2]:.3f}% · ${last[1]:,.0f}</div>
+    </div>
+  </div>
+  <div style="margin-top:14px">
+    <table style="width:100%;border-collapse:collapse">
+      <thead><tr style="color:#6b7280;font-size:10px;text-transform:uppercase">
+        <th style="text-align:left;padding:3px 8px">Time</th>
+        <th style="text-align:right;padding:3px 8px">Price</th>
+        <th style="text-align:right;padding:3px 8px">Range</th>
+        <th style="text-align:right;padding:3px 8px">Vol BTC</th>
+        <th style="text-align:center;padding:3px 8px">Regime</th>
+      </tr></thead>
+      <tbody>{bar_html}</tbody>
+    </table>
+    <div style="color:#6b7280;font-size:10px;margin-top:8px">
+      V1 &lt;0.08% (dead/bad) · V2 0.08-0.15% · V3 0.15-0.25% · V4 &gt;0.25%
+    </div>
+  </div>
+</div>
+"""
+
+
+def render_hv_intel():
+    """HV Intelligence section for /5m page. Reads data/analytics.json.
+
+    Returns HTML string to be spliced into the 5m page body. Returns empty if
+    analytics.json missing (graceful degradation — M1 scope).
+    """
+    import json
+    from pathlib import Path
+
+    # Try VPS path first, then local
+    candidates = [Path("/opt/bottie-test/data/analytics.json"),
+                  Path("/opt/bottie/data/analytics.json"),
+                  Path("data/analytics.json")]
+    src = next((p for p in candidates if p.exists()), None)
+    if not src:
+        return ""
+    try:
+        A = json.loads(src.read_text())
+    except Exception:
+        return ""
+
+    s = A.get("summary", {})
+    span = A.get("data_span", {})
+    per_coin_hv = A.get("per_coin_hv", {})
+    per_coin_bot = A.get("per_coin_bot", {})
+    joined = A.get("per_window_join", [])[:10]
+
+    # Summary row
+    def fmt_pnl(v):
+        if v is None: return "—"
+        col = "#10b981" if v >= 0 else "#ef4444"
+        return f'<span style="color:{col};font-weight:600">{"+"if v>=0 else ""}${v:,.0f}</span>'
+    def fmt_roi(v):
+        if v is None: return "—"
+        col = "#10b981" if v >= 0 else "#ef4444"
+        return f'<span style="color:{col}">{v:+.1f}%</span>'
+
+    hv_pnl = s.get("hv_total_pnl")
+    bot_pnl = s.get("bot_total_pnl")
+    delta = (hv_pnl or 0) - (bot_pnl or 0)
+
+    # Per-coin table
+    coins = sorted(set(list(per_coin_hv.keys()) + list(per_coin_bot.keys())))
+    rows = ""
+    for c in coins:
+        h = per_coin_hv.get(c, {})
+        b = per_coin_bot.get(c, {})
+        rows += f"""
+        <tr>
+          <td style="padding:6px 8px;color:#fff;text-transform:uppercase">{c}</td>
+          <td style="padding:6px 8px;text-align:right">{fmt_pnl(h.get('pnl'))}</td>
+          <td style="padding:6px 8px;text-align:right;color:#9ca3af">{fmt_roi(h.get('roi_pct'))}</td>
+          <td style="padding:6px 8px;text-align:right;color:#9ca3af">{h.get('n','—')}</td>
+          <td style="padding:6px 8px;text-align:right;border-left:1px solid #1f2937">{fmt_pnl(b.get('pnl'))}</td>
+          <td style="padding:6px 8px;text-align:right;color:#9ca3af">{fmt_roi(b.get('roi_pct'))}</td>
+          <td style="padding:6px 8px;text-align:right;color:#9ca3af">{b.get('n','—')}</td>
+        </tr>"""
+
+    # Recent shared windows
+    joined_rows = ""
+    for j in joined:
+        d = (j.get("delta") or 0)
+        dcol = "#10b981" if d >= 0 else "#ef4444"
+        joined_rows += f"""
+        <tr>
+          <td style="padding:4px 8px;color:#9ca3af;font-size:11px">{j.get('date')}</td>
+          <td style="padding:4px 8px;color:#fff;text-transform:uppercase;font-size:11px">{j.get('coin')}</td>
+          <td style="padding:4px 8px;text-align:right;font-size:11px">{fmt_pnl(j.get('hv_pnl'))}</td>
+          <td style="padding:4px 8px;text-align:right;font-size:11px">{fmt_pnl(j.get('bot_pnl'))}</td>
+          <td style="padding:4px 8px;text-align:right;color:{dcol};font-weight:600;font-size:11px">{"+"if d>=0 else ""}${d:,.0f}</td>
+        </tr>"""
+
+    date_range = span.get("hv_date_range") or []
+    range_str = f"{date_range[0]} → {date_range[1]}" if len(date_range) == 2 and all(date_range) else "—"
+    n_shared = span.get("windows_in_both", 0)
+
+    return f"""
+<div class="section" style="background:#0a0a0a">
+  <h2>HV Intelligence</h2>
+  <div style="color:#6b7280;font-size:11px;margin-bottom:12px">
+    Data: {span.get('hv_windows', 0)} HV windows · {span.get('bot_windows', 0)} bot windows · {n_shared} shared · {range_str}
+  </div>
+
+  <div class="kpi-strip">
+    <div class="kpi-item">
+      <div class="kpi-item-label">HV P&L</div>
+      <div class="kpi-item-value">{fmt_pnl(hv_pnl)}</div>
+      <div class="kpi-item-sub">{fmt_roi(s.get('hv_roi_pct'))} · {s.get('hv_wr_pct','—')}% WR</div>
+    </div>
+    <div class="kpi-item">
+      <div class="kpi-item-label">Bot P&L</div>
+      <div class="kpi-item-value">{fmt_pnl(bot_pnl)}</div>
+      <div class="kpi-item-sub">{fmt_roi(s.get('bot_roi_pct'))} · {s.get('bot_wr_pct','—')}% WR</div>
+    </div>
+    <div class="kpi-item">
+      <div class="kpi-item-label">HV − Bot</div>
+      <div class="kpi-item-value">{fmt_pnl(delta)}</div>
+      <div class="kpi-item-sub" style="color:#6b7280">opportunity gap</div>
+    </div>
+  </div>
+
+  <div style="margin-top:16px">
+    <div style="color:#9ca3af;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Per coin</div>
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead>
+        <tr style="color:#6b7280;font-size:10px;text-transform:uppercase">
+          <th style="text-align:left;padding:4px 8px">Coin</th>
+          <th style="text-align:right;padding:4px 8px">HV P&L</th>
+          <th style="text-align:right;padding:4px 8px">ROI</th>
+          <th style="text-align:right;padding:4px 8px">N</th>
+          <th style="text-align:right;padding:4px 8px;border-left:1px solid #1f2937">Bot P&L</th>
+          <th style="text-align:right;padding:4px 8px">ROI</th>
+          <th style="text-align:right;padding:4px 8px">N</th>
+        </tr>
+      </thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </div>
+
+  <div style="margin-top:16px">
+    <div style="color:#9ca3af;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Recent shared windows (HV vs Bot)</div>
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead>
+        <tr style="color:#6b7280;font-size:10px;text-transform:uppercase">
+          <th style="text-align:left;padding:4px 8px">Date</th>
+          <th style="text-align:left;padding:4px 8px">Coin</th>
+          <th style="text-align:right;padding:4px 8px">HV</th>
+          <th style="text-align:right;padding:4px 8px">Bot</th>
+          <th style="text-align:right;padding:4px 8px">Δ</th>
+        </tr>
+      </thead>
+      <tbody>{joined_rows}</tbody>
+    </table>
+  </div>
+</div>
+"""
+
+
 def render_5m_page(token="", account="cannae"):
     """BTC 5M bot dashboard — mobile-first redesign."""
     import subprocess, re
@@ -3868,6 +4106,16 @@ def render_5m_page(token="", account="cannae"):
             """
     else:
         pos_html = '<div class="empty">Geen open posities</div>'
+
+    # Market Vitals (live BTC vol/volume from Binance) + HV Intelligence analytics
+    try:
+        market_vitals_html = render_market_vitals()
+    except Exception as e:
+        market_vitals_html = f'<!-- render_market_vitals failed: {e} -->'
+    try:
+        hv_intel_html = render_hv_intel()
+    except Exception as e:
+        hv_intel_html = f'<!-- render_hv_intel failed: {e} -->'
 
     # Recent trades
     trades_html = ""
@@ -4067,10 +4315,14 @@ def render_5m_page(token="", account="cannae"):
   </div>
 </div>
 
+{market_vitals_html}
+
 <div class="section">
   <h2>Open Posities</h2>
   {pos_html}
 </div>
+
+{hv_intel_html}
 
 <div class="section">
   <h2>Recente Trades</h2>

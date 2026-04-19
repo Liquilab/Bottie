@@ -18,6 +18,21 @@
 - **Exit:** hold to resolution (5 min window close) — auto-redeem via `ralph.py` cron elke 15 min
 - **Skim:** 0% (compound-first tot bankroll > $1,500)
 
+### ⚠️ KRITIEKE RESOLUTION MECHANICS — LEZEN VOOR ELKE P&L ANALYSE
+
+**Na elk 5m window resolvet de markt volledig. Er zijn 0 shares in wallet na resolution.**
+
+- **Winnende side shares** → auto-redeemed naar $1/share door `ralph.py` (cron 15 min). Shares verdwijnen uit wallet, USDC komt binnen.
+- **Verliezende side shares** → resolven naar $0. Shares verdwijnen ook uit wallet (geen waarde, niks te redeemen).
+- **Einde van elk window (+15 min ralph run): 0 shares van dat window overblijven.**
+
+**Gevolgen voor analyse:**
+
+1. **`bankroll` reading = complete P&L op dat moment.** Er is GEEN "open unresolved position value" gap te verklaren. Als bankroll = $1,017, dan is $1,017 al het geld.
+2. **"Shares still in wallet" = NOOIT losers.** Fout denken: "178k shares in wallet zijn verlies-tickets". Correct: die shares zijn al resolved en weg. Resterende shares in /positions API = alleen **niet-geredeemde winnaars** wachtend op ralph.py.
+3. **Activity API netto-cashflow MOET matchen met bankroll-delta.** Als gap verschijnt → bug zoeken in: (a) USDC transfers out of wallet, (b) activity API gemiste events, (c) ralph.py achterstallig met redemption. NIET "open shares" als verklaring.
+4. **24h bankroll delta = 24h P&L, punt uit.** Geen unrealized component mogelijk.
+
 ### Waarom geen copy trading meer
 
 1. **Sport-copy edges droogden op** (Cannae voetbal W15-W16, Elkmonkey, ELK)

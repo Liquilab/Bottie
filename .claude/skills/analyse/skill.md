@@ -9,6 +9,23 @@ Haalt actuele data op van de VPS, analyseert per dimensie met betrouwbaarheidsin
 
 **Verschil met /check:** `/check` is een snelle operationele health check (draait de bot? tradeert hij?). `/analyse` is een diepgaande statistische analyse met CI's, kruistabellen, en filter simulaties. Gebruik `/check` dagelijks, `/analyse` wekelijks of bij strategie-beslissingen.
 
+---
+
+## ⚠️ KRITIEKE RESOLUTION MECHANICS (lezen vóór elke P&L claim)
+
+Elk 5m BTC Up/Down window resolvet compleet. Binnen ~15 min (ralph.py cron) zijn er **0 shares in wallet** van dat window:
+- Winners → auto-redeemed naar $1/share (USDC binnen)
+- Losers → resolven naar $0 en verdwijnen
+
+**Gevolgen voor analyse:**
+- `bankroll` (USDC balance) = **complete P&L** op dat moment. Geen "unrealized" / "open position" component.
+- Periode bankroll delta = **echte** periode P&L, punt uit.
+- Activity API netto-cashflow (BUY − SELL − REDEEM) MOET matchen bankroll delta. Gap = bug (USDC transfer out, gemiste events, ralph achterstallig) — NOOIT "open shares" als verklaring.
+- `/positions` API shares = alleen **niet-geredeemde winnaars** wachtend op ralph. Nooit losers.
+- `closed-positions` `realizedPnl` = SSOT voor historische P&L per window.
+
+**Fout voorbeeld (NIET doen):** "178k shares in wallet = losers, verklaart drawdown" ← shares bestaan niet meer na resolution.
+
 **Gebaseerd op:** agency-agents/support-analytics-reporter (aangepast voor Polymarket trading)
 
 ---

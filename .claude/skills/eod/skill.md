@@ -4,6 +4,22 @@ Maakt een compacte dagafsluiting die geoptimaliseerd is voor de `/morning` brief
 
 ---
 
+## ⚠️ KRITIEKE RESOLUTION MECHANICS (lezen vóór elke P&L claim)
+
+Elk 5m BTC Up/Down window resolvet compleet. Binnen ~15 min (ralph.py cron) zijn er **0 shares in wallet** van dat window:
+- Winners → auto-redeemed naar $1/share (USDC binnen)
+- Losers → resolven naar $0 en verdwijnen
+
+**Gevolgen:**
+- `bankroll` (USDC balance) = **complete P&L**. Geen "unrealized" of "open position" component.
+- 24h bankroll delta = 24h **echte** P&L, punt uit.
+- Activity API netto-cashflow (BUY − SELL − REDEEM) MOET matchen met bankroll delta. Gap = bug (USDC transfer out, gemiste events, ralph achterstallig) — NOOIT "open shares" als verklaring.
+- /positions API shares = alleen **niet-geredeemde winnaars** wachtend op ralph. Nooit losers (die bestaan niet meer).
+
+**Fout voorbeeld (NIET doen):** "178k shares in wallet = losers, verklaart de drawdown" ← shares bestaan niet meer na resolution.
+
+---
+
 ## Gebruik
 
 ```

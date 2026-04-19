@@ -11,6 +11,16 @@ Bankroll management en goal tracking. Monte Carlo simulatie voor risk of ruin. C
 
 ---
 
+## ⚠️ KRITIEKE RESOLUTION MECHANICS
+
+Elk 5m BTC Up/Down window resolvet compleet. Binnen ~15 min (ralph.py cron) zijn er **0 shares in wallet** van dat window. Winners → $1/share USDC. Losers → $0 en weg.
+
+- `bankroll` (USDC balance) = **complete P&L**. Geen "unrealized" gap, geen open position value.
+- Bankroll delta over elke periode = echte P&L in die periode. Projecties moeten hierop gebaseerd zijn, niet op share-counting.
+- Monte Carlo / risk of ruin: gebruik gerealiseerde trade outcomes uit `closed-positions` `realizedPnl`, niet `curPrice` (onbetrouwbaar op resolved markets per memory).
+
+---
+
 ## Gebruik
 
 ```
